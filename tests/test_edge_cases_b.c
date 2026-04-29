@@ -2436,6 +2436,270 @@ static int test_resize_sub_4(void) {
 }
 
 // ============================================================================
+// 54. Delete immediately before prophylactic barrier
+// ============================================================================
+
+static int test_delete_before_prophylactic(void) {
+    printf("Test: delete immediately before prophylactic barrier...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert 10 colliding entries, compact to place prophylactic tombstones */
+    int vals[10];
+    for (int i = 0; i < 10; i++) {
+        char k[8]; snprintf(k, sizeof(k), "bp%d", i);
+        vals[i] = i;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+    ht_compact(t);
+
+    /* Delete entries near prophylactic barriers —
+     * forward scan should hit barrier and stop */
+    for (int i = 0; i < 3; i++) {
+        char k[8]; snprintf(k, sizeof(k), "bp%d", i);
+        assert(ht_remove(t, k, strlen(k)));
+    }
+
+    /* Verify */
+    for (int i = 0; i < 10; i++) {
+        char k[8]; snprintf(k, sizeof(k), "bp%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (i < 3) assert(v == NULL);
+        else assert(v != NULL && *v == i);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 55. Large spill lane surviving resize
+// ============================================================================
+
+static int test_large_spill_resize(void) {
+    printf("Test: large spill lane surviving resize...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75,
+                        .min_load_factor = 0.0, .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, zero_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert 30 spill entries — spill lane must grow */
+    int vals[30];
+    for (int i = 0; i < 30; i++) {
+        char k[8]; snprintf(k, sizeof(k), "ls%d", i);
+        vals[i] = i * 11;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Force resize */
+    ht_resize(t, 256);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 30);
+    assert(st.capacity >= 256);
+
+    /* Verify all spill entries survived */
+    for (int i = 0; i < 30; i++) {
+        char k[8]; snprintf(k, sizeof(k), "ls%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL && *v == i * 11);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 56. ht_inc producing negative values
+// ============================================================================
+
+static int test_inc_negative_results(void) {
+    printf("Test: ht_inc producing negative intermediate values...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Start at 10, decrement to -5 */
+    int64_t r = ht_inc(t, "neg", 3, 10);
+    assert(r == 10);
+    r = ht_inc(t, "neg", 3, -8);
+    assert(r == 2);
+    r = ht_inc(t, "neg", 3, -7);
+    assert(r == -5);
+
+    const int64_t *v = ht_find(t, "neg", 3, NULL);
+    assert(v != NULL && *v == -5);
+
+    /* Increment back up */
+    r = ht_inc(t, "neg", 3, 100);
+    assert(r == 95);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 57. Remove nonexistent from spill lane
+// ============================================================================
+
+static int test_remove_nonexistent_spill(void) {
+    printf("Test: remove nonexistent from spill lane...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, zero_hash, NULL, NULL);
+    assert(t != NULL);
+
+    int v = 1;
+    ht_insert(t, "a", 1, &v, sizeof(int));
+
+    /* Remove nonexistent key from spill */
+    assert(!ht_remove(t, "b", 1));
+    assert(!ht_remove(t, "c", 1));
+
+    /* Original still present */
+    const int *r = ht_find(t, "a", 1, NULL);
+    assert(r != NULL && *r == 1);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 58. Multiple clear + reinsert with heterogeneous sizes
+// ============================================================================
+
+static int test_clear_heterogeneous_arena(void) {
+    printf("Test: multiple clear + reinsert with heterogeneous sizes...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    for (int round = 0; round < 3; round++) {
+        /* Insert with varying sizes */
+        const char *longval = "ABCDEFGHIJKLMNOPQRST";  /* 20 bytes */
+        int shortval = round * 10;
+        ht_insert(t, "long", 4, longval, strlen(longval));
+        ht_insert(t, "s", 1, &shortval, sizeof(int));
+        char bigkey[100];
+        memset(bigkey, 'X', 99);
+        bigkey[99] = '\0';
+        ht_insert(t, bigkey, 99, &shortval, sizeof(int));
+
+        /* Verify */
+        size_t vl = 0;
+        const char *r = ht_find(t, "long", 4, &vl);
+        assert(r != NULL && vl == strlen(longval));
+        assert(memcmp(r, longval, vl) == 0);
+
+        const int *ri = ht_find(t, "s", 1, NULL);
+        assert(ri != NULL && *ri == round * 10);
+
+        ht_clear(t);
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 59. Full _with_hash lifecycle (insert, find, remove, find)
+// ============================================================================
+
+static int test_with_hash_lifecycle(void) {
+    printf("Test: full _with_hash lifecycle...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert via _with_hash */
+    int v = 42;
+    assert(ht_insert_with_hash(t, 100, "k1", 2, &v, sizeof(int)));
+    assert(ht_insert_with_hash(t, 200, "k2", 2, &v, sizeof(int)));
+    assert(ht_insert_with_hash(t, 0,   "k3", 2, &v, sizeof(int)));  /* spill */
+
+    /* Find via _with_hash */
+    const int *r;
+    r = ht_find_with_hash(t, 100, "k1", 2, NULL);
+    assert(r != NULL && *r == 42);
+    r = ht_find_with_hash(t, 200, "k2", 2, NULL);
+    assert(r != NULL && *r == 42);
+    r = ht_find_with_hash(t, 0, "k3", 2, NULL);
+    assert(r != NULL && *r == 42);
+
+    /* Remove via _with_hash */
+    assert(ht_remove_with_hash(t, 100, "k1", 2));
+    assert(ht_remove_with_hash(t, 0, "k3", 2));
+
+    /* Verify removed */
+    assert(ht_find_with_hash(t, 100, "k1", 2, NULL) == NULL);
+    assert(ht_find_with_hash(t, 0, "k3", 2, NULL) == NULL);
+    r = ht_find_with_hash(t, 200, "k2", 2, NULL);
+    assert(r != NULL);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 60. insert_with_hash with colliding hash, then find_all
+// ============================================================================
+
+static int test_with_hash_colliding_find_all(void) {
+    printf("Test: insert_with_hash colliding + find_all...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert 20 keys all with hash=77 */
+    int vals[20];
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "fh%d", i);
+        vals[i] = i * 5;
+        assert(ht_insert_with_hash(t, 77, k, strlen(k), &vals[i], sizeof(int)));
+    }
+
+    /* find_all(77) should return all 20 */
+    g_collect_count = 0;
+    memset(g_collect_vals, 0, sizeof(g_collect_vals));
+    ht_find_all(t, 77, collect_val_cb, NULL);
+    assert(g_collect_count == 20);
+
+    /* Sort and verify */
+    int sorted[20];
+    memcpy(sorted, g_collect_vals, 20 * sizeof(int));
+    for (int i = 0; i < 20; i++)
+        for (int j = i + 1; j < 20; j++)
+            if (sorted[i] > sorted[j]) { int tmp = sorted[i]; sorted[i] = sorted[j]; sorted[j] = tmp; }
+    for (int i = 0; i < 20; i++)
+        assert(sorted[i] == i * 5);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -2511,9 +2775,18 @@ int main(void) {
     fails += test_compact_clear_reinsert();
     fails += test_resize_sub_4();
 
+    // New tests (54-60)
+    fails += test_delete_before_prophylactic();
+    fails += test_large_spill_resize();
+    fails += test_inc_negative_results();
+    fails += test_remove_nonexistent_spill();
+    fails += test_clear_heterogeneous_arena();
+    fails += test_with_hash_lifecycle();
+    fails += test_with_hash_colliding_find_all();
+
     printf("\n");
     if (fails == 0) {
-        printf("All edge case B tests passed! (53/53)\n");
+        printf("All edge case B tests passed! (60/60)\n");
     } else {
         printf("%d test(s) FAILED!\n", fails);
     }

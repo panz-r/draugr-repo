@@ -2220,6 +2220,264 @@ static int test_stats_null_output(void) {
 }
 
 // ============================================================================
+// 55. ht_inc with hash=1 (spill lane, one_hash)
+// ============================================================================
+
+static int test_inc_spill_hash_one(void) {
+    printf("Test: ht_inc with hash=1 (spill lane)...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, one_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert with hash=1 (spill lane) */
+    int v = 10;
+    ht_insert(t, "x", 1, &v, sizeof(int));
+
+    /* ht_inc on "x" — one_hash recomputes hash=1, finds in spill,
+     * val_len=4 != sizeof(int64_t), so new_val = delta = 50 */
+    int64_t r = ht_inc(t, "x", 1, 50);
+    assert(r == 50);
+
+    /* Increment again — now val_len == sizeof(int64_t) */
+    r = ht_inc(t, "x", 1, 25);
+    assert(r == 75);
+
+    const int64_t *fv = ht_find(t, "x", 1, NULL);
+    assert(fv != NULL && *fv == 75);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);  /* Not duplicated */
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 56. Prophylactic tombstones placed on resize (not compact)
+// ============================================================================
+
+static int test_resize_prophylactic(void) {
+    printf("Test: prophylactic tombstones placed on resize...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert entries */
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "rp%d", i);
+        int v = i;
+        ht_insert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    /* Resize — should place prophylactic tombstones */
+    ht_resize(t, 128);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 20);
+    assert(st.capacity >= 128);
+    /* Prophylactic tombstones may be present — just verify entries work */
+
+    /* All entries findable */
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "rp%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL && *v == i);
+    }
+
+    /* Insert after resize — prophylactics should not block */
+    int extra = 999;
+    assert(ht_insert(t, "extra", 5, &extra, sizeof(int)));
+    const int *r = ht_find(t, "extra", 5, NULL);
+    assert(r != NULL && *r == 999);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 57. Insert with key_len=0 and value_len=0 simultaneously
+// ============================================================================
+
+static int test_insert_zero_key_zero_val(void) {
+    printf("Test: insert with key_len=0 and value_len=0...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert with empty key and empty value */
+    assert(ht_insert(t, "", 0, "", 0));
+
+    size_t vl = 99;
+    const void *r = ht_find(t, "", 0, &vl);
+    assert(r != NULL);
+    assert(vl == 0);
+
+    /* Can still insert normal keys */
+    int v = 42;
+    assert(ht_insert(t, "a", 1, &v, sizeof(int)));
+    const int *rv = ht_find(t, "a", 1, NULL);
+    assert(rv != NULL && *rv == 42);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 2);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 58. Arena reuse after ht_clear
+// ============================================================================
+
+static int test_clear_arena_reuse(void) {
+    printf("Test: arena reuse after ht_clear...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert with various sizes */
+    const char *big = "ABCDEFGHIJKLMNOP";  /* 16 bytes */
+    int small = 42;
+    ht_insert(t, "big", 3, big, strlen(big));
+    ht_insert(t, "s", 1, &small, sizeof(int));
+
+    /* Clear — data_size resets, arena preserved */
+    ht_clear(t);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    /* Reinsert with different keys — should reuse arena */
+    int vals[20];
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "nw%d", i);
+        vals[i] = i * 3;
+        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+    }
+
+    /* Verify — no stale data from before clear */
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "nw%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL && *v == i * 3);
+    }
+
+    /* Old keys gone */
+    assert(ht_find(t, "big", 3, NULL) == NULL);
+    assert(ht_find(t, "s", 1, NULL) == NULL);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 59. Iterator on table with only spill-lane entries
+// ============================================================================
+
+static int test_iter_spill_only(void) {
+    printf("Test: iterator on table with only spill-lane entries...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, zero_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert only spill-lane entries */
+    int vals[5];
+    for (int i = 0; i < 5; i++) {
+        char k[8]; snprintf(k, sizeof(k), "so%d", i);
+        vals[i] = i;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Iterate — should find all 5 */
+    ht_iter_t iter = ht_iter_begin(t);
+    const void *ik, *iv;
+    size_t ikl, ivl;
+    int count = 0;
+    while (ht_iter_next(t, &iter, &ik, &ikl, &iv, &ivl)) {
+        count++;
+        assert(ikl > 0);
+    }
+    assert(count == 5);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 60. Spill find_all early termination
+// ============================================================================
+
+static int test_spill_find_all_early_stop(void) {
+    printf("Test: spill find_all early termination...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, zero_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert 10 spill entries */
+    int vals[10];
+    for (int i = 0; i < 10; i++) {
+        char k[8]; snprintf(k, sizeof(k), "se%d", i);
+        vals[i] = i;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* find_all with early stop after 3 */
+    g_collect_count = 0;
+    ht_find_all(t, 0, collect_stop_2_cb, NULL);
+    assert(g_collect_count == 2);  /* Stops when cb returns false (count >= 2) */
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 61. ht_resize with capacity 0 and 1
+// ============================================================================
+
+static int test_resize_capacity_zero_one(void) {
+    printf("Test: ht_resize with capacity 0 and 1...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75,
+                        .min_load_factor = 0.0, .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    int v = 1;
+    ht_insert(t, "k", 1, &v, sizeof(v));
+
+    /* Resize to 0 — next_pow2(0)=1 but 1 < size=1, so should fail */
+    bool ok = ht_resize(t, 0);
+    assert(!ok);
+
+    /* Resize to 1 — next_pow2(1)=1, 1 >= size=1, works */
+    ok = ht_resize(t, 1);
+    assert(ok);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);
+    assert(st.capacity == 1);
+
+    const int *r = ht_find(t, "k", 1, NULL);
+    assert(r != NULL && *r == 1);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -2316,9 +2574,18 @@ int main(void) {
     fails += test_iter_all_null_outputs();
     fails += test_stats_null_output();
 
+    // New tests (55-61)
+    fails += test_inc_spill_hash_one();
+    fails += test_resize_prophylactic();
+    fails += test_insert_zero_key_zero_val();
+    fails += test_clear_arena_reuse();
+    fails += test_iter_spill_only();
+    fails += test_spill_find_all_early_stop();
+    fails += test_resize_capacity_zero_one();
+
     printf("\n");
     if (fails == 0) {
-        printf("All edge case A tests passed! (54/54)\n");
+        printf("All edge case A tests passed! (61/61)\n");
     } else {
         printf("%d test(s) FAILED!\n", fails);
     }

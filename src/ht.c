@@ -43,6 +43,7 @@
  */
 
 #include "draugr/ht.h"
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,9 +55,9 @@
 typedef struct {
     uint32_t hash;        // HASH_EMPTY, HASH_TOMB, or live hash (>= 2)
     uint16_t probe_dist;  // Distance from ideal position
-    uint16_t key_len;
-    uint16_t val_len;
-    uint32_t offset;      // Byte offset into data arena
+    uint32_t key_len;
+    uint32_t val_len;
+    uint64_t offset;      // Byte offset into data arena
 } ht_slot_t;
 
 // ============================================================================
@@ -206,9 +207,9 @@ static bool place_entry(ht_table_t *t, ht_slot_t *slot,
 
     slot->hash = h32;
     slot->probe_dist = probe_dist;
-    slot->key_len = (uint16_t)key_len;
-    slot->val_len = (uint16_t)value_len;
-    slot->offset = (uint32_t)((uint8_t *)data - t->data_arena);
+    slot->key_len = (uint32_t)key_len;
+    slot->val_len = (uint32_t)value_len;
+    slot->offset = (uint64_t)((uint8_t *)data - t->data_arena);
     return true;
 }
 
@@ -246,8 +247,8 @@ static bool spill_insert(ht_table_t *t, uint32_t h32,
             if (!data) return false;
             memcpy(data, key, key_len);
             memcpy((uint8_t *)data + key_len, value, value_len);
-            s->val_len = (uint16_t)value_len;
-            s->offset = (uint32_t)((uint8_t *)data - t->data_arena);
+            s->val_len = (uint32_t)value_len;
+            s->offset = (uint64_t)((uint8_t *)data - t->data_arena);
             return false;
         }
     }
@@ -344,8 +345,8 @@ static bool rh_insert(ht_table_t *t, uint32_t h32,
                 if (!data) return false;
                 memcpy(data, key, key_len);
                 memcpy((uint8_t *)data + key_len, value, value_len);
-                s->val_len = (uint16_t)value_len;
-                s->offset = (uint32_t)((uint8_t *)data - t->data_arena);
+                s->val_len = (uint32_t)value_len;
+                s->offset = (uint64_t)((uint8_t *)data - t->data_arena);
                 return false; // updated, not inserted
             }
 
@@ -379,9 +380,9 @@ static bool rh_insert(ht_table_t *t, uint32_t h32,
             if (s->probe_dist < dist) {
                 uint32_t old_hash = s->hash;
                 uint16_t old_dist = s->probe_dist;
-                uint16_t old_klen = s->key_len;
-                uint16_t old_vlen = s->val_len;
-                uint32_t old_offset = s->offset;
+                uint32_t old_klen = s->key_len;
+                uint32_t old_vlen = s->val_len;
+                uint64_t old_offset = s->offset;
 
                 void *old_key_copy = alloca(old_klen);
                 void *old_val_copy = alloca(old_vlen);
@@ -1129,7 +1130,7 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
         size_t idx = (start_idx + i) & (t->capacity - 1);
         ht_slot_t *s = &t->slots[idx];
         const char *tag = slot_empty(s) ? "EMPTY" : slot_is_tomb(s) ? "TOMB" : "LIVE";
-        printf("  [%4zu]: hash=0x%08x dist=%3u [%s] klen=%3u vlen=%3u off=%5u\n",
+        printf("  [%4zu]: hash=0x%08x dist=%3u [%s] klen=%3u vlen=%3u off=%5" PRIu64 "\n",
                idx, s->hash, s->probe_dist, tag,
                s->key_len, s->val_len, s->offset);
     }
@@ -1138,7 +1139,7 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
         printf("  Spill lane (%zu entries):\n", t->spill_len);
         for (size_t i = 0; i < t->spill_len; i++) {
             ht_slot_t *s = &t->spill[i];
-            printf("  spill[%zu]: hash=0x%08x klen=%3u vlen=%3u off=%5u\n",
+            printf("  spill[%zu]: hash=0x%08x klen=%3u vlen=%3u off=%5" PRIu64 "\n",
                    i, s->hash, s->key_len, s->val_len, s->offset);
         }
     }
