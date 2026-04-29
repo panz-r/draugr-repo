@@ -27,6 +27,14 @@
 #include <string.h>
 #include <assert.h>
 
+#define INV_CHECK(t, label) do { \
+    const char *_inv_err = ht_check_invariants(t); \
+    if (_inv_err) { \
+        printf("  INVARIANT BROKEN at %s: %s\n", (label), _inv_err); \
+        return 1; \
+    } \
+} while (0)
+
 // ============================================================================
 // Hash helpers
 // ============================================================================
@@ -112,6 +120,8 @@ static int test_resize_spill_collisions(void) {
     // Resize up
     ht_resize(t, 256);
 
+    INV_CHECK(t, "test_resize_spill_collisions: after resize up");
+
     // Verify all
     for (int i = 0; i < 5; i++) {
         char key[32]; snprintf(key, sizeof(key), "z%d", i);
@@ -130,6 +140,8 @@ static int test_resize_spill_collisions(void) {
 
     // Resize down
     ht_resize(t, 32);
+
+    INV_CHECK(t, "test_resize_spill_collisions: after resize down");
 
     // Verify
     for (int i = 0; i < 5; i++) {
@@ -174,6 +186,8 @@ static int test_iter_count_matches_stats(void) {
     }
 
     ht_compact(t);
+
+    INV_CHECK(t, "test_iter_count_matches_stats: after compact");
 
     ht_stats_t st;
     ht_stats(t, &st);
@@ -420,6 +434,8 @@ static int test_tombstone_churn_zombie(void) {
         else assert(v == NULL);
     }
 
+    INV_CHECK(t, "test_tombstone_churn_zombie: final");
+
     ht_stats_t st;
     ht_stats(t, &st);
     assert(st.size + st.tombstone_cnt <= st.capacity);
@@ -476,6 +492,9 @@ static int test_spill_hash_one_stress(void) {
         if (present[i]) assert(v != NULL && *v == i);
         else assert(v == NULL);
     }
+
+    INV_CHECK(t, "test_spill_hash_one_stress: final");
+
     #undef S1_N
 
     free(present);
@@ -532,6 +551,9 @@ static int test_mixed_spill_main_stress(void) {
         if (present[i]) assert(v != NULL && *v == i);
         else assert(v == NULL);
     }
+
+    INV_CHECK(t, "test_mixed_spill_main_stress: final");
+
     #undef MS_N
 
     free(present);
@@ -578,12 +600,15 @@ static int test_collision_churn_compact(void) {
     }
 
     ht_compact(t);
+    INV_CHECK(t, "test_collision_churn_compact: after final compact");
+
     for (int i = 0; i < CC_N; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         if (present[i]) assert(v != NULL && *v == i);
         else assert(v == NULL);
     }
+
     #undef CC_N
 
     free(present);
@@ -640,6 +665,8 @@ static int test_bulk_insert_delete_reinsert(void) {
         assert(v != NULL && *v == i + 1000);
     }
 
+    INV_CHECK(t, "test_bulk_insert_delete_reinsert: final");
+
     ht_destroy(t);
     printf("  PASS\n");
     return 0;
@@ -686,6 +713,9 @@ static int test_ht_inc_stress(void) {
             assert(v != NULL && *v == expected[i]);
         }
     }
+
+    INV_CHECK(t, "test_ht_inc_stress: final");
+
     #undef INC_N
 
     ht_destroy(t);
@@ -986,9 +1016,10 @@ static int test_high_load_stress(void) {
         if (present[i]) assert(v != NULL && *v == i);
         else assert(v == NULL);
     }
-    #undef HL_N
 
-    free(present);
+    INV_CHECK(t, "test_high_load_stress: final");
+
+    #undef HL_N
     ht_destroy(t);
     printf("  PASS\n");
     return 0;
@@ -1025,6 +1056,8 @@ static int test_resize_with_many_tombstones(void) {
 
     // Resize down — should handle tombstones correctly
     ht_resize(t, 128);
+
+    INV_CHECK(t, "test_resize_with_many_tombstones: after resize");
 
     ht_stats(t, &st);
     assert(st.size == 50);
@@ -1448,6 +1481,8 @@ static int test_push_forward_with_prophylactic(void) {
     // Compact to place prophylactic tombstones
     ht_compact(t);
 
+    INV_CHECK(t, "test_push_forward_with_prophylactic: after compact");
+
     ht_stats_t st;
     ht_stats(t, &st);
     assert(st.size == 40);
@@ -1524,6 +1559,8 @@ static int test_push_forward_churn(void) {
         else assert(v == NULL);
     }
 
+    INV_CHECK(t, "test_push_forward_churn: final");
+
     ht_stats_t st;
     ht_stats(t, &st);
     assert(st.size + st.tombstone_cnt <= st.capacity);
@@ -1572,6 +1609,8 @@ static int test_push_forward_collision_consistency(void) {
         char key[16]; snprintf(key, sizeof(key), "cc%d", i);
         ht_remove(t, key, strlen(key));
     }
+
+    INV_CHECK(t, "test_push_forward_collision_consistency: after all ops");
 
     // Verify all remaining keys
     ht_stats_t st;
@@ -2107,6 +2146,8 @@ static int test_delete_prophylactic_barrier(void) {
     }
     ht_compact(t);
 
+    INV_CHECK(t, "test_delete_prophylactic_barrier: after compact");
+
     /* Now delete an entry — forward scan may hit prophylactic barrier */
     /* This tests the prophylactic-barrier-stop path in delete_compact Phase 1 */
     ht_remove(t, "pb0", 3);
@@ -2274,6 +2315,8 @@ static int test_resize_shrink_with_prophylactic(void) {
     }
     ht_compact(t);
 
+    INV_CHECK(t, "test_resize_shrink_with_prophylactic: after compact");
+
     ht_stats_t st;
     ht_stats(t, &st);
     assert(st.size == 5);
@@ -2281,6 +2324,8 @@ static int test_resize_shrink_with_prophylactic(void) {
     /* Manually shrink to smaller capacity */
     bool ok = ht_resize(t, 16);
     assert(ok);
+
+    INV_CHECK(t, "test_resize_shrink_with_prophylactic: after shrink");
 
     ht_stats(t, &st);
     assert(st.size == 5);
@@ -2371,6 +2416,8 @@ static int test_compact_clear_reinsert(void) {
 
     /* Clear zeros all slots including prophylactic tombstones */
     ht_clear(t);
+
+    INV_CHECK(t, "test_compact_clear_reinsert: after clear");
 
     ht_stats_t st;
     ht_stats(t, &st);
@@ -2496,6 +2543,8 @@ static int test_large_spill_resize(void) {
 
     /* Force resize */
     ht_resize(t, 256);
+
+    INV_CHECK(t, "test_large_spill_resize: after resize");
 
     ht_stats_t st;
     ht_stats(t, &st);

@@ -121,6 +121,14 @@ typedef struct {
 void ht_stats(const ht_table_t *t, ht_stats_t *out_stats);
 void ht_dump(const ht_table_t *t, uint32_t h32, size_t count);
 
+// Returns NULL if invariants hold, or a static error string.
+// Invariants checked:
+//   1. probe_dist == (pos - ideal) % capacity for every live entry
+//   2. probe_dists are non-decreasing within clusters (Robin-Hood invariant)
+//   3. size matches actual count of live entries
+//   4. tombstone_cnt matches actual count of tombstones
+const char *ht_check_invariants(const ht_table_t *t);
+
 #ifdef __cplusplus
 }
 #endif

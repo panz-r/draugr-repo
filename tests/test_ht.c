@@ -4,6 +4,14 @@
 #include <string.h>
 #include <assert.h>
 
+#define INV_CHECK(t, label) do { \
+    const char *_inv_err = ht_check_invariants(t); \
+    if (_inv_err) { \
+        printf("  INVARIANT BROKEN at %s: %s\n", (label), _inv_err); \
+        return; \
+    } \
+} while (0)
+
 uint64_t fnv1a_hash(const void *key, size_t len, void *ctx) {
     (void)ctx;
     uint64_t hash = 0xcbf29ce484222325ULL;
@@ -70,6 +78,7 @@ void test_remove() {
     ht_stats(t, &stats);
     assert(stats.size == 1);
     assert(stats.tombstone_cnt == 1); // always tombstoned (backward-shift is optional cleanup)
+    INV_CHECK(t, "test_remove: after remove");
 
     assert(ht_find(t, "abc", 3, NULL) == NULL);
     assert(ht_find(t, "def", 3, NULL) != NULL);
@@ -92,6 +101,7 @@ void test_resize() {
     ht_stats(t, &stats);
     assert(stats.size == 10);
     assert(stats.capacity >= 10);
+    INV_CHECK(t, "test_resize: after insert 10");
 
     for (int i = 0; i < 10; i++) {
         char key[16]; snprintf(key, sizeof(key), "key%d", i);
@@ -208,6 +218,7 @@ void test_graveyard() {
 
     // Compact should rebuild table
     ht_compact(t);
+    INV_CHECK(t, "test_graveyard: after compact");
     ht_stats(t, &stats);
     // After compact, prophylactic tombstones may be placed (graveyard hashing)
     assert(stats.tombstone_cnt == 0 || stats.tombstone_cnt > 0); // tombstones cleared or replaced with primitives
@@ -409,6 +420,8 @@ void test_remove_all_stats(void) {
         ht_remove(t, k, strlen(k));
     }
 
+    INV_CHECK(t, "test_remove_all_stats: after removing all");
+
     ht_stats(t, &st);
     assert(st.size == 0);
     /* load_factor should be 0 */
@@ -444,6 +457,8 @@ void test_resize_byte_exact(void) {
         int v = i;
         ht_insert(t, k, strlen(k), &v, sizeof(v));
     }
+
+    INV_CHECK(t, "test_resize_byte_exact: after multiple resizes");
 
     /* Verify string values byte-exact */
     for (int i = 0; i < 5; i++) {
@@ -487,6 +502,8 @@ void test_inc_accumulation(void) {
 
     v = ht_find(t, "ctr", 3, NULL);
     assert(v != NULL && *v == 0);
+
+    INV_CHECK(t, "test_inc_accumulation: after 2000 ops");
 
     ht_stats_t st;
     ht_stats(t, &st);
@@ -547,6 +564,456 @@ void test_large_value(void) {
     printf("Large value passed!\n");
 }
 
+void test_zero_length_key(void) {
+    printf("Testing zero-length key...\n");
+    ht_config_t cfg = { .initial_capacity = 16 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    const char *ptr_a = "anything_a";
+    const char *ptr_b = "anything_b";
+    int val_a = 10, val_b = 20;
+
+    /* Insert first zero-length key */
+    bool inserted = ht_insert(t, ptr_a, 0, &val_a, sizeof(val_a));
+    assert(inserted == true);
+
+    /* Find with key_len=0 should work */
+    size_t out_len = 0;
+    const int *found = ht_find(t, ptr_a, 0, &out_len);
+    assert(found != NULL);
+    assert(*found == val_a);
+
+    /* Insert another zero-length key (different pointer) — should replace */
+    inserted = ht_insert(t, ptr_b, 0, &val_b, sizeof(val_b));
+    assert(inserted == false);  /* update, not insert */
+
+    /* Find should now return val_b */
+    found = ht_find(t, ptr_b, 0, &out_len);
+    assert(found != NULL);
+    assert(*found == val_b);
+
+    /* Size should be 1 since both zero-length keys are "equal" */
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 1);
+
+    ht_destroy(t);
+    printf("Zero-length key passed!\n");
+}
+
+void test_zero_length_value(void) {
+    printf("Testing zero-length value...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    bool inserted = ht_insert(t, "k", 1, NULL, 0);
+    assert(inserted == true);
+
+    size_t out_len = 99;
+    const void *found = ht_find(t, "k", 1, &out_len);
+    assert(found != NULL);
+    assert(out_len == 0);
+
+    ht_destroy(t);
+    printf("Zero-length value passed!\n");
+}
+
+void test_double_remove(void) {
+    printf("Testing double remove...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    ht_insert(t, "key", 3, "val", 3);
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 1);
+
+    bool removed = ht_remove(t, "key", 3);
+    assert(removed == true);
+
+    ht_stats(t, &stats);
+    assert(stats.size == 0);
+
+    removed = ht_remove(t, "key", 3);
+    assert(removed == false);
+
+    ht_stats(t, &stats);
+    assert(stats.size == 0);
+
+    ht_destroy(t);
+    printf("Double remove passed!\n");
+}
+
+void test_remove_then_reinsert(void) {
+    printf("Testing remove then reinsert...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    int v1 = 1, v2 = 2;
+    ht_insert(t, "abc", 3, &v1, sizeof(v1));
+    bool removed = ht_remove(t, "abc", 3);
+    assert(removed == true);
+
+    ht_insert(t, "abc", 3, &v2, sizeof(v2));
+
+    size_t out_len = 0;
+    const int *found = ht_find(t, "abc", 3, &out_len);
+    assert(found != NULL);
+    assert(*found == 2);
+    assert(out_len == sizeof(int));
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 1);
+
+    ht_destroy(t);
+    printf("Remove then reinsert passed!\n");
+}
+
+void test_clear_then_reuse(void) {
+    printf("Testing clear then reuse...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    /* Insert 10 original entries */
+    for (int i = 0; i < 10; i++) {
+        char key[16]; snprintf(key, sizeof(key), "old%d", i);
+        int val = i;
+        ht_insert(t, key, strlen(key), &val, sizeof(val));
+    }
+
+    ht_clear(t);
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 0);
+
+    /* Old entries should be gone */
+    for (int i = 0; i < 10; i++) {
+        char key[16]; snprintf(key, sizeof(key), "old%d", i);
+        const void *found = ht_find(t, key, strlen(key), NULL);
+        assert(found == NULL);
+    }
+
+    /* Insert 10 new entries */
+    for (int i = 0; i < 10; i++) {
+        char key[16]; snprintf(key, sizeof(key), "new%d", i);
+        int val = i + 100;
+        ht_insert(t, key, strlen(key), &val, sizeof(val));
+    }
+
+    ht_stats(t, &stats);
+    assert(stats.size == 10);
+
+    /* Verify new entries */
+    for (int i = 0; i < 10; i++) {
+        char key[16]; snprintf(key, sizeof(key), "new%d", i);
+        const int *found = ht_find(t, key, strlen(key), NULL);
+        assert(found != NULL);
+        assert(*found == i + 100);
+    }
+
+    ht_destroy(t);
+    printf("Clear then reuse passed!\n");
+}
+
+void test_inc_zero_delta(void) {
+    printf("Testing ht_inc with zero delta...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    int64_t val = ht_inc(t, "zero", 4, 0);
+    assert(val == 0);
+
+    const int64_t *found = ht_find(t, "zero", 4, NULL);
+    assert(found != NULL);
+    assert(*found == 0);
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 1);
+
+    ht_destroy(t);
+    printf("Inc zero delta passed!\n");
+}
+
+void test_inc_negative_from_zero(void) {
+    printf("Testing ht_inc with negative delta from zero...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    int64_t val = ht_inc(t, "neg", 3, -5);
+    assert(val == -5);
+
+    const int64_t *found = ht_find(t, "neg", 3, NULL);
+    assert(found != NULL);
+    assert(*found == -5);
+
+    ht_destroy(t);
+    printf("Inc negative from zero passed!\n");
+}
+
+void test_insert_many_same_first_char(void) {
+    printf("Testing insert many same first char (200 entries)...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    for (int i = 0; i < 200; i++) {
+        char key[16]; snprintf(key, sizeof(key), "a%d", i);
+        int val = i;
+        bool inserted = ht_insert(t, key, strlen(key), &val, sizeof(val));
+        assert(inserted == true);
+    }
+
+    INV_CHECK(t, "test_insert_many_same_first_char: after 200 inserts");
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 200);
+
+    for (int i = 0; i < 200; i++) {
+        char key[16]; snprintf(key, sizeof(key), "a%d", i);
+        const int *found = ht_find(t, key, strlen(key), NULL);
+        assert(found != NULL);
+        assert(*found == i);
+    }
+
+    ht_destroy(t);
+    printf("Insert many same first char passed!\n");
+}
+
+void test_iterator_after_remove(void) {
+    printf("Testing iterator after remove...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    /* Insert 10 entries */
+    for (int i = 0; i < 10; i++) {
+        char key[16]; snprintf(key, sizeof(key), "it%d", i);
+        int val = i;
+        ht_insert(t, key, strlen(key), &val, sizeof(val));
+    }
+
+    /* Remove even-indexed entries */
+    for (int i = 0; i < 10; i += 2) {
+        char key[16]; snprintf(key, sizeof(key), "it%d", i);
+        bool removed = ht_remove(t, key, strlen(key));
+        assert(removed == true);
+    }
+
+    /* Iterate and collect */
+    int count = 0;
+    bool seen[10] = {false};
+    ht_iter_t iter = ht_iter_begin(t);
+    const void *key, *val;
+    size_t key_len, val_len;
+
+    while (ht_iter_next(t, &iter, &key, &key_len, &val, &val_len)) {
+        count++;
+        /* Key should start with "it" */
+        assert(key_len >= 2);
+        assert(memcmp(key, "it", 2) == 0);
+
+        /* Extract the index */
+        char buf[16];
+        assert(key_len < sizeof(buf));
+        memcpy(buf, key, key_len);
+        buf[key_len] = '\0';
+        int idx = atoi(buf + 2);
+
+        /* Should be an odd index (not removed) */
+        assert(idx % 2 == 1);
+        assert(idx >= 0 && idx < 10);
+        assert(!seen[idx]);
+        seen[idx] = true;
+    }
+
+    assert(count == 5);
+
+    ht_destroy(t);
+    printf("Iterator after remove passed!\n");
+}
+
+static uint64_t const_hash42(const void *key, size_t len, void *ctx) {
+    (void)key; (void)len; (void)ctx;
+    return 42;
+}
+
+static int find_all_collision_count;
+static bool find_all_collision_keys_found[5];
+
+static bool find_all_collision_cb(const void *key, size_t key_len,
+                                   const void *value, size_t value_len,
+                                   void *user_ctx) {
+    (void)value; (void)value_len; (void)user_ctx;
+    find_all_collision_count++;
+
+    /* Mark which key was found */
+    char buf[16];
+    assert(key_len < sizeof(buf));
+    memcpy(buf, key, key_len);
+    buf[key_len] = '\0';
+    int idx = atoi(buf + 1);
+    if (idx >= 0 && idx < 5) {
+        find_all_collision_keys_found[idx] = true;
+    }
+
+    return true; /* keep iterating */
+}
+
+void test_find_all_with_collisions(void) {
+    printf("Testing find_all with collisions...\n");
+    ht_table_t *t = ht_create(NULL, const_hash42, NULL, NULL);
+
+    /* Insert 5 entries — all hash to 42 */
+    for (int i = 0; i < 5; i++) {
+        char key[16]; snprintf(key, sizeof(key), "c%d", i);
+        int val = i;
+        bool inserted = ht_insert(t, key, strlen(key), &val, sizeof(val));
+        assert(inserted == true);
+    }
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 5);
+
+    /* Iterate via ht_find_all with hash=42 */
+    find_all_collision_count = 0;
+    memset(find_all_collision_keys_found, 0, sizeof(find_all_collision_keys_found));
+    ht_find_all(t, 42, find_all_collision_cb, NULL);
+
+    assert(find_all_collision_count == 5);
+    for (int i = 0; i < 5; i++) {
+        assert(find_all_collision_keys_found[i] == true);
+    }
+
+    ht_destroy(t);
+    printf("Find all with collisions passed!\n");
+}
+
+void test_with_hash_cross_api(void) {
+    printf("Testing with_hash cross-api...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    /* Step 1: Insert via ht_insert_with_hash */
+    uint64_t h = fnv1a_hash("x", 1, NULL);
+    bool inserted = ht_insert_with_hash(t, h, "x", 1, "v1", 2);
+    assert(inserted == true);
+
+    /* Step 2: Remove via ht_remove (normal) */
+    bool removed = ht_remove(t, "x", 1);
+    assert(removed == true);
+
+    assert(ht_find(t, "x", 1, NULL) == NULL);
+
+    /* Step 3: Insert via ht_insert (normal) */
+    inserted = ht_insert(t, "x", 1, "v2", 2);
+    assert(inserted == true);
+
+    /* Step 4: Find via ht_find_with_hash */
+    size_t out_len = 0;
+    const char *found = ht_find_with_hash(t, h, "x", 1, &out_len);
+    assert(found != NULL);
+    assert(out_len == 2);
+    assert(memcmp(found, "v2", 2) == 0);
+
+    ht_destroy(t);
+    printf("With hash cross-api passed!\n");
+}
+
+void test_large_key_large_value_together(void) {
+    printf("Testing large key + large value together (100000 bytes each)...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    size_t big_len = 100000;
+    char *big_key = malloc(big_len);
+    char *big_val = malloc(big_len);
+    assert(big_key != NULL && big_val != NULL);
+
+    /* Fill key with pattern */
+    memset(big_key, 'K', big_len);
+    big_key[0] = 'A';
+    big_key[big_len - 1] = 'Z';
+
+    /* Fill value with distinct pattern */
+    memset(big_val, 'V', big_len);
+    big_val[0] = 'S';
+    big_val[1] = 'T';
+    big_val[big_len - 2] = 'E';
+    big_val[big_len - 1] = 'N';
+
+    bool inserted = ht_insert(t, big_key, big_len, big_val, big_len);
+    assert(inserted == true);
+
+    size_t out_len = 0;
+    const char *found = ht_find(t, big_key, big_len, &out_len);
+    assert(found != NULL);
+    assert(out_len == big_len);
+
+    /* Verify start of value */
+    assert(found[0] == 'S');
+    assert(found[1] == 'T');
+    /* Verify end of value */
+    assert(found[big_len - 2] == 'E');
+    assert(found[big_len - 1] == 'N');
+    /* Verify middle */
+    assert(found[big_len / 2] == 'V');
+
+    free(big_key);
+    free(big_val);
+    ht_destroy(t);
+    printf("Large key + large value together passed!\n");
+}
+
+void test_insert_duplicate_with_different_value_size(void) {
+    printf("Testing insert duplicate with different value size...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    bool inserted = ht_insert(t, "k", 1, "short", 5);
+    assert(inserted == true);
+
+    inserted = ht_insert(t, "k", 1, "a much longer value here", 22);
+    assert(inserted == false); /* update */
+
+    size_t out_len = 0;
+    const char *found = ht_find(t, "k", 1, &out_len);
+    assert(found != NULL);
+    assert(out_len == 22);
+    assert(memcmp(found, "a much longer value here", 22) == 0);
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 1);
+
+    ht_destroy(t);
+    printf("Insert duplicate with different value size passed!\n");
+}
+
+void test_remove_nonexistent(void) {
+    printf("Testing remove nonexistent...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    bool removed = ht_remove(t, "nope", 4);
+    assert(removed == false);
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 0);
+
+    ht_destroy(t);
+    printf("Remove nonexistent passed!\n");
+}
+
+void test_stats_empty_table(void) {
+    printf("Testing stats on empty table...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+
+    ht_stats_t stats;
+    ht_stats(t, &stats);
+    assert(stats.size == 0);
+    assert(stats.load_factor == 0.0);
+
+    /* Capacity should be a power of 2 */
+    assert(stats.capacity > 0);
+    assert((stats.capacity & (stats.capacity - 1)) == 0);
+
+    ht_destroy(t);
+    printf("Stats empty table passed!\n");
+}
+
 int main() {
     int bugs = 0;
     test_basic();
@@ -572,6 +1039,21 @@ int main() {
     test_inc_accumulation();
     test_large_key();    /* Bug probe: key_len uint16_t truncation */
     test_large_value();  /* Bug probe: val_len uint16_t truncation */
+    test_zero_length_key();
+    test_zero_length_value();
+    test_double_remove();
+    test_remove_then_reinsert();
+    test_clear_then_reuse();
+    test_inc_zero_delta();
+    test_inc_negative_from_zero();
+    test_insert_many_same_first_char();
+    test_iterator_after_remove();
+    test_find_all_with_collisions();
+    test_with_hash_cross_api();
+    test_large_key_large_value_together();
+    test_insert_duplicate_with_different_value_size();
+    test_remove_nonexistent();
+    test_stats_empty_table();
 
     printf("\nAll tests passed!\n");
     return bugs;

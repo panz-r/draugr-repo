@@ -8,6 +8,14 @@
 #include <string.h>
 #include <assert.h>
 
+#define INV_CHECK(t, op) do { \
+    const char *_inv_err = ht_check_invariants(t); \
+    if (_inv_err) { \
+        printf("  INVARIANT BROKEN at op %d: %s\n", (op), _inv_err); \
+        return 1; \
+    } \
+} while (0)
+
 static uint64_t fnv1a_hash(const void *key, size_t len, void *ctx) {
     (void)ctx;
     uint64_t hash = 0xcbf29ce484222325ULL;
@@ -63,6 +71,8 @@ static int stress_random(void) {
         } else {
             ht_remove(t, keys[k].data, keys[k].len);
         }
+
+        if (i % 5000 == 4999) INV_CHECK(t, i);
     }
 
     ht_stats_t stats;
@@ -113,6 +123,8 @@ static int stress_collision(void) {
                 present_count--;
             }
         }
+
+        if (op % 5000 == 4999) INV_CHECK(t, op);
     }
 
     /* Verify all present entries */
@@ -238,6 +250,8 @@ static int stress_inc(void) {
                 expected[k] = 0;
             }
         }
+
+        if (op % 5000 == 4999) INV_CHECK(t, op);
     }
 
     /* Verify all present */
@@ -298,6 +312,7 @@ static int stress_stats_invariants(void) {
 
         /* Every 5000 ops: verify stats consistency */
         if (op % 5000 == 4999) {
+            INV_CHECK(t, op);
             ht_stats_t st;
             ht_stats(t, &st);
             if (st.size != (size_t)present_count) {
@@ -374,6 +389,7 @@ static int stress_delete_compact(void) {
 
         /* Compact every 5000 ops */
         if (op % 5000 == 4999) {
+            INV_CHECK(t, op);
             ht_compact(t);
         }
     }
@@ -395,6 +411,367 @@ static int stress_delete_compact(void) {
     return 0;
 }
 
+/* Heavy churn — 50k ops, 70% delete rate, small table, all collide */
+static int stress_churn(void) {
+    printf("Stress: 50k ops with 70%% delete rate on small table (fixed_hash)...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+    const int N = 500;
+    int *present = calloc(N, sizeof(int));
+    int present_count = 0;
+    int vals[500];
+    srand(1111);
+
+    for (int op = 0; op < 50000; op++) {
+        int k = rand() % N;
+        int action = rand() % 100;
+        if (action < 30) {
+            /* insert */
+            vals[k] = k + op;
+            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            if (!present[k]) { present[k] = 1; present_count++; }
+        } else {
+            /* delete (70% rate) */
+            if (present[k]) {
+                ht_remove(t, &k, sizeof(int));
+                present[k] = 0;
+                present_count--;
+            }
+        }
+
+        /* Every 5000 ops: verify stats.size matches tracked count */
+        if (op % 5000 == 4999) {
+            INV_CHECK(t, op);
+            ht_stats_t st;
+            ht_stats(t, &st);
+            if (st.size != (size_t)present_count) {
+                printf("  FAIL op %d: stats.size=%zu != tracked=%d\n",
+                       op, st.size, present_count);
+                free(present); ht_destroy(t); return 1;
+            }
+            /* Verify all present entries are findable */
+            for (int i = 0; i < N; i++) {
+                const int *v = ht_find(t, &i, sizeof(int), NULL);
+                if (present[i]) {
+                    if (v == NULL || *v != vals[i]) {
+                        printf("  FAIL op %d: present key %d not findable\n", op, i);
+                        free(present); ht_destroy(t); return 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Final verify all present entries */
+    int verify = 0;
+    for (int i = 0; i < N; i++) {
+        const int *v = ht_find(t, &i, sizeof(int), NULL);
+        if (present[i]) {
+            assert(v != NULL && *v == vals[i]);
+            verify++;
+        } else {
+            assert(v == NULL);
+        }
+    }
+    assert(verify == present_count);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    printf("  size=%zu cap=%zu present_count=%d\n", st.size, st.capacity, present_count);
+
+    free(present);
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+/* 20k ops targeting the spill lane exclusively (zero_hash) */
+static int stress_spill_heavy(void) {
+    printf("Stress: 20k ops targeting spill lane exclusively (zero_hash)...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, zero_hash, NULL, NULL);
+    const int N = 500;
+    int *present = calloc(N, sizeof(int));
+    int vals[500];
+    srand(2222);
+
+    for (int op = 0; op < 20000; op++) {
+        int k = rand() % N;
+        int action = rand() % 100;
+        if (action < 50) {
+            /* 50% insert */
+            vals[k] = k * 3 + op;
+            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            present[k] = 1;
+        } else if (action < 70) {
+            /* 20% find */
+            const int *v = ht_find(t, &k, sizeof(int), NULL);
+            if (present[k]) {
+                if (v == NULL || *v != vals[k]) {
+                    printf("  FAIL op %d: find key %d\n", op, k);
+                    free(present); ht_destroy(t); return 1;
+                }
+            }
+        } else {
+            /* 30% remove */
+            if (present[k]) {
+                ht_remove(t, &k, sizeof(int));
+                present[k] = 0;
+            }
+        }
+    }
+
+    /* Verify at end */
+    for (int i = 0; i < N; i++) {
+        const int *v = ht_find(t, &i, sizeof(int), NULL);
+        if (present[i]) {
+            assert(v != NULL && *v == vals[i]);
+        } else {
+            assert(v == NULL);
+        }
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    printf("  size=%zu cap=%zu (spill lane only)\n", st.size, st.capacity);
+
+    free(present);
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+/* 30k ops mixing ht_insert/ht_insert_with_hash/find/remove variants */
+static int stress_mixed_api(void) {
+    printf("Stress: 30k ops mixing API variants (_with_hash)...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    const int N = 500;
+    int *present = calloc(N, sizeof(int));
+    int vals[500];
+    int use_spill[500]; /* track which keys are forced to spill */
+    memset(use_spill, 0, sizeof(use_spill));
+    srand(3333);
+
+    for (int op = 0; op < 30000; op++) {
+        int k = rand() % N;
+        int action = rand() % 100;
+
+        if (action < 35) {
+            /* Insert — half via normal API, half forced to spill via hash=0 */
+            vals[k] = k + op;
+            if (rand() % 2 == 0) {
+                ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+                use_spill[k] = 0;
+            } else {
+                ht_insert_with_hash(t, 0, &k, sizeof(int), &vals[k], sizeof(int));
+                use_spill[k] = 1;
+            }
+            present[k] = 1;
+        } else if (action < 60) {
+            /* Find — use matching API variant */
+            const int *v;
+            if (use_spill[k]) {
+                v = ht_find_with_hash(t, 0, &k, sizeof(int), NULL);
+            } else {
+                v = ht_find(t, &k, sizeof(int), NULL);
+            }
+            if (present[k]) {
+                if (v == NULL || *v != vals[k]) {
+                    printf("  FAIL op %d: find key %d (spill=%d)\n", op, k, use_spill[k]);
+                    free(present); ht_destroy(t); return 1;
+                }
+            }
+        } else if (action < 80) {
+            /* Find via normal API — only non-spill entries reachable this way */
+            if (present[k] && !use_spill[k]) {
+                const int *v = ht_find(t, &k, sizeof(int), NULL);
+                if (v == NULL || *v != vals[k]) {
+                    printf("  FAIL op %d: normal find key %d\n", op, k);
+                    free(present); ht_destroy(t); return 1;
+                }
+            }
+        } else {
+            /* Remove — use matching API variant */
+            if (present[k]) {
+                if (use_spill[k]) {
+                    ht_remove_with_hash(t, 0, &k, sizeof(int));
+                } else {
+                    ht_remove(t, &k, sizeof(int));
+                }
+                present[k] = 0;
+            }
+        }
+    }
+
+    /* Verify all present entries at end */
+    for (int i = 0; i < N; i++) {
+        const int *v;
+        if (use_spill[i]) {
+            v = ht_find_with_hash(t, 0, &i, sizeof(int), NULL);
+        } else {
+            v = ht_find(t, &i, sizeof(int), NULL);
+        }
+        if (present[i]) {
+            if (v == NULL || *v != vals[i]) {
+                printf("  FAIL: key %d missing at end (spill=%d)\n", i, use_spill[i]);
+                free(present); ht_destroy(t); return 1;
+            }
+        } else {
+            assert(v == NULL);
+        }
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    printf("  size=%zu cap=%zu\n", st.size, st.capacity);
+
+    free(present);
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+/* 40k ops with 60% updates (reinsert same key), track latest value */
+static int stress_update_heavy(void) {
+    printf("Stress: 40k ops with 60%% updates (reinsert same key)...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    const int N = 500;
+    int *present = calloc(N, sizeof(int));
+    int vals[500];
+    srand(4444);
+
+    /* Pre-populate all keys */
+    for (int i = 0; i < N; i++) {
+        vals[i] = i;
+        ht_insert(t, &i, sizeof(int), &vals[i], sizeof(int));
+        present[i] = 1;
+    }
+
+    for (int op = 0; op < 40000; op++) {
+        int k = rand() % N;
+        int action = rand() % 100;
+
+        if (action < 60) {
+            /* Update: reinsert same key with new value */
+            vals[k] = k + op;
+            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            present[k] = 1;
+        } else if (action < 80) {
+            /* Find */
+            const int *v = ht_find(t, &k, sizeof(int), NULL);
+            if (present[k]) {
+                if (v == NULL || *v != vals[k]) {
+                    printf("  FAIL op %d: find key %d expected %d got %d\n",
+                           op, k, vals[k], v ? *v : -1);
+                    free(present); ht_destroy(t); return 1;
+                }
+            }
+        } else {
+            /* Delete */
+            if (present[k]) {
+                ht_remove(t, &k, sizeof(int));
+                present[k] = 0;
+            }
+        }
+
+        if (op % 5000 == 4999) INV_CHECK(t, op);
+    }
+
+    /* Verify all present entries have latest value */
+    for (int i = 0; i < N; i++) {
+        const int *v = ht_find(t, &i, sizeof(int), NULL);
+        if (present[i]) {
+            if (v == NULL || *v != vals[i]) {
+                printf("  FAIL: key %d expected %d got %d at end\n",
+                       i, vals[i], v ? *v : -1);
+                free(present); ht_destroy(t); return 1;
+            }
+        } else {
+            assert(v == NULL);
+        }
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    printf("  size=%zu cap=%zu\n", st.size, st.capacity);
+
+    free(present);
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+/* 20k ops with ht_compact every 1000 ops */
+static int stress_compact_between_ops(void) {
+    printf("Stress: 20k ops with ht_compact every 1000 ops...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    const int N = 300;
+    int *present = calloc(N, sizeof(int));
+    int vals[300];
+    srand(5556);
+
+    for (int op = 0; op < 20000; op++) {
+        int k = rand() % N;
+        int action = rand() % 100;
+
+        if (action < 45) {
+            vals[k] = k + op;
+            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            present[k] = 1;
+        } else if (action < 80) {
+            const int *v = ht_find(t, &k, sizeof(int), NULL);
+            if (present[k] && (v == NULL || *v != vals[k])) {
+                printf("  FAIL op %d: find key %d\n", op, k);
+                free(present); ht_destroy(t); return 1;
+            }
+        } else {
+            if (present[k]) {
+                ht_remove(t, &k, sizeof(int));
+                present[k] = 0;
+            }
+        }
+
+        /* Compact every 1000 ops, then verify data integrity */
+        if (op % 1000 == 999) {
+            INV_CHECK(t, op);
+            ht_compact(t);
+            for (int i = 0; i < N; i++) {
+                const int *v = ht_find(t, &i, sizeof(int), NULL);
+                if (present[i]) {
+                    if (v == NULL || *v != vals[i]) {
+                        printf("  FAIL after compact at op %d: key %d wrong\n", op, i);
+                        free(present); ht_destroy(t); return 1;
+                    }
+                } else {
+                    assert(v == NULL);
+                }
+            }
+        }
+    }
+
+    /* Final verify */
+    for (int i = 0; i < N; i++) {
+        const int *v = ht_find(t, &i, sizeof(int), NULL);
+        if (present[i]) {
+            assert(v != NULL && *v == vals[i]);
+        } else {
+            assert(v == NULL);
+        }
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    printf("  size=%zu cap=%zu\n", st.size, st.capacity);
+
+    free(present);
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
 /* Wrapper main that calls all stress tests */
 int main(void) {
     printf("=== Stress Tests ===\n\n");
@@ -405,6 +782,11 @@ int main(void) {
     if (stress_inc()) return 1;
     if (stress_stats_invariants()) return 1;
     if (stress_delete_compact()) return 1;
+    if (stress_churn()) return 1;
+    if (stress_spill_heavy()) return 1;
+    if (stress_mixed_api()) return 1;
+    if (stress_update_heavy()) return 1;
+    if (stress_compact_between_ops()) return 1;
 
     printf("\nAll stress tests passed!\n");
     return 0;

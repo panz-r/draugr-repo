@@ -119,6 +119,7 @@ struct ht_table {
 #define C_P_DEFAULT 3.0
 #define C_B_DEFAULT 3.0
 #define SPILL_INITIAL 8
+#define BSHIFT_CAP 16
 
 static const ht_config_t default_cfg = {
     .initial_capacity = 64,
@@ -323,11 +324,12 @@ static bool rh_insert(ht_table_t *t, uint32_t h32,
     size_t ideal = h32 & cap_mask;
 
     // Phase 1: Scan probe chain for existing key (update).
-    // Must scan the entire chain (no early termination) because
-    // prophylactic tombstones placed after rebuild can break the
-    // Robin-Hood probe_dist invariant.
+    // Robin-Hood early termination: live entries with probe_dist < dist
+    // mean our key can't be further — it would have been placed here.
+    // Tombstones are skipped (their probe_dist is not meaningful).
     {
         size_t idx = ideal;
+        uint16_t dist = 0;
         for (size_t steps = 0; steps <= t->capacity; steps++) {
             ht_slot_t *s = &t->slots[idx];
 
@@ -335,8 +337,11 @@ static bool rh_insert(ht_table_t *t, uint32_t h32,
 
             if (slot_is_tomb(s)) {
                 idx = (idx + 1) & cap_mask;
+                dist++;
                 continue;
             }
+
+            if (s->probe_dist < dist) break;
 
             if (s->hash == h32 && keys_match(t, s, key, key_len)) {
                 // Update existing entry
@@ -351,6 +356,7 @@ static bool rh_insert(ht_table_t *t, uint32_t h32,
             }
 
             idx = (idx + 1) & cap_mask;
+            dist++;
         }
     }
 
@@ -369,7 +375,30 @@ static bool rh_insert(ht_table_t *t, uint32_t h32,
 
             // Empty or tombstone — place entry here
             if (slot_available(s)) {
-                if (slot_is_tomb(s)) t->tombstone_cnt--;
+                // Stranding prevention: placing at a tombstone at position p
+                // with dist d blocks searches for any entry at p+k whose
+                // probe_dist > d+k (their ideal is before p, and early
+                // termination at p stops the search).  Check nearby entries.
+                if (slot_is_tomb(s)) {
+                    bool blocked = false;
+                    for (size_t k = 1; k <= BSHIFT_CAP; k++) {
+                        size_t chk = (idx + k) & cap_mask;
+                        ht_slot_t *sc = &t->slots[chk];
+                        if (slot_empty(sc)) break;
+                        if (slot_is_tomb(sc)) continue;
+                        if (sc->probe_dist > dist + (uint16_t)k) {
+                            blocked = true;
+                            break;
+                        }
+                    }
+                    if (blocked) {
+                        // Skip tombstone — treat as unavailable
+                        idx = (idx + 1) & cap_mask;
+                        dist++;
+                        continue;
+                    }
+                    t->tombstone_cnt--;
+                }
                 if (!place_entry(t, s, h32, dist, cur_key, cur_klen, cur_val, cur_vlen))
                     return false;
                 t->size++;
@@ -417,28 +446,19 @@ static bool rh_insert(ht_table_t *t, uint32_t h32,
 // Zombie Interval Rebuild
 // ============================================================================
 
-// Delete compaction: replaces the old capped_backward_shift with a three-tier
-// strategy combining backward shift and ZombieHTDelete-style push-forward.
+// Delete compaction: capped backward shift after deleting an entry at `idx`.
 //
-// After the caller places a tombstone at `idx`, this function tries:
+// Scans forward at most BSHIFT_CAP entries, collecting tombstones and live
+// entries until EMPTY or probe_dist==0.  If the chain ends within the cap
+// and verify_ideal_safe passes, shifts all collected entries backward to
+// eliminate the tombstone.
 //
-//   Outcome A (best):  Full backward shift — tombstone eliminated entirely.
-//       Requires the chain to end at EMPTY within the scan limit and that no
-//       entry would shift past its ideal position.
+// Cost: O(BSHIFT_CAP) = O(1) worst case per delete.
 //
-//   Outcome B (good):  Push-forward to primitive position — tombstone placed
-//       at a useful prophylactic-spacing slot.  Shifts entries from idx+1 up
-//       to the primitive target backward, absorbing delete-tombstones along
-//       the way.  The primitive target must be occupied by a live entry.
-//
-//   Outcome C (fallback): Tombstone stays at idx.
-//
-// Scan limit is derived from the prophylactic spacing (c_p * x * 2), bounded
-// to [BSHIFT_CAP_MIN, BSHIFT_CAP_MAX].  This ensures we scan far enough to
-// see at least one primitive position (pos % spacing == 0).
-
-#define BSHIFT_CAP_MIN 4
-#define BSHIFT_CAP_MAX 16
+// Stranding prevention: if the chain extends past the cap, the tombstone
+// stays.  The insert path (rh_insert Phase 2) prevents new entries from
+// placing at the tombstone position when it would block entries past it
+// (the "dist==0 wall" check).
 
 // Verify ideal-position safety for entries in the range [idx+1, idx+1+len).
 // Returns true if all live entries can safely shift to their compacted positions.
@@ -459,9 +479,8 @@ static bool verify_ideal_safe(const ht_table_t *t, size_t idx, size_t len) {
 }
 
 // Commit a full backward shift for entries in [idx+1, idx+1+len).
-// Absorbs delete-tombstones, adjusts probe_dist, decrements tombstone_cnt.
-static void commit_backward_shift(ht_table_t *t, size_t idx, size_t len,
-                                   size_t del_tomb_count) {
+// Absorbs tombstones, adjusts probe_dist, decrements tombstone_cnt.
+static void commit_backward_shift(ht_table_t *t, size_t idx, size_t len) {
     size_t cap_mask = t->capacity - 1;
     size_t write_offset = 0;
     for (size_t i = 0; i < len; i++) {
@@ -475,116 +494,47 @@ static void commit_backward_shift(ht_table_t *t, size_t idx, size_t len,
             t->slots[write_pos].probe_dist -= (uint16_t)shift;
             write_offset++;
         } else {
+            // Absorb tombstone (delete or prophylactic)
             t->tombstone_cnt--;
         }
         t->slots[read_pos] = (ht_slot_t){0};
     }
     // Caller's tombstone at idx was overwritten by the first live entry.
     t->tombstone_cnt--;
-    (void)del_tomb_count;
 }
 
 static void delete_compact(ht_table_t *t, size_t idx) {
     size_t cap_mask = t->capacity - 1;
 
-    size_t spacing = (size_t)(compute_x(t) * t->c_p);
-    if (spacing < 2) spacing = 2;
-    size_t scan_limit = spacing * 2;
-    if (scan_limit < BSHIFT_CAP_MIN) scan_limit = BSHIFT_CAP_MIN;
-    if (scan_limit > BSHIFT_CAP_MAX) scan_limit = BSHIFT_CAP_MAX;
-
-    // Phase 1: Forward scan from idx+1
-    size_t live_count = 0, del_tomb_count = 0, chain_len = 0;
+    // Capped scan: at most BSHIFT_CAP entries.
+    size_t chain_len = 0;
+    size_t live_count = 0;
     bool ends_at_empty = false;
-    size_t prim_target = SIZE_MAX;
-    size_t prim_offset = SIZE_MAX;
 
     size_t scan = (idx + 1) & cap_mask;
-    while (chain_len < scan_limit) {
+    for (size_t steps = 0; steps < BSHIFT_CAP; steps++) {
         ht_slot_t *s = &t->slots[scan];
 
         if (slot_empty(s)) { ends_at_empty = true; break; }
-        if (slot_is_tomb(s) && s->key_len == 0) break;  // prophylactic barrier
         if (slot_is_tomb(s)) {
-            // Delete-tombstone: absorb during shift, not a push target
-            del_tomb_count++;
             chain_len++;
             scan = (scan + 1) & cap_mask;
             continue;
         }
         if (s->probe_dist == 0) break;  // chain boundary
-
-        // Live entry
-        if (prim_target == SIZE_MAX && scan % spacing == 0) {
-            prim_target = scan;
-            prim_offset = chain_len;
-        }
         live_count++;
         chain_len++;
         scan = (scan + 1) & cap_mask;
     }
 
-    // Outcome A: Full backward shift — eliminate tombstone
+    // Only compact if the chain ends cleanly within our scan window.
     if (ends_at_empty && live_count > 0 &&
         verify_ideal_safe(t, idx, chain_len)) {
-        commit_backward_shift(t, idx, chain_len, del_tomb_count);
-        return;
+        commit_backward_shift(t, idx, chain_len);
     }
-
-    // Outcome B: Push-forward to primitive position
-    // Simple swap: move the live entry at prim_target to idx (filling the
-    // gap left by the deleted entry), then place a prophylactic tombstone at
-    // prim_target.  Intermediate entries (live and del-tombs) between idx and
-    // prim_target are NOT shifted — they maintain chain continuity for entries
-    // after prim_target.
-    if (prim_target != SIZE_MAX) {
-        // Verify the entry at prim_target can move to idx (ideal-position check)
-        ht_slot_t *target_s = &t->slots[prim_target];
-        if (hash_is_live(target_s->hash)) {
-            size_t ideal = target_s->hash & cap_mask;
-            size_t target = idx;
-            bool safe = !(ideal > target && (ideal - target) < t->capacity / 2);
-
-            if (safe) {
-                size_t shift = prim_offset + 1;
-                // Move entry from prim_target to idx
-                t->slots[idx] = *target_s;
-                t->slots[idx].probe_dist -= (uint16_t)shift;
-                // Place prophylactic tombstone at prim_target
-                t->slots[prim_target] = (ht_slot_t){
-                    .hash = HASH_TOMB,
-                    .probe_dist = 0,
-                    .key_len = 0,
-                    .val_len = 0,
-                    .offset = 0
-                };
-                // Caller's delete-tombstone at idx was replaced by the live entry
-                // from prim_target, and a new prophylactic tombstone was placed at
-                // prim_target.  Net tombstone_cnt change: -1 + 1 = 0.
-                return;
-            }
-        }
-    }
-
-    // Outcome C: Fallback — tombstone stays at idx
-}
-
-// Full backward-shift: used during rebuild (resize/compact) where cost
-// doesn't matter since the entire table is being rebuilt anyway.
-static void full_backward_shift(ht_table_t *t, size_t idx) {
-    size_t cap_mask = t->capacity - 1;
-    while (1) {
-        size_t next = (idx + 1) & cap_mask;
-        ht_slot_t *s_next = &t->slots[next];
-
-        if (slot_empty(s_next) || slot_is_tomb(s_next) || s_next->probe_dist == 0)
-            break;
-
-        t->slots[idx] = *s_next;
-        t->slots[idx].probe_dist--;
-        idx = next;
-    }
-    t->slots[idx] = (ht_slot_t){0};
+    // Otherwise: tombstone stays at idx.  The insert path prevents
+    // new entries from creating dist==0 walls that would block entries
+    // past the tombstone.
 }
 
 static void zombie_step(ht_table_t *t) {
@@ -760,10 +710,7 @@ const void *ht_find_with_hash(const ht_table_t *t, uint64_t hash,
             continue;
         }
 
-        // NOTE: We do NOT use Robin-Hood early termination (probe_dist < dist)
-        // because tombstone-based deletion can break the probe-chain invariant.
-        // A newly inserted entry at dist=0 can appear in the middle of another
-        // entry's probe chain, making early termination incorrect.
+        if (s->probe_dist < dist) return NULL;
 
         if (s->hash == h32 && keys_match(t, s, key, key_len)) {
             if (out_value_len) *out_value_len = s->val_len;
@@ -805,7 +752,7 @@ void ht_find_all(const ht_table_t *t, uint64_t hash,
             continue;
         }
 
-        // No early termination: tombstones break Robin-Hood probe-chain invariant
+        if (s->probe_dist < dist) return;
 
         if (s->hash == h32) {
             if (!cb(slot_key_ptr(t, s), s->key_len,
@@ -875,7 +822,7 @@ bool ht_remove_with_hash(ht_table_t *t, uint64_t hash,
             continue;
         }
 
-        // No early termination: tombstones break Robin-Hood probe-chain invariant
+        if (s->probe_dist < dist) return false;
 
         if (s->hash == h32 && keys_match(t, s, key, key_len)) {
             t->size--;
@@ -1143,4 +1090,105 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
                    i, s->hash, s->key_len, s->val_len, s->offset);
         }
     }
+}
+
+// ============================================================================
+// Invariant Checker
+// ============================================================================
+
+const char *ht_check_invariants(const ht_table_t *t) {
+    if (!t) return "table is NULL";
+    size_t cap_mask = t->capacity - 1;
+
+    size_t live_count = 0;
+    size_t tomb_count = 0;
+    size_t spill_live = 0;
+
+    // Invariant 1: probe_dist == (pos - ideal) % capacity for every live entry
+    for (size_t i = 0; i < t->capacity; i++) {
+        const ht_slot_t *s = &t->slots[i];
+        if (slot_empty(s)) continue;
+        if (slot_is_tomb(s)) {
+            tomb_count++;
+            continue;
+        }
+        live_count++;
+
+        size_t ideal = s->hash & cap_mask;
+        size_t expected_dist = (i >= ideal) ? (i - ideal) : (t->capacity - ideal + i);
+        if (s->probe_dist != expected_dist) {
+            static char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "slot[%zu]: probe_dist=%u but expected %zu (hash=0x%x ideal=%zu)",
+                     i, s->probe_dist, expected_dist, s->hash, ideal);
+            return buf;
+        }
+    }
+
+    // Count spill lane
+    for (size_t i = 0; i < t->spill_len; i++) {
+        if (t->spill[i].key_len > 0) spill_live++;
+    }
+
+    // Invariant 2: size matches actual live count
+    if (t->size != live_count + spill_live) {
+        static char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "size=%zu but found %zu live (%zu main + %zu spill)",
+                 t->size, live_count + spill_live, live_count, spill_live);
+        return buf;
+    }
+
+    // Invariant 3: tombstone_cnt matches actual tombstone count
+    if (t->tombstone_cnt != tomb_count) {
+        static char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "tombstone_cnt=%zu but found %zu tombs",
+                 t->tombstone_cnt, tomb_count);
+        return buf;
+    }
+
+    // Invariant 4: No live entry exists that early termination would skip.
+    // For every live entry at position p, verify that searching from its
+    // ideal position would NOT be stopped by early termination before
+    // reaching p.
+    {
+        for (size_t i = 0; i < t->capacity; i++) {
+            const ht_slot_t *s = &t->slots[i];
+            if (!hash_is_live(s->hash)) continue;
+
+            size_t ideal = s->hash & cap_mask;
+            uint16_t dist = 0;
+            for (size_t steps = 0; steps <= t->capacity; steps++) {
+                size_t pos = (ideal + dist) & cap_mask;
+                if (pos == i) break; // reached our entry — OK
+
+                const ht_slot_t *scan = &t->slots[pos];
+                if (slot_empty(scan)) {
+                    static char buf[256];
+                    snprintf(buf, sizeof(buf),
+                             "slot[%zu] (hash=0x%x ideal=%zu dist=%u) unreachable: "
+                             "hit EMPTY at [%zu] while probing from ideal",
+                             i, s->hash, ideal, s->probe_dist, pos);
+                    return buf;
+                }
+                if (slot_is_tomb(scan)) {
+                    dist++;
+                    continue;
+                }
+                if (scan->probe_dist < dist) {
+                    static char buf[256];
+                    snprintf(buf, sizeof(buf),
+                             "slot[%zu] (hash=0x%x ideal=%zu dist=%u) unreachable: "
+                             "early termination at [%zu] (dist=%u < %u)",
+                             i, s->hash, ideal, s->probe_dist,
+                             pos, scan->probe_dist, dist);
+                    return buf;
+                }
+                dist++;
+            }
+        }
+    }
+
+    return NULL; // all good
 }

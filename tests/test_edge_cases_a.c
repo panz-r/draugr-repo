@@ -36,6 +36,14 @@
 #include <string.h>
 #include <assert.h>
 
+#define INV_CHECK(t, label) do { \
+    const char *_inv_err = ht_check_invariants(t); \
+    if (_inv_err) { \
+        printf("  INVARIANT BROKEN at %s: %s\n", (label), _inv_err); \
+        return 1; \
+    } \
+} while (0)
+
 // ============================================================================
 // Hash helpers
 // ============================================================================
@@ -162,6 +170,8 @@ static int test_spill_hash_zero(void) {
     }
 
     ht_resize(t, 64);
+    INV_CHECK(t, "test_spill_hash_zero: after resize");
+
     for (int i = 0; i < 12; i++) {
         char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
@@ -170,6 +180,8 @@ static int test_spill_hash_zero(void) {
     }
 
     ht_compact(t);
+    INV_CHECK(t, "test_spill_hash_zero: after compact");
+
     for (int i = 0; i < 12; i++) {
         char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
@@ -257,6 +269,8 @@ static int test_spill_mixed(void) {
     assert(ht_find(t, "n3", 2, NULL) == NULL);
 
     ht_compact(t);
+    INV_CHECK(t, "test_spill_mixed: after compact");
+
     assert(ht_find(t, "z0", 2, NULL) != NULL);
     assert(ht_find(t, "z2", 2, NULL) == NULL);
     assert(ht_find(t, "n4", 2, NULL) != NULL);
@@ -313,6 +327,8 @@ static int test_spill_stress(void) {
         else assert(v == NULL);
     }
     free(present);
+
+    INV_CHECK(t, "test_spill_stress: after 16000 ops");
 
     ht_destroy(t);
     printf("  PASS\n");
@@ -1106,6 +1122,8 @@ static int test_long_sequence_normal(void) {
         else assert(v == NULL);
     }
 
+    INV_CHECK(t, "test_long_sequence_normal: final");
+
     ht_stats_t st;
     ht_stats(t, &st);
     assert(st.size + st.tombstone_cnt <= st.capacity);
@@ -1160,6 +1178,9 @@ static int test_long_sequence_collision(void) {
         if (present[i]) assert(v != NULL && *v == i * 3);
         else assert(v == NULL);
     }
+
+    INV_CHECK(t, "test_long_sequence_collision: final");
+
     #undef LC_N
 
     free(present);
@@ -1227,6 +1248,8 @@ static int test_resize_up_down(void) {
 
     // Manual resize down to 256
     assert(ht_resize(t, 256));
+    INV_CHECK(t, "test_resize_up_down: after resize to 256");
+
     ht_stats(t, &st1);
     assert(st1.capacity == 256);
     assert(st1.size == 100);
@@ -1245,6 +1268,8 @@ static int test_resize_up_down(void) {
 
     // Resize down to 64
     assert(ht_resize(t, 64));
+    INV_CHECK(t, "test_resize_up_down: after resize to 64");
+
     ht_stats_t st2;
     ht_stats(t, &st2);
     assert(st2.size == 10);
@@ -1308,6 +1333,8 @@ static int test_compact_churn(void) {
 
     // Phase 3: Compact
     ht_compact(t);
+
+    INV_CHECK(t, "test_compact_churn: after compact");
 
     ht_stats_t st;
     ht_stats(t, &st);
@@ -1457,6 +1484,8 @@ static int test_resize_non_pow2(void) {
     /* Resize to non-power-of-2 — should round up */
     bool ok = ht_resize(t, 33);
     assert(ok);
+
+    INV_CHECK(t, "test_resize_non_pow2: after resize");
 
     ht_stats_t st;
     ht_stats(t, &st);
@@ -1930,6 +1959,8 @@ static int test_spill_multi_resize(void) {
     ht_resize(t, 128);
     ht_resize(t, 256);
 
+    INV_CHECK(t, "test_spill_multi_resize: after resizes");
+
     /* Verify all spill and normal entries survived */
     for (int i = 0; i < 5; i++) {
         char k[8]; snprintf(k, sizeof(k), "z%d", i);
@@ -1982,6 +2013,8 @@ static int test_arena_heterogeneous_compact(void) {
     /* Compact — arena is rebuilt, all offsets change */
     ht_compact(t);
 
+    INV_CHECK(t, "test_arena_heterogeneous_compact: after compact");
+
     /* Verify byte-exact correctness */
     const int *r1 = ht_find(t, short_key, 1, NULL);
     assert(r1 != NULL && *r1 == 42);
@@ -2022,12 +2055,16 @@ static int test_double_compact(void) {
 
     /* First compact */
     ht_compact(t);
+    INV_CHECK(t, "test_double_compact: after first compact");
+
     ht_stats_t st1;
     ht_stats(t, &st1);
     assert(st1.size == 8);
 
     /* Second compact — should be stable */
     ht_compact(t);
+    INV_CHECK(t, "test_double_compact: after second compact");
+
     ht_stats_t st2;
     ht_stats(t, &st2);
     assert(st2.size == 8);
@@ -2274,6 +2311,8 @@ static int test_resize_prophylactic(void) {
 
     /* Resize — should place prophylactic tombstones */
     ht_resize(t, 128);
+
+    INV_CHECK(t, "test_resize_prophylactic: after resize");
 
     ht_stats_t st;
     ht_stats(t, &st);
