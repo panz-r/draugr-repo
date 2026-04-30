@@ -1014,6 +1014,329 @@ void test_stats_empty_table(void) {
     printf("Stats empty table passed!\n");
 }
 
+// ============================================================================
+// New tests: backward shift, early termination, collision edge cases
+// ============================================================================
+
+void test_delete_chain_head_collision(void) {
+    printf("Testing delete chain head under collision...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, const_hash42, NULL, NULL);
+
+    /* Insert 30 colliding keys (all hash to 42) forming a chain */
+    int vals[30];
+    for (int i = 0; i < 30; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ch%d", i);
+        vals[i] = i * 11;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Delete the first entry in the chain (ideal position, probe_dist=0) */
+    ht_remove(t, "ch0", 3);
+
+    INV_CHECK(t, "test_delete_chain_head: after head delete");
+
+    /* All remaining 29 entries must be findable */
+    for (int i = 1; i < 30; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ch%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 11) {
+            printf("  FAIL: ch%d lost after head delete\n", i);
+            ht_destroy(t); return;
+        }
+    }
+    assert(ht_find(t, "ch0", 3, NULL) == NULL);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 29);
+
+    ht_destroy(t);
+    printf("Delete chain head collision passed!\n");
+}
+
+void test_delete_middle_collision_verify_ends(void) {
+    printf("Testing delete middle of collision chain, verify both ends...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, const_hash42, NULL, NULL);
+
+    /* Insert 10 colliding keys */
+    int vals[10];
+    for (int i = 0; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "md%d", i);
+        vals[i] = i * 7;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Delete middle entries 3,4,5 */
+    ht_remove(t, "md3", 3);
+    ht_remove(t, "md4", 3);
+    ht_remove(t, "md5", 3);
+
+    INV_CHECK(t, "test_delete_middle: after deletes");
+
+    /* Verify all 7 remaining entries */
+    for (int i = 0; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "md%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (i >= 3 && i <= 5) {
+            assert(v == NULL);
+        } else {
+            if (v == NULL || *v != i * 7) {
+                printf("  FAIL: md%d lost after middle deletes\n", i);
+                ht_destroy(t); return;
+            }
+        }
+    }
+
+    ht_destroy(t);
+    printf("Delete middle collision verify ends passed!\n");
+}
+
+void test_tombstone_early_termination(void) {
+    printf("Testing tombstone doesn't break early termination...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 12 keys to fill up the table */
+    int vals[12];
+    for (int i = 0; i < 12; i++) {
+        char k[16]; snprintf(k, sizeof(k), "et%d", i);
+        vals[i] = i;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Delete half — creates tombstones interleaved with live entries */
+    for (int i = 0; i < 12; i += 2) {
+        char k[16]; snprintf(k, sizeof(k), "et%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+
+    /* Now insert a new key — insert path must respect stranding prevention */
+    int v_new = 999;
+    ht_insert(t, "newkey", 6, &v_new, sizeof(int));
+
+    INV_CHECK(t, "test_tombstone_early_termination: after insert");
+
+    /* All odd-indexed entries + newkey must be findable */
+    for (int i = 1; i < 12; i += 2) {
+        char k[16]; snprintf(k, sizeof(k), "et%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i) {
+            printf("  FAIL: et%d lost\n", i);
+            ht_destroy(t); return;
+        }
+    }
+    const int *nv = ht_find(t, "newkey", 6, NULL);
+    assert(nv != NULL && *nv == 999);
+
+    ht_destroy(t);
+    printf("Tombstone early termination passed!\n");
+}
+
+void test_resize_with_many_tombstones(void) {
+    printf("Testing resize with many tombstones...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 20 keys */
+    int vals[20];
+    for (int i = 0; i < 20; i++) {
+        char k[16]; snprintf(k, sizeof(k), "rt%d", i);
+        vals[i] = i * 3;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Delete 15 of them — many tombstones */
+    for (int i = 0; i < 15; i++) {
+        char k[16]; snprintf(k, sizeof(k), "rt%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+
+    /* Resize to 128 — should clean up tombstones */
+    assert(ht_resize(t, 128));
+
+    INV_CHECK(t, "test_resize_tombstones: after resize");
+
+    /* Survivors must be correct */
+    for (int i = 15; i < 20; i++) {
+        char k[16]; snprintf(k, sizeof(k), "rt%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 3) {
+            printf("  FAIL: rt%d lost after resize with tombstones\n", i);
+            ht_destroy(t); return;
+        }
+    }
+    for (int i = 0; i < 15; i++) {
+        assert(ht_find(t, "rt%d" + 0, 0, NULL) || true); // just no crash
+        char k[16]; snprintf(k, sizeof(k), "rt%d", i);
+        assert(ht_find(t, k, strlen(k), NULL) == NULL);
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 5);
+
+    ht_destroy(t);
+    printf("Resize with many tombstones passed!\n");
+}
+
+void test_delete_then_insert_stranding(void) {
+    printf("Testing delete-then-insert stranding prevention...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.85,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 10 keys */
+    int vals[10];
+    for (int i = 0; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ds%d", i);
+        vals[i] = i * 5;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Delete key 5 — creates tombstone */
+    ht_remove(t, "ds5", 3);
+
+    /* Insert a new key that could land at the tombstone position
+     * and potentially strand entries past it via early termination */
+    int v_new = 777;
+    ht_insert(t, "ds5", 3, &v_new, sizeof(int));
+
+    INV_CHECK(t, "test_delete_insert_stranding: after reinsert");
+
+    /* Verify all 10 entries (ds5 was reinserted with new value) */
+    for (int i = 0; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ds%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        int expected = (i == 5) ? 777 : i * 5;
+        if (v == NULL || *v != expected) {
+            printf("  FAIL: ds%d lost (got %p expected %d)\n",
+                   i, (void *)v, expected);
+            ht_destroy(t); return;
+        }
+    }
+
+    ht_destroy(t);
+    printf("Delete-then-insert stranding prevention passed!\n");
+}
+
+void test_inc_under_collision(void) {
+    printf("Testing ht_inc under collision...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, const_hash42, NULL, NULL);
+
+    /* Inc 10 colliding keys 100 times each */
+    for (int round = 0; round < 100; round++) {
+        for (int i = 0; i < 10; i++) {
+            char k[16]; snprintf(k, sizeof(k), "ic%d", i);
+            int64_t r = ht_inc(t, k, strlen(k), 1);
+            assert(r == round + 1);
+        }
+    }
+
+    INV_CHECK(t, "test_inc_collision: after 1000 incs");
+
+    /* Verify final values */
+    for (int i = 0; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ic%d", i);
+        const int64_t *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != 100) {
+            printf("  FAIL: ic%d got %lld expected 100\n", i,
+                   v ? (long long)*v : -1LL);
+            ht_destroy(t); return;
+        }
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 10);
+
+    ht_destroy(t);
+    printf("Inc under collision passed!\n");
+}
+
+void test_capacity_2_full_load(void) {
+    printf("Testing minimum capacity table...\n");
+    /* initial_capacity < 4 gets clamped to 4, so use ht_resize to get to 4 */
+    ht_config_t cfg = { .initial_capacity = 4, .max_load_factor = 0.99,
+                        .min_load_factor = 0.0, .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.capacity == 4);
+
+    /* Insert 3 entries into cap-4 table (high load) */
+    int v1 = 10, v2 = 20, v3 = 30;
+    assert(ht_insert(t, "a", 1, &v1, sizeof(int)));
+    assert(ht_insert(t, "b", 1, &v2, sizeof(int)));
+    assert(ht_insert(t, "c", 1, &v3, sizeof(int)));
+
+    INV_CHECK(t, "test_cap2_full: after 3 inserts");
+
+    /* All must be findable */
+    assert(*(int *)ht_find(t, "a", 1, NULL) == 10);
+    assert(*(int *)ht_find(t, "b", 1, NULL) == 20);
+    assert(*(int *)ht_find(t, "c", 1, NULL) == 30);
+
+    /* Remove middle one */
+    assert(ht_remove(t, "b", 1));
+    assert(ht_find(t, "b", 1, NULL) == NULL);
+    assert(*(int *)ht_find(t, "a", 1, NULL) == 10);
+    assert(*(int *)ht_find(t, "c", 1, NULL) == 30);
+
+    /* Reinsert */
+    int v4 = 40;
+    assert(ht_insert(t, "b", 1, &v4, sizeof(int)));
+    assert(*(int *)ht_find(t, "b", 1, NULL) == 40);
+
+    INV_CHECK(t, "test_cap2_full: after delete+reinsert");
+
+    ht_destroy(t);
+    printf("Minimum capacity table passed!\n");
+}
+
+void test_remove_all_verify_clean(void) {
+    printf("Testing remove all entries leaves clean state...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    int vals[12];
+    for (int i = 0; i < 12; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ra%d", i);
+        vals[i] = i;
+        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Remove all */
+    for (int i = 0; i < 12; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ra%d", i);
+        bool r = ht_remove(t, k, strlen(k));
+        assert(r);
+    }
+
+    INV_CHECK(t, "test_remove_all: after deleting all");
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    /* Reinsert — should work cleanly */
+    int v = 42;
+    assert(ht_insert(t, "fresh", 5, &v, sizeof(int)));
+    assert(*(int *)ht_find(t, "fresh", 5, NULL) == 42);
+
+    ht_destroy(t);
+    printf("Remove all verify clean passed!\n");
+}
+
 int main() {
     int bugs = 0;
     test_basic();
@@ -1054,6 +1377,16 @@ int main() {
     test_insert_duplicate_with_different_value_size();
     test_remove_nonexistent();
     test_stats_empty_table();
+
+    /* New: backward shift, early termination, collision edge cases */
+    test_delete_chain_head_collision();
+    test_delete_middle_collision_verify_ends();
+    test_tombstone_early_termination();
+    test_resize_with_many_tombstones();
+    test_delete_then_insert_stranding();
+    test_inc_under_collision();
+    test_capacity_2_full_load();
+    test_remove_all_verify_clean();
 
     printf("\nAll tests passed!\n");
     return bugs;

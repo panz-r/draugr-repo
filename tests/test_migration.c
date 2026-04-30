@@ -932,6 +932,370 @@ static int test_migration_prophylactic_tombstones(void) {
     return 0;
 }
 
+// Test zombie + resize interaction: zombie steps fire, then resize resets cursor
+static int test_migration_zombie_then_resize(void) {
+    printf("Test: zombie steps then resize resets cursor...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 32,
+        .max_load_factor = 0.75,
+        .min_load_factor = 0.0,
+        .zombie_window = 8
+    };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 30, delete 15 to create tombstones, each insert triggers zombie step */
+    int vals[30];
+    for (int i = 0; i < 30; i++) {
+        vals[i] = i * 7;
+        ht_insert(t, &i, sizeof(int), &vals[i], sizeof(int));
+    }
+    for (int i = 0; i < 30; i += 2) {
+        ht_remove(t, &i, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_zombie_then_resize: after deletes");
+
+    /* Insert more to advance zombie cursor */
+    for (int i = 30; i < 50; i++) {
+        int v = i * 11;
+        ht_insert(t, &i, sizeof(int), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_zombie_then_resize: after more inserts");
+
+    /* Force resize — zombie cursor must reset */
+    ht_resize(t, 256);
+
+    INV_CHECK(t, "test_zombie_then_resize: after resize");
+
+    /* Verify all survivors */
+    for (int i = 0; i < 50; i++) {
+        const int *v = ht_find(t, &i, sizeof(int), NULL);
+        if (i % 2 == 0 && i < 30) {
+            assert(v == NULL);
+        } else {
+            int expected = (i < 30) ? i * 7 : i * 11;
+            if (v == NULL || *v != expected) {
+                printf("  FAIL: key %d lost after zombie+resize\n", i);
+                ht_destroy(t); return 1;
+            }
+        }
+    }
+
+    /* Continue inserting — zombie should work after reset */
+    for (int i = 50; i < 70; i++) {
+        int v = i * 13;
+        ht_insert(t, &i, sizeof(int), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_zombie_then_resize: after post-resize inserts");
+
+    for (int i = 50; i < 70; i++) {
+        const int *v = ht_find(t, &i, sizeof(int), NULL);
+        if (v == NULL || *v != i * 13) {
+            printf("  FAIL: key %d lost after post-resize inserts\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test multiple shrink-grow oscillation cycles
+static int test_migration_shrink_grow_oscillation(void) {
+    printf("Test: shrink-grow oscillation cycles...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 64,
+        .max_load_factor = 0.75,
+        .min_load_factor = 0.25,
+        .zombie_window = 0
+    };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    for (int cycle = 0; cycle < 5; cycle++) {
+        /* Fill to trigger growth */
+        for (int i = 0; i < 100; i++) {
+            char k[16]; snprintf(k, sizeof(k), "sg%d_%d", cycle, i);
+            int v = cycle * 1000 + i;
+            ht_insert(t, k, strlen(k), &v, sizeof(int));
+        }
+
+        INV_CHECK(t, "test_shrink_grow: after fill");
+
+        ht_stats_t st;
+        ht_stats(t, &st);
+        assert(st.size >= 100);
+
+        /* Delete most to trigger shrink */
+        for (int i = 0; i < 100; i++) {
+            char k[16]; snprintf(k, sizeof(k), "sg%d_%d", cycle, i);
+            ht_remove(t, k, strlen(k));
+        }
+
+        ht_stats(t, &st);
+        assert(st.size < 100);
+
+        /* Insert a few survivors to verify */
+        char k[16]; snprintf(k, sizeof(k), "keep%d", cycle);
+        int v = cycle;
+        ht_insert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_shrink_grow: final");
+
+    /* Verify all keep entries survived the oscillations */
+    for (int cycle = 0; cycle < 5; cycle++) {
+        char k[16]; snprintf(k, sizeof(k), "keep%d", cycle);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != cycle) {
+            printf("  FAIL: keep%d lost after oscillation\n", cycle);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test mixed spill + normal entries through auto-shrink
+static int test_migration_spill_auto_shrink(void) {
+    printf("Test: mixed spill + normal entries through auto-shrink...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 32,
+        .max_load_factor = 0.75,
+        .min_load_factor = 0.25,
+        .zombie_window = 0
+    };
+    ht_table_t *t = ht_create(&cfg, selective_zero_hash, NULL, NULL);
+
+    /* Insert 10 spill entries (z-prefix) and 40 normal entries */
+    int spill_vals[10], norm_vals[40];
+    for (int i = 0; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        spill_vals[i] = i * 10;
+        ht_insert(t, k, strlen(k), &spill_vals[i], sizeof(int));
+    }
+    for (int i = 0; i < 40; i++) {
+        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        norm_vals[i] = i * 100;
+        ht_insert(t, k, strlen(k), &norm_vals[i], sizeof(int));
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 50);
+
+    /* Delete 40 normal entries — triggers auto-shrink */
+    for (int i = 0; i < 40; i++) {
+        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+
+    INV_CHECK(t, "test_spill_auto_shrink: after delete");
+
+    ht_stats(t, &st);
+    assert(st.size == 10);
+
+    /* All spill entries must survive the shrink */
+    for (int i = 0; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 10) {
+            printf("  FAIL: spill z%d lost after auto-shrink\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test tomb_threshold burst: rapid deletes trigger rebuild, then verify
+static int test_migration_tomb_threshold_burst(void) {
+    printf("Test: tomb_threshold burst rebuild...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 64,
+        .max_load_factor = 0.85,
+        .min_load_factor = 0.0,
+        .tomb_threshold = 0.15,
+        .zombie_window = 4
+    };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 50 entries */
+    for (int i = 0; i < 50; i++) {
+        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        int v = i * 3;
+        ht_insert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    /* Delete 40 — tombstone ratio skyrockets past 0.15 */
+    for (int i = 0; i < 40; i++) {
+        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+
+    INV_CHECK(t, "test_tomb_burst: after massive delete");
+
+    /* Insert 10 more — tomb_threshold triggers extra zombie steps */
+    for (int i = 50; i < 60; i++) {
+        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        int v = i * 5;
+        ht_insert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_tomb_burst: after threshold-triggered inserts");
+
+    /* Verify survivors: tb40-49 (original) and tb50-59 (new) */
+    for (int i = 40; i < 60; i++) {
+        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        int expected = (i < 50) ? i * 3 : i * 5;
+        if (v == NULL || *v != expected) {
+            printf("  FAIL: tb%d lost after tomb burst (got %d expected %d)\n",
+                   i, v ? *v : -1, expected);
+            ht_destroy(t); return 1;
+        }
+    }
+    for (int i = 0; i < 40; i++) {
+        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        assert(ht_find(t, k, strlen(k), NULL) == NULL);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test compact during zombie rebuild: zombie cursor active, then compact
+static int test_migration_compact_during_zombie(void) {
+    printf("Test: compact during active zombie rebuild...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 64,
+        .max_load_factor = 0.85,
+        .min_load_factor = 0.0,
+        .zombie_window = 8
+    };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 40, delete 30, insert 20 — zombie steps active */
+    for (int i = 0; i < 40; i++) {
+        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        int v = i * 7;
+        ht_insert(t, k, strlen(k), &v, sizeof(int));
+    }
+    for (int i = 0; i < 30; i++) {
+        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+    for (int i = 40; i < 60; i++) {
+        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        int v = i * 9;
+        ht_insert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_compact_during_zombie: before compact");
+
+    /* Compact while zombie cursor is mid-scan */
+    ht_compact(t);
+
+    INV_CHECK(t, "test_compact_during_zombie: after compact");
+
+    /* Verify all 30 survivors */
+    for (int i = 30; i < 60; i++) {
+        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        int expected = (i < 40) ? i * 7 : i * 9;
+        if (v == NULL || *v != expected) {
+            printf("  FAIL: cd%d lost after compact during zombie\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    /* Continue inserting — zombie should work after compact reset */
+    for (int i = 60; i < 80; i++) {
+        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        int v = i;
+        ht_insert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_compact_during_zombie: after post-compact inserts");
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test resize to capacity that exactly fits current size (zero slack)
+static int test_migration_resize_exact_fit(void) {
+    printf("Test: resize to capacity that exactly fits size...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 32,
+        .max_load_factor = 0.75,
+        .min_load_factor = 0.0,
+        .zombie_window = 0
+    };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 20, delete 12, leaves 8 */
+    for (int i = 0; i < 20; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ef%d", i);
+        int v = i * 11;
+        ht_insert(t, k, strlen(k), &v, sizeof(int));
+    }
+    for (int i = 0; i < 12; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ef%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 8);
+
+    /* Resize to exactly 8 (next_pow2 rounds to 8) */
+    assert(ht_resize(t, 8));
+
+    INV_CHECK(t, "test_resize_exact_fit: after resize");
+
+    ht_stats(t, &st);
+    assert(st.capacity == 8);
+    assert(st.size == 8);
+
+    /* All 8 must be findable at 100% load factor */
+    for (int i = 12; i < 20; i++) {
+        char k[16]; snprintf(k, sizeof(k), "ef%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 11) {
+            printf("  FAIL: ef%d lost at exact fit\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    /* Insert one more — must trigger resize */
+    int extra = 999;
+    assert(ht_insert(t, "extra", 5, &extra, sizeof(int)));
+
+    ht_stats(t, &st);
+    assert(st.capacity > 8);
+    assert(st.size == 9);
+
+    INV_CHECK(t, "test_resize_exact_fit: after overflow insert");
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
 // Wrapper main
 int main(void) {
     printf("=== Migration Tests ===\n\n");
@@ -950,6 +1314,12 @@ int main(void) {
     if (test_migration_many_deletes_before()) return 1;
     if (test_migration_spill_to_main()) return 1;
     if (test_migration_prophylactic_tombstones()) return 1;
+    if (test_migration_zombie_then_resize()) return 1;
+    if (test_migration_shrink_grow_oscillation()) return 1;
+    if (test_migration_spill_auto_shrink()) return 1;
+    if (test_migration_tomb_threshold_burst()) return 1;
+    if (test_migration_compact_during_zombie()) return 1;
+    if (test_migration_resize_exact_fit()) return 1;
 
     printf("\nAll migration tests passed!\n");
     return 0;

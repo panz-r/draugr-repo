@@ -2517,6 +2517,427 @@ static int test_resize_capacity_zero_one(void) {
 }
 
 // ============================================================================
+// 62. Long chain beyond BSHIFT_CAP: delete head, verify all remaining findable
+// ============================================================================
+
+static int test_long_chain_delete_head(void) {
+    printf("Test: long chain (>BSHIFT_CAP) delete head...\n");
+    /* BSHIFT_CAP is 16. Insert 25 colliding keys, delete the first.
+     * Backward shift is capped at 16, so not all entries shift.
+     * The stranding prevention in insert path must keep entries reachable. */
+    ht_config_t cfg = { .initial_capacity = 128, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+    assert(t != NULL);
+
+    int vals[25];
+    for (int i = 0; i < 25; i++) {
+        char k[8]; snprintf(k, sizeof(k), "lc%d", i);
+        vals[i] = i * 3;
+        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+    }
+
+    /* Delete the head of the chain (probe_dist=0) */
+    assert(ht_remove(t, "lc0", 3));
+
+    INV_CHECK(t, "test_long_chain_delete_head: after head delete");
+
+    /* All 24 remaining entries must be findable */
+    for (int i = 1; i < 25; i++) {
+        char k[8]; snprintf(k, sizeof(k), "lc%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 3) {
+            printf("  FAIL: lc%d lost after head delete\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 24);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 63. Delete with interleaved tombstones in chain
+// ============================================================================
+
+static int test_delete_with_interleaved_tombs(void) {
+    printf("Test: delete with interleaved tombstones in chain...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert 15 colliding keys */
+    int vals[15];
+    for (int i = 0; i < 15; i++) {
+        char k[8]; snprintf(k, sizeof(k), "ti%d", i);
+        vals[i] = i * 7;
+        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+    }
+
+    /* Delete every other to create interleaved tombstones */
+    for (int i = 0; i < 15; i += 2) {
+        char k[8]; snprintf(k, sizeof(k), "ti%d", i);
+        assert(ht_remove(t, k, strlen(k)));
+    }
+
+    INV_CHECK(t, "test_interleaved_tombs: after alternate deletes");
+
+    /* Now delete one of the remaining — backward shift must handle tombs */
+    assert(ht_remove(t, "ti3", 3));
+
+    INV_CHECK(t, "test_interleaved_tombs: after delete in tomb chain");
+
+    /* Verify remaining entries */
+    for (int i = 0; i < 15; i++) {
+        char k[8]; snprintf(k, sizeof(k), "ti%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (i % 2 == 0 || i == 3) {
+            assert(v == NULL);
+        } else {
+            if (v == NULL || *v != i * 7) {
+                printf("  FAIL: ti%d lost\n", i);
+                ht_destroy(t); return 1;
+            }
+        }
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 64. Insert into fresh prophylactic tombstone positions
+// ============================================================================
+
+static int test_insert_at_prophylactic_positions(void) {
+    printf("Test: insert at prophylactic tombstone positions...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert some entries to trigger resize with prophylactic tombstones */
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "pp%d", i);
+        int v = i;
+        assert(ht_insert(t, k, strlen(k), &v, sizeof(int)));
+    }
+
+    /* Compact — places prophylactic tombstones at regular intervals */
+    ht_compact(t);
+
+    INV_CHECK(t, "test_prophylactic_insert: after compact");
+
+    /* Now insert many more — some must land at prophylactic positions */
+    for (int i = 20; i < 60; i++) {
+        char k[8]; snprintf(k, sizeof(k), "pp%d", i);
+        int v = i * 2;
+        assert(ht_insert(t, k, strlen(k), &v, sizeof(int)));
+    }
+
+    INV_CHECK(t, "test_prophylactic_insert: after more inserts");
+
+    /* Verify all 60 entries */
+    for (int i = 0; i < 60; i++) {
+        char k[8]; snprintf(k, sizeof(k), "pp%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        int expected = (i < 20) ? i : i * 2;
+        if (v == NULL || *v != expected) {
+            printf("  FAIL: pp%d lost (got %d expected %d)\n",
+                   i, v ? *v : -1, expected);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 65. ht_inc on key that was tombstoned mid-chain
+// ============================================================================
+
+static int test_inc_tombstoned_key(void) {
+    printf("Test: ht_inc on key that was tombstoned mid-chain...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+    assert(t != NULL);
+
+    /* Insert 8 colliding keys */
+    for (int i = 0; i < 8; i++) {
+        char k[8]; snprintf(k, sizeof(k), "it%d", i);
+        int v = i * 10;
+        assert(ht_insert(t, k, strlen(k), &v, sizeof(int)));
+    }
+
+    /* Delete key 4 — tombstoned in middle of chain */
+    assert(ht_remove(t, "it4", 3));
+
+    /* ht_inc on the tombstoned key — must create new entry */
+    int64_t r = ht_inc(t, "it4", 3, 100);
+    assert(r == 100);
+
+    INV_CHECK(t, "test_inc_tombstoned: after inc on deleted key");
+
+    /* Verify all 8 entries: it4 now has value 100 as int64_t,
+     * rest still have int values (4 bytes) */
+    /* it4: inserted via ht_inc → int64_t */
+    {
+        size_t vl = 0;
+        const int64_t *v = ht_find(t, "it4", 3, &vl);
+        if (v == NULL || vl != sizeof(int64_t) || *v != 100) {
+            printf("  FAIL: it4 got %lld (vl=%zu)\n",
+                   v ? (long long)*v : -1LL, vl);
+            ht_destroy(t); return 1;
+        }
+    }
+    /* Others: still int (4 bytes) */
+    for (int i = 0; i < 8; i++) {
+        if (i == 4) continue;
+        char k[8]; snprintf(k, sizeof(k), "it%d", i);
+        size_t vl = 0;
+        const int *v = ht_find(t, k, strlen(k), &vl);
+        if (v == NULL || vl != sizeof(int) || *v != i * 10) {
+            printf("  FAIL: it%d got %d (vl=%zu) expected %d\n",
+                   i, v ? *v : -1, vl, i * 10);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 8);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 66. Rapid insert/delete churn on colliding keys
+// ============================================================================
+
+static int test_collision_churn_rapid(void) {
+    printf("Test: rapid insert/delete churn on colliding keys...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.85,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+    assert(t != NULL);
+
+    #define CC_N 20
+    int present[CC_N];
+    memset(present, 0, sizeof(present));
+    srand(5555);
+
+    for (int op = 0; op < 2000; op++) {
+        int k = rand() % CC_N;
+        char key[8]; snprintf(key, sizeof(key), "cr%d", k);
+
+        if (present[k]) {
+            assert(ht_remove(t, key, strlen(key)));
+            present[k] = 0;
+        } else {
+            int v = k * 13;
+            assert(ht_insert(t, key, strlen(key), &v, sizeof(int)));
+            present[k] = 1;
+        }
+
+        if (op % 500 == 499) {
+            INV_CHECK(t, "test_collision_churn_rapid: periodic");
+        }
+    }
+
+    /* Final verify */
+    for (int i = 0; i < CC_N; i++) {
+        char key[8]; snprintf(key, sizeof(key), "cr%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        if (present[i]) {
+            if (v == NULL || *v != i * 13) {
+                printf("  FAIL: cr%d lost\n", i);
+                ht_destroy(t); return 1;
+            }
+        } else {
+            assert(v == NULL);
+        }
+    }
+    #undef CC_N
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 67. Size 1→0 transition with invariant check
+// ============================================================================
+
+static int test_size_one_to_zero(void) {
+    printf("Test: size 1→0 transition with invariant check...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    int v = 42;
+    assert(ht_insert(t, "only", 4, &v, sizeof(int)));
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    /* Delete the only entry */
+    assert(ht_remove(t, "only", 4));
+
+    INV_CHECK(t, "test_size_one_to_zero: after delete");
+
+    ht_stats(t, &st);
+    assert(st.size == 0);
+    assert(ht_find(t, "only", 4, NULL) == NULL);
+
+    /* Can still insert */
+    int v2 = 99;
+    assert(ht_insert(t, "only", 4, &v2, sizeof(int)));
+    assert(*(int *)ht_find(t, "only", 4, NULL) == 99);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 68. find_all after backward shift reduces chain
+// ============================================================================
+
+static int test_find_all_after_backshift(void) {
+    printf("Test: find_all after backward shift reduces chain...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    /* Insert 8 colliding keys */
+    int vals[8];
+    for (int i = 0; i < 8; i++) {
+        char k[8]; snprintf(k, sizeof(k), "fb%d", i);
+        vals[i] = i * 5;
+        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+    }
+
+    /* Delete key 0 — triggers backward shift if chain ends at empty */
+    ht_remove(t, "fb0", 3);
+
+    INV_CHECK(t, "test_find_all_backshift: after delete");
+
+    /* find_all(42) should return 7 entries */
+    g_collect_count = 0;
+    ht_find_all(t, 42, collect_val_cb, NULL);
+    assert(g_collect_count == 7);
+
+    /* Verify each survivor individually */
+    for (int i = 1; i < 8; i++) {
+        char k[8]; snprintf(k, sizeof(k), "fb%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 5) {
+            printf("  FAIL: fb%d lost\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 69. Delete at BSHIFT_CAP boundary — chain exactly BSHIFT_CAP long
+// ============================================================================
+
+static int test_delete_at_bshift_cap_boundary(void) {
+    printf("Test: delete at BSHIFT_CAP boundary...\n");
+    /* BSHIFT_CAP=16. Insert exactly 17 colliding keys (chain len 17),
+     * delete key at position 0. Chain extends 16 past the tombstone. */
+    ht_config_t cfg = { .initial_capacity = 128, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+    assert(t != NULL);
+
+    int vals[17];
+    for (int i = 0; i < 17; i++) {
+        char k[8]; snprintf(k, sizeof(k), "bc%d", i);
+        vals[i] = i * 11;
+        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+    }
+
+    /* Delete the head */
+    assert(ht_remove(t, "bc0", 3));
+
+    INV_CHECK(t, "test_bshift_cap_boundary: after delete");
+
+    /* All 16 remaining must be findable */
+    for (int i = 1; i < 17; i++) {
+        char k[8]; snprintf(k, sizeof(k), "bc%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 11) {
+            printf("  FAIL: bc%d lost at BSHIFT_CAP boundary\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 16);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 70. Delete near end of chain then find near start
+// ============================================================================
+
+static int test_delete_tail_find_head(void) {
+    printf("Test: delete near chain tail, find near chain head...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.9,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    /* Insert 10 colliding keys */
+    for (int i = 0; i < 10; i++) {
+        char k[8]; snprintf(k, sizeof(k), "dt%d", i);
+        int v = i * 9;
+        assert(ht_insert(t, k, strlen(k), &v, sizeof(int)));
+    }
+
+    /* Delete the last two entries (tail of chain) */
+    assert(ht_remove(t, "dt9", 3));
+    assert(ht_remove(t, "dt8", 3));
+
+    INV_CHECK(t, "test_delete_tail_find_head: after tail deletes");
+
+    /* All first 8 must be findable — early termination must not skip them */
+    for (int i = 0; i < 8; i++) {
+        char k[8]; snprintf(k, sizeof(k), "dt%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 9) {
+            printf("  FAIL: dt%d lost after tail delete\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -2622,9 +3043,20 @@ int main(void) {
     fails += test_spill_find_all_early_stop();
     fails += test_resize_capacity_zero_one();
 
+    // New tests (62-70)
+    fails += test_long_chain_delete_head();
+    fails += test_delete_with_interleaved_tombs();
+    fails += test_insert_at_prophylactic_positions();
+    fails += test_inc_tombstoned_key();
+    fails += test_collision_churn_rapid();
+    fails += test_size_one_to_zero();
+    fails += test_find_all_after_backshift();
+    fails += test_delete_at_bshift_cap_boundary();
+    fails += test_delete_tail_find_head();
+
     printf("\n");
     if (fails == 0) {
-        printf("All edge case A tests passed! (61/61)\n");
+        printf("All edge case A tests passed! (70/70)\n");
     } else {
         printf("%d test(s) FAILED!\n", fails);
     }
