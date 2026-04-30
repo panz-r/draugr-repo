@@ -62,7 +62,7 @@ static int test_migration_interleaved(void) {
         char key[32];
         snprintf(key, sizeof(key), "key%d", i);
         int val = i * 100;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
         present[i] = 1;
         present_count++;
         
@@ -98,7 +98,7 @@ static int test_migration_interleaved(void) {
         char key[32];
         snprintf(key, sizeof(key), "key%d", i);
         int val = i * 100;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
         present[i] = 1;
         present_count++;
         
@@ -213,7 +213,7 @@ static int test_sequential_resizes(void) {
             char key[32];
             snprintf(key, sizeof(key), "key%d", next_key);
             int val = next_key * 100;  // Simple: value = key * 100
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[next_key] = 1;
             next_key++;
             
@@ -317,19 +317,19 @@ static int test_migration_spill(void) {
     for (int i = 0; i < 15; i++) {
         char k[16]; snprintf(k, sizeof(k), "z%d", i);
         int v = i * 10;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
     for (int i = 0; i < 30; i++) {
         char k[16]; snprintf(k, sizeof(k), "n%d", i);
         int v = i * 100;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
 
     /* Trigger multiple resizes */
     for (int i = 50; i < 200; i++) {
         char k[16]; snprintf(k, sizeof(k), "n%d", i);
         int v = i * 100;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
 
     INV_CHECK(t, "test_migration_spill: after resizes");
@@ -372,7 +372,7 @@ static int test_migration_collision(void) {
     for (int i = 0; i < 100; i++) {
         char k[16]; snprintf(k, sizeof(k), "col%d", i);
         int v = i;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
         present[i] = 1;
     }
     for (int i = 0; i < 100; i += 3) {
@@ -383,7 +383,7 @@ static int test_migration_collision(void) {
     for (int i = 100; i < 200; i++) {
         char k[16]; snprintf(k, sizeof(k), "col%d", i);
         int v = i;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
         present[i] = 1;
     }
 
@@ -431,7 +431,7 @@ static int test_migration_zombie(void) {
     for (int i = 0; i < 200; i++) {
         char k[16]; snprintf(k, sizeof(k), "mz%d", i);
         int v = i * 5;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
         present[i] = 1;
     }
     /* Delete many to create tombstones */
@@ -444,7 +444,7 @@ static int test_migration_zombie(void) {
     for (int i = 200; i < 300; i++) {
         char k[16]; snprintf(k, sizeof(k), "mz%d", i);
         int v = i * 5;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
         present[i] = 1;
     }
 
@@ -487,7 +487,7 @@ static int test_migration_auto_shrink(void) {
     for (int i = 0; i < 100; i++) {
         char k[16]; snprintf(k, sizeof(k), "as%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     ht_stats_t st;
@@ -545,14 +545,14 @@ static int test_migration_string_integrity(void) {
     /* Insert 20 string-valued entries */
     for (int i = 0; i < 20; i++) {
         char k[8]; snprintf(k, sizeof(k), "w%d", i);
-        ht_insert(t, k, strlen(k), values[i], strlen(values[i]));
+        ht_upsert(t, k, strlen(k), values[i], strlen(values[i]));
     }
 
     /* Insert 60 ints to trigger multiple resizes */
     for (int i = 0; i < 60; i++) {
         char k[8]; snprintf(k, sizeof(k), "n%d", i);
         int v = i * 7;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     /* Delete half the ints */
@@ -600,7 +600,7 @@ static int test_migration_compact_cycle(void) {
             int k = rand() % 200;
             char kb[16]; snprintf(kb, sizeof(kb), "mc%d", k);
             int v = k * 11 + cycle;
-            ht_insert(t, kb, strlen(kb), &v, sizeof(int));
+            ht_upsert(t, kb, strlen(kb), &v, sizeof(int));
             present[k] = 1;
         }
 
@@ -666,20 +666,20 @@ static int test_migration_heterogeneous_values(void) {
     uint8_t empty_val = 0;
 
     /* Insert diverse entries */
-    ht_insert(t, "byte1", 5, &one_byte, 1);
-    ht_insert(t, "byte2", 5, &one_byte, 1);
-    ht_insert(t, "int64", 5, &eight_byte, sizeof(int64_t));
+    ht_upsert(t, "byte1", 5, &one_byte, 1);
+    ht_upsert(t, "byte2", 5, &one_byte, 1);
+    ht_upsert(t, "int64", 5, &eight_byte, sizeof(int64_t));
     for (int i = 0; i < 5; i++) {
         char k[8]; snprintf(k, sizeof(k), "big%d", i);
-        ht_insert(t, k, strlen(k), big_buf[i], 100);
+        ht_upsert(t, k, strlen(k), big_buf[i], 100);
     }
-    ht_insert(t, "empty", 5, &empty_val, 0);
+    ht_upsert(t, "empty", 5, &empty_val, 0);
 
     /* Trigger growth by inserting many more entries */
     for (int i = 0; i < 80; i++) {
         char k[16]; snprintf(k, sizeof(k), "grow%d", i);
         int v = i;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     INV_CHECK(t, "test_migration_heterogeneous_values: after growth");
@@ -749,7 +749,7 @@ static int test_migration_many_deletes_before(void) {
     for (int i = 0; i < 100; i++) {
         char k[16]; snprintf(k, sizeof(k), "del%d", i);
         int v = i * 13;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     /* Delete 80 of them */
@@ -805,11 +805,11 @@ static int test_migration_spill_to_main(void) {
     };
     ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
 
-    /* Insert 5 spill entries via ht_insert_with_hash(t, 0, ...) */
+    /* Insert 5 spill entries via ht_upsert_with_hash(t, 0, ...) */
     int spill_vals[5];
     for (int i = 0; i < 5; i++) {
         spill_vals[i] = i * 100;
-        ht_insert_with_hash(t, 0, &i, sizeof(int), &spill_vals[i], sizeof(int));
+        ht_upsert_with_hash(t, 0, &i, sizeof(int), &spill_vals[i], sizeof(int));
     }
 
     /* Verify spill entries are findable */
@@ -824,7 +824,7 @@ static int test_migration_spill_to_main(void) {
     /* Insert enough normal entries to trigger growth */
     for (int i = 100; i < 300; i++) {
         int v = i * 7;
-        ht_insert(t, &i, sizeof(int), &v, sizeof(int));
+        ht_upsert(t, &i, sizeof(int), &v, sizeof(int));
     }
 
     INV_CHECK(t, "test_migration_spill_to_main: after growth");
@@ -842,7 +842,7 @@ static int test_migration_spill_to_main(void) {
     int spill_vals2[5];
     for (int i = 5; i < 10; i++) {
         spill_vals2[i - 5] = i * 200;
-        ht_insert_with_hash(t, 0, &i, sizeof(int), &spill_vals2[i - 5], sizeof(int));
+        ht_upsert_with_hash(t, 0, &i, sizeof(int), &spill_vals2[i - 5], sizeof(int));
     }
 
     /* Verify all 10 spill entries */
@@ -880,7 +880,7 @@ static int test_migration_prophylactic_tombstones(void) {
     const int N = 200;
     for (int i = 0; i < N; i++) {
         int v = i * 3;
-        ht_insert(t, &i, sizeof(int), &v, sizeof(int));
+        ht_upsert(t, &i, sizeof(int), &v, sizeof(int));
     }
 
     /* Delete many entries to create tombstones */
@@ -948,7 +948,7 @@ static int test_migration_zombie_then_resize(void) {
     int vals[30];
     for (int i = 0; i < 30; i++) {
         vals[i] = i * 7;
-        ht_insert(t, &i, sizeof(int), &vals[i], sizeof(int));
+        ht_upsert(t, &i, sizeof(int), &vals[i], sizeof(int));
     }
     for (int i = 0; i < 30; i += 2) {
         ht_remove(t, &i, sizeof(int));
@@ -959,7 +959,7 @@ static int test_migration_zombie_then_resize(void) {
     /* Insert more to advance zombie cursor */
     for (int i = 30; i < 50; i++) {
         int v = i * 11;
-        ht_insert(t, &i, sizeof(int), &v, sizeof(int));
+        ht_upsert(t, &i, sizeof(int), &v, sizeof(int));
     }
 
     INV_CHECK(t, "test_zombie_then_resize: after more inserts");
@@ -986,7 +986,7 @@ static int test_migration_zombie_then_resize(void) {
     /* Continue inserting — zombie should work after reset */
     for (int i = 50; i < 70; i++) {
         int v = i * 13;
-        ht_insert(t, &i, sizeof(int), &v, sizeof(int));
+        ht_upsert(t, &i, sizeof(int), &v, sizeof(int));
     }
 
     INV_CHECK(t, "test_zombie_then_resize: after post-resize inserts");
@@ -1021,7 +1021,7 @@ static int test_migration_shrink_grow_oscillation(void) {
         for (int i = 0; i < 100; i++) {
             char k[16]; snprintf(k, sizeof(k), "sg%d_%d", cycle, i);
             int v = cycle * 1000 + i;
-            ht_insert(t, k, strlen(k), &v, sizeof(int));
+            ht_upsert(t, k, strlen(k), &v, sizeof(int));
         }
 
         INV_CHECK(t, "test_shrink_grow: after fill");
@@ -1042,7 +1042,7 @@ static int test_migration_shrink_grow_oscillation(void) {
         /* Insert a few survivors to verify */
         char k[16]; snprintf(k, sizeof(k), "keep%d", cycle);
         int v = cycle;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     INV_CHECK(t, "test_shrink_grow: final");
@@ -1079,12 +1079,12 @@ static int test_migration_spill_auto_shrink(void) {
     for (int i = 0; i < 10; i++) {
         char k[16]; snprintf(k, sizeof(k), "z%d", i);
         spill_vals[i] = i * 10;
-        ht_insert(t, k, strlen(k), &spill_vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &spill_vals[i], sizeof(int));
     }
     for (int i = 0; i < 40; i++) {
         char k[16]; snprintf(k, sizeof(k), "n%d", i);
         norm_vals[i] = i * 100;
-        ht_insert(t, k, strlen(k), &norm_vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &norm_vals[i], sizeof(int));
     }
 
     ht_stats_t st;
@@ -1134,7 +1134,7 @@ static int test_migration_tomb_threshold_burst(void) {
     for (int i = 0; i < 50; i++) {
         char k[16]; snprintf(k, sizeof(k), "tb%d", i);
         int v = i * 3;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     /* Delete 40 — tombstone ratio skyrockets past 0.15 */
@@ -1149,7 +1149,7 @@ static int test_migration_tomb_threshold_burst(void) {
     for (int i = 50; i < 60; i++) {
         char k[16]; snprintf(k, sizeof(k), "tb%d", i);
         int v = i * 5;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     INV_CHECK(t, "test_tomb_burst: after threshold-triggered inserts");
@@ -1191,7 +1191,7 @@ static int test_migration_compact_during_zombie(void) {
     for (int i = 0; i < 40; i++) {
         char k[16]; snprintf(k, sizeof(k), "cd%d", i);
         int v = i * 7;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
     for (int i = 0; i < 30; i++) {
         char k[16]; snprintf(k, sizeof(k), "cd%d", i);
@@ -1200,7 +1200,7 @@ static int test_migration_compact_during_zombie(void) {
     for (int i = 40; i < 60; i++) {
         char k[16]; snprintf(k, sizeof(k), "cd%d", i);
         int v = i * 9;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     INV_CHECK(t, "test_compact_during_zombie: before compact");
@@ -1225,7 +1225,7 @@ static int test_migration_compact_during_zombie(void) {
     for (int i = 60; i < 80; i++) {
         char k[16]; snprintf(k, sizeof(k), "cd%d", i);
         int v = i;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     INV_CHECK(t, "test_compact_during_zombie: after post-compact inserts");
@@ -1251,7 +1251,7 @@ static int test_migration_resize_exact_fit(void) {
     for (int i = 0; i < 20; i++) {
         char k[16]; snprintf(k, sizeof(k), "ef%d", i);
         int v = i * 11;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
     for (int i = 0; i < 12; i++) {
         char k[16]; snprintf(k, sizeof(k), "ef%d", i);
@@ -1283,13 +1283,234 @@ static int test_migration_resize_exact_fit(void) {
 
     /* Insert one more — must trigger resize */
     int extra = 999;
-    assert(ht_insert(t, "extra", 5, &extra, sizeof(int)));
+    assert(ht_upsert(t, "extra", 5, &extra, sizeof(int)));
 
     ht_stats(t, &st);
     assert(st.capacity > 8);
     assert(st.size == 9);
 
     INV_CHECK(t, "test_resize_exact_fit: after overflow insert");
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test spill remove after resize: spill entries survive resize, then remove from spill
+static int test_migration_spill_remove_after_resize(void) {
+    printf("Test: spill remove after resize...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 32,
+        .max_load_factor = 0.5,
+        .min_load_factor = 0.0,
+        .zombie_window = 0
+    };
+    ht_table_t *t = ht_create(&cfg, selective_zero_hash, NULL, NULL);
+
+    /* Insert 10 spill (z-prefix) + 50 normal */
+    int spill_vals[10], norm_vals[50];
+    for (int i = 0; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        spill_vals[i] = i * 10;
+        ht_upsert(t, k, strlen(k), &spill_vals[i], sizeof(int));
+    }
+    for (int i = 0; i < 50; i++) {
+        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        norm_vals[i] = i * 100;
+        ht_upsert(t, k, strlen(k), &norm_vals[i], sizeof(int));
+    }
+
+    INV_CHECK(t, "test_spill_remove_resize: after insert");
+
+    /* Remove 5 spill entries after resize */
+    for (int i = 0; i < 5; i++) {
+        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        assert(ht_remove(t, k, strlen(k)));
+    }
+
+    INV_CHECK(t, "test_spill_remove_resize: after spill removes");
+
+    /* Verify remaining spill entries */
+    for (int i = 5; i < 10; i++) {
+        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 10) {
+            printf("  FAIL: spill z%d lost after resize+remove\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+    /* Verify normal entries unaffected */
+    for (int i = 0; i < 50; i++) {
+        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL && *v == i * 100);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test delete all, rebuild, verify clean state
+static int test_migration_delete_all_rebuild(void) {
+    printf("Test: delete all then rebuild...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 32,
+        .max_load_factor = 0.75,
+        .min_load_factor = 0.0,
+        .zombie_window = 0
+    };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Phase 1: Fill and delete all */
+    for (int i = 0; i < 50; i++) {
+        char k[8]; snprintf(k, sizeof(k), "p1%d", i);
+        int v = i;
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
+    }
+    for (int i = 0; i < 50; i++) {
+        char k[8]; snprintf(k, sizeof(k), "p1%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+
+    INV_CHECK(t, "test_delete_all_rebuild: after phase 1");
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    /* Phase 2: Rebuild with new keys */
+    for (int i = 0; i < 50; i++) {
+        char k[8]; snprintf(k, sizeof(k), "p2%d", i);
+        int v = i * 3;
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_delete_all_rebuild: after phase 2");
+
+    ht_stats(t, &st);
+    assert(st.size == 50);
+
+    /* Old keys gone, new keys correct */
+    for (int i = 0; i < 50; i++) {
+        char k[8]; snprintf(k, sizeof(k), "p1%d", i);
+        assert(ht_find(t, k, strlen(k), NULL) == NULL);
+    }
+    for (int i = 0; i < 50; i++) {
+        char k[8]; snprintf(k, sizeof(k), "p2%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        if (v == NULL || *v != i * 3) {
+            printf("  FAIL: p2%d lost after rebuild\n", i);
+            ht_destroy(t); return 1;
+        }
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test capacity-4 table with collisions wrapping around boundary
+static int test_migration_tiny_wrap(void) {
+    printf("Test: tiny table (cap=4) with collision wrapping...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 4,
+        .max_load_factor = 0.99,
+        .min_load_factor = 0.0,
+        .zombie_window = 0
+    };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 3 keys */
+    int v1 = 10, v2 = 20, v3 = 30;
+    assert(ht_upsert(t, "a", 1, &v1, sizeof(int)));
+    assert(ht_upsert(t, "b", 1, &v2, sizeof(int)));
+    assert(ht_upsert(t, "c", 1, &v3, sizeof(int)));
+
+    INV_CHECK(t, "test_tiny_wrap: after 3 inserts");
+
+    /* Delete middle */
+    assert(ht_remove(t, "b", 1));
+
+    INV_CHECK(t, "test_tiny_wrap: after delete");
+
+    /* Verify head and tail still reachable */
+    assert(*(int *)ht_find(t, "a", 1, NULL) == 10);
+    assert(*(int *)ht_find(t, "c", 1, NULL) == 30);
+    assert(ht_find(t, "b", 1, NULL) == NULL);
+
+    /* Reinsert at deleted position */
+    int v4 = 40;
+    assert(ht_upsert(t, "b", 1, &v4, sizeof(int)));
+
+    INV_CHECK(t, "test_tiny_wrap: after reinsert");
+
+    assert(*(int *)ht_find(t, "a", 1, NULL) == 10);
+    assert(*(int *)ht_find(t, "b", 1, NULL) == 40);
+    assert(*(int *)ht_find(t, "c", 1, NULL) == 30);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// Test interleaved ht_inc and ht_remove on colliding keys
+static int test_migration_inc_remove_collision(void) {
+    printf("Test: interleaved ht_inc and ht_remove on colliding keys...\n");
+
+    ht_config_t cfg = {
+        .initial_capacity = 64,
+        .max_load_factor = 0.9,
+        .min_load_factor = 0.0,
+        .zombie_window = 0
+    };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    /* Inc 10 colliding keys */
+    for (int i = 0; i < 10; i++) {
+        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        ht_inc(t, k, strlen(k), i * 10);
+    }
+
+    /* Remove even keys */
+    for (int i = 0; i < 10; i += 2) {
+        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        assert(ht_remove(t, k, strlen(k)));
+    }
+
+    INV_CHECK(t, "test_inc_remove_collision: after removes");
+
+    /* Inc odd keys again */
+    for (int i = 1; i < 10; i += 2) {
+        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        int64_t r = ht_inc(t, k, strlen(k), 1);
+        assert(r == i * 10 + 1);
+    }
+
+    /* Inc deleted keys — should create fresh entries */
+    for (int i = 0; i < 10; i += 2) {
+        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        int64_t r = ht_inc(t, k, strlen(k), 99);
+        assert(r == 99);
+    }
+
+    INV_CHECK(t, "test_inc_remove_collision: after re-inc");
+
+    /* Final verify */
+    for (int i = 0; i < 10; i++) {
+        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        const int64_t *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL);
+        int64_t expected = (i % 2 == 0) ? 99 : i * 10 + 1;
+        if (*v != expected) {
+            printf("  FAIL: ir%d got %lld expected %lld\n",
+                   i, (long long)*v, (long long)expected);
+            ht_destroy(t); return 1;
+        }
+    }
 
     ht_destroy(t);
     printf("  PASS\n");
@@ -1320,6 +1541,10 @@ int main(void) {
     if (test_migration_tomb_threshold_burst()) return 1;
     if (test_migration_compact_during_zombie()) return 1;
     if (test_migration_resize_exact_fit()) return 1;
+    if (test_migration_spill_remove_after_resize()) return 1;
+    if (test_migration_delete_all_rebuild()) return 1;
+    if (test_migration_tiny_wrap()) return 1;
+    if (test_migration_inc_remove_collision()) return 1;
 
     printf("\nAll migration tests passed!\n");
     return 0;

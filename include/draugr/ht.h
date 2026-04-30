@@ -63,11 +63,29 @@ void ht_clear(ht_table_t *t);
 // Insertion & Updates
 // ============================================================================
 
+// ht_insert: always-add (multi-value). Same k,v can exist N times.
 bool ht_insert(ht_table_t *t, const void *key, size_t key_len,
                const void *value, size_t value_len);
 bool ht_insert_with_hash(ht_table_t *t, uint64_t hash,
                          const void *key, size_t key_len,
                          const void *value, size_t value_len);
+
+// ht_upsert: remove all for key, insert single value.
+// Returns true if new entry, false if replaced existing.
+bool ht_upsert(ht_table_t *t, const void *key, size_t key_len,
+               const void *value, size_t value_len);
+bool ht_upsert_with_hash(ht_table_t *t, uint64_t hash,
+                         const void *key, size_t key_len,
+                         const void *value, size_t value_len);
+
+// ht_unsert: insert only if exact k,v pair doesn't exist.
+// Returns true if new entry, false if duplicate.
+bool ht_unsert(ht_table_t *t, const void *key, size_t key_len,
+               const void *value, size_t value_len);
+bool ht_unsert_with_hash(ht_table_t *t, uint64_t hash,
+                         const void *key, size_t key_len,
+                         const void *value, size_t value_len);
+
 int64_t ht_inc(ht_table_t *t, const void *key, size_t key_len, int64_t delta);
 
 // ============================================================================
@@ -82,13 +100,44 @@ const void *ht_find_with_hash(const ht_table_t *t, uint64_t hash,
 void ht_find_all(const ht_table_t *t, uint64_t hash,
                  ht_dup_callback cb, void *user_ctx);
 
+// ht_find_key_all: iterate all entries matching exact key.
+void ht_find_key_all(const ht_table_t *t, const void *key, size_t key_len,
+                     ht_dup_callback cb, void *user_ctx);
+void ht_find_key_all_with_hash(const ht_table_t *t, uint64_t hash,
+                               const void *key, size_t key_len,
+                               ht_dup_callback cb, void *user_ctx);
+
+// ht_find_kv: find first entry matching exact key AND value.
+const void *ht_find_kv(const ht_table_t *t, const void *key, size_t key_len,
+                       const void *value, size_t value_len,
+                       size_t *out_value_len);
+const void *ht_find_kv_with_hash(const ht_table_t *t, uint64_t hash,
+                                 const void *key, size_t key_len,
+                                 const void *value, size_t value_len,
+                                 size_t *out_value_len);
+
 // ============================================================================
 // Deletion
 // ============================================================================
 
-bool ht_remove(ht_table_t *t, const void *key, size_t key_len);
-bool ht_remove_with_hash(ht_table_t *t, uint64_t hash,
-                         const void *key, size_t key_len);
+// ht_remove: remove ALL entries for key, return count removed.
+size_t ht_remove(ht_table_t *t, const void *key, size_t key_len);
+size_t ht_remove_with_hash(ht_table_t *t, uint64_t hash,
+                            const void *key, size_t key_len);
+
+// ht_remove_kv: remove ALL matching k,v pairs, return count removed.
+size_t ht_remove_kv(ht_table_t *t, const void *key, size_t key_len,
+                    const void *value, size_t value_len);
+size_t ht_remove_kv_with_hash(ht_table_t *t, uint64_t hash,
+                               const void *key, size_t key_len,
+                               const void *value, size_t value_len);
+
+// ht_remove_kv_one: remove one matching k,v pair, return true/false.
+bool ht_remove_kv_one(ht_table_t *t, const void *key, size_t key_len,
+                      const void *value, size_t value_len);
+bool ht_remove_kv_one_with_hash(ht_table_t *t, uint64_t hash,
+                                const void *key, size_t key_len,
+                                const void *value, size_t value_len);
 
 // ============================================================================
 // Resizing & Compaction

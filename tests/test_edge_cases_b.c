@@ -109,12 +109,12 @@ static int test_resize_spill_collisions(void) {
     for (int i = 0; i < 5; i++) {
         char key[32]; snprintf(key, sizeof(key), "z%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
     for (int i = 0; i < 20; i++) {
         char key[32]; snprintf(key, sizeof(key), "n%d", i);
         int val = i + 100;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Resize up
@@ -177,7 +177,7 @@ static int test_iter_count_matches_stats(void) {
         char key[16]; snprintf(key, sizeof(key), "k%d", k);
         if (rand() % 3 == 0) {
             int val = k;
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
         } else if (rand() % 3 == 1) {
             ht_remove(t, key, strlen(key));
         } else {
@@ -216,7 +216,7 @@ static int test_find_all_nonexistent(void) {
     for (int i = 0; i < 10; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     g_collect_count = 0;
@@ -266,7 +266,7 @@ static int test_with_hash_remove_find(void) {
     uint64_t hashes[4];
     for (int i = 0; i < 4; i++) {
         hashes[i] = fnv1a_hash(keys[i], strlen(keys[i]), NULL);
-        ht_insert_with_hash(t, hashes[i], keys[i], strlen(keys[i]),
+        ht_upsert_with_hash(t, hashes[i], keys[i], strlen(keys[i]),
                             &vals[i], sizeof(vals[i]));
     }
 
@@ -298,7 +298,7 @@ static int test_value_size_change(void) {
 
     // Insert with small value
     int8_t small = 42;
-    assert(ht_insert(t, "key", 3, &small, sizeof(small)));
+    assert(ht_upsert(t, "key", 3, &small, sizeof(small)));
 
     size_t out_len;
     const int8_t *v = ht_find(t, "key", 3, &out_len);
@@ -306,7 +306,7 @@ static int test_value_size_change(void) {
 
     // Update with large value
     int64_t large = 0x123456789ABCDEF0LL;
-    assert(ht_insert(t, "key", 3, &large, sizeof(large)) == false);
+    assert(ht_upsert(t, "key", 3, &large, sizeof(large)) == false);
 
     const int64_t *v2 = ht_find(t, "key", 3, &out_len);
     assert(v2 != NULL && *v2 == large && out_len == sizeof(int64_t));
@@ -331,7 +331,7 @@ static int test_same_prefix_keys(void) {
     for (int i = 0; i < N; i++) {
         char key[64]; snprintf(key, sizeof(key), "prefix_%050d", i);
         int val = i;
-        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)));
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)));
     }
 
     for (int i = 0; i < N; i++) {
@@ -370,7 +370,7 @@ static int test_insert_remove_reinsert(void) {
 
     for (int cycle = 0; cycle < 20; cycle++) {
         int val = cycle * 100;
-        ht_insert(t, "key", 3, &val, sizeof(val));
+        ht_upsert(t, "key", 3, &val, sizeof(val));
         const int *v = ht_find(t, "key", 3, NULL);
         assert(v != NULL && *v == cycle * 100);
         assert(ht_remove(t, "key", 3));
@@ -407,7 +407,7 @@ static int test_tombstone_churn_zombie(void) {
         if (action < 35) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
             int val = k;
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action < 65) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
@@ -416,7 +416,7 @@ static int test_tombstone_churn_zombie(void) {
             else assert(v == NULL);
         } else if (action < 95) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
-            bool result = ht_remove(t, key, strlen(key));
+            size_t result = ht_remove(t, key, strlen(key));
             if (present[k]) assert(result);
             else assert(!result);
             present[k] = 0;
@@ -467,7 +467,7 @@ static int test_spill_hash_one_stress(void) {
         if (action == 0) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
             int val = k;
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action == 1) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
@@ -479,7 +479,7 @@ static int test_spill_hash_one_stress(void) {
             }
         } else {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
-            bool removed = ht_remove(t, key, strlen(key));
+            size_t removed = ht_remove(t, key, strlen(key));
             if (present[k]) assert(removed);
             else assert(!removed);
             present[k] = 0;
@@ -527,14 +527,14 @@ static int test_mixed_spill_main_stress(void) {
 
         if (action < 40) {
             int val = k;
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action < 75) {
             const int *v = ht_find(t, key, strlen(key), NULL);
             if (present[k]) assert(v != NULL && *v == k);
             else assert(v == NULL);
         } else if (action < 95) {
-            bool result = ht_remove(t, key, strlen(key));
+            size_t result = ht_remove(t, key, strlen(key));
             if (present[k]) assert(result);
             else assert(!result);
             present[k] = 0;
@@ -583,7 +583,7 @@ static int test_collision_churn_compact(void) {
         if (action < 35) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
             int val = k;
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action < 65) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
@@ -632,7 +632,7 @@ static int test_bulk_insert_delete_reinsert(void) {
     for (int i = 0; i < N; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
-        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)));
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)));
     }
 
     ht_stats_t st;
@@ -652,7 +652,7 @@ static int test_bulk_insert_delete_reinsert(void) {
     for (int i = 0; i < N; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         int val = i + 1000;
-        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)));
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)));
     }
 
     ht_stats(t, &st);
@@ -749,7 +749,7 @@ static int test_with_hash_stress(void) {
         int action = rand() % 3;
         if (action == 0) {
             int val = k;
-            ht_insert_with_hash(t, hashes[k], key, strlen(key), &val, sizeof(val));
+            ht_upsert_with_hash(t, hashes[k], key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action == 1) {
             const int *v = ht_find_with_hash(t, hashes[k], key, strlen(key), NULL);
@@ -789,7 +789,7 @@ static int test_multiple_clear_reuse(void) {
         for (int i = 0; i < count; i++) {
             char key[16]; snprintf(key, sizeof(key), "k%d", i);
             int val = i + cycle * 1000;
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
         }
 
         ht_stats_t st;
@@ -826,7 +826,7 @@ static int test_delete_all_verify_clean(void) {
     for (int i = 0; i < N; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     for (int i = 0; i < N; i++) {
@@ -871,12 +871,12 @@ static int test_single_key_churn(void) {
     for (int i = 0; i < 20; i++) {
         char key[16]; snprintf(key, sizeof(key), "bg%d", i);
         int val = i * 10;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     for (int cycle = 0; cycle < 1000; cycle++) {
         int val = cycle;
-        ht_insert(t, "hotkey", 6, &val, sizeof(val));
+        ht_upsert(t, "hotkey", 6, &val, sizeof(val));
         const int *v = ht_find(t, "hotkey", 6, NULL);
         assert(v != NULL && *v == cycle);
         assert(ht_remove(t, "hotkey", 6));
@@ -907,13 +907,13 @@ static int test_many_updates_same_key(void) {
     for (int i = 0; i < 50; i++) {
         char key[16]; snprintf(key, sizeof(key), "other%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Insert and update same key 1000 times
-    ht_insert(t, "target", 6, &(int){0}, sizeof(int));
+    ht_upsert(t, "target", 6, &(int){0}, sizeof(int));
     for (int i = 1; i <= 1000; i++) {
-        assert(ht_insert(t, "target", 6, &i, sizeof(i)) == false);
+        assert(ht_upsert(t, "target", 6, &i, sizeof(i)) == false);
     }
 
     const int *v = ht_find(t, "target", 6, NULL);
@@ -949,7 +949,7 @@ static int test_keys_differ_last_byte(void) {
     for (int i = 0; i < N; i++) {
         key[3] = (uint8_t)i;
         int val = i;
-        assert(ht_insert(t, key, 4, &val, sizeof(val)));
+        assert(ht_upsert(t, key, 4, &val, sizeof(val)));
     }
 
     for (int i = 0; i < N; i++) {
@@ -996,7 +996,7 @@ static int test_high_load_stress(void) {
         if (action < 45) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
             int val = k;
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action < 80) {
             char key[16]; snprintf(key, sizeof(key), "k%d", k);
@@ -1019,6 +1019,7 @@ static int test_high_load_stress(void) {
 
     INV_CHECK(t, "test_high_load_stress: final");
 
+    free(present);
     #undef HL_N
     ht_destroy(t);
     printf("  PASS\n");
@@ -1039,7 +1040,7 @@ static int test_resize_with_many_tombstones(void) {
     for (int i = 0; i < 200; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Delete 150
@@ -1090,7 +1091,7 @@ static int test_iter_then_modify(void) {
     for (int i = 0; i < 100; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Iterate and collect all keys
@@ -1152,7 +1153,7 @@ static int test_find_all_after_churn(void) {
     for (int i = 0; i < 10; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         int val = i * 10;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Delete even ones
@@ -1163,7 +1164,7 @@ static int test_find_all_after_churn(void) {
 
     // Update one
     int new_val = 999;
-    ht_insert(t, "k5", 2, &new_val, sizeof(new_val));
+    ht_upsert(t, "k5", 2, &new_val, sizeof(new_val));
 
     // find_all should return 5 entries (odd indices + k5 updated)
     g_collect_count = 0;
@@ -1197,7 +1198,7 @@ static int test_tombstone_count_accuracy(void) {
     for (int i = 0; i < 40; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Delete 20 keys, checking tombstone_cnt consistency after each
@@ -1253,7 +1254,7 @@ static int test_backshift_absorbs_delete_tombs(void) {
     for (int i = 0; i < 6; i++) {
         char key[16]; snprintf(key, sizeof(key), "key%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     ht_stats_t st;
@@ -1316,7 +1317,7 @@ static int test_backshift_ideal_position_abort(void) {
     for (int i = 0; i < 20; i++) {
         char key[16]; snprintf(key, sizeof(key), "ck%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Delete every other key to create interleaved tombstones
@@ -1365,7 +1366,7 @@ static int test_dynamic_cap_high_load(void) {
     for (int i = 0; i < n; i++) {
         char key[16]; snprintf(key, sizeof(key), "dk%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     ht_stats_t st;
@@ -1424,7 +1425,7 @@ static int test_push_forward_long_chain(void) {
     for (int i = 0; i < N; i++) {
         char key[16]; snprintf(key, sizeof(key), "k%03d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     ht_stats_t st;
@@ -1475,7 +1476,7 @@ static int test_push_forward_with_prophylactic(void) {
     for (int i = 0; i < 40; i++) {
         char key[16]; snprintf(key, sizeof(key), "pk%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Compact to place prophylactic tombstones
@@ -1537,14 +1538,14 @@ static int test_push_forward_churn(void) {
 
         if (action < 40) {
             int val = k;
-            ht_insert(t, key, strlen(key), &val, sizeof(val));
+            ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action < 70) {
             const int *v = ht_find(t, key, strlen(key), NULL);
             if (present[k]) assert(v != NULL && *v == k);
             else assert(v == NULL);
         } else {
-            bool result = ht_remove(t, key, strlen(key));
+            size_t result = ht_remove(t, key, strlen(key));
             if (present[k]) assert(result);
             else assert(!result);
             present[k] = 0;
@@ -1588,7 +1589,7 @@ static int test_push_forward_collision_consistency(void) {
     for (int i = 0; i < 30; i++) {
         char key[16]; snprintf(key, sizeof(key), "cc%d", i);
         int val = i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Delete first 10 (chain is long, Outcome B or C for most)
@@ -1601,7 +1602,7 @@ static int test_push_forward_collision_consistency(void) {
     for (int i = 3; i < 8; i++) {
         char key[16]; snprintf(key, sizeof(key), "cc%d", i);
         int val = i + 100;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     // Delete some more from the middle
@@ -1727,7 +1728,7 @@ static int test_colliding_alternating_delete(void) {
     for (int i = 0; i < 10; i++) {
         char k[8]; snprintf(k, sizeof(k), "c%d", i);
         vals[i] = i;
-        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+        assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     for (int i = 0; i < 10; i += 2) {
@@ -1738,7 +1739,7 @@ static int test_colliding_alternating_delete(void) {
     for (int i = 10; i < 20; i++) {
         char k[8]; snprintf(k, sizeof(k), "c%d", i);
         vals[i] = i;
-        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+        assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     for (int i = 1; i < 20; i += 2) {
@@ -1783,7 +1784,7 @@ static int test_zombie_window_one(void) {
     for (int i = 0; i < 50; i++) {
         char k[16]; snprintf(k, sizeof(k), "zw%d", i);
         int v = i * 3;
-        assert(ht_insert(t, k, strlen(k), &v, sizeof(v)));
+        assert(ht_upsert(t, k, strlen(k), &v, sizeof(v)));
     }
 
     /* Verify all */
@@ -1814,7 +1815,7 @@ static int test_tomb_threshold_burst(void) {
     for (int i = 0; i < 30; i++) {
         char k[16]; snprintf(k, sizeof(k), "tb%d", i);
         vals[i] = i;
-        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+        assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     for (int i = 0; i < 25; i++) {
@@ -1824,7 +1825,7 @@ static int test_tomb_threshold_burst(void) {
 
     /* Insert one more — should trigger rebuild since tombstone ratio > 0.10 */
     int extra = 999;
-    assert(ht_insert(t, "extra", 5, &extra, sizeof(int)));
+    assert(ht_upsert(t, "extra", 5, &extra, sizeof(int)));
 
     /* Verify remaining 5 + extra */
     for (int i = 25; i < 30; i++) {
@@ -1855,7 +1856,7 @@ static int test_find_all_100plus(void) {
     for (int i = 0; i < N100; i++) {
         char k[8]; snprintf(k, sizeof(k), "f%d", i);
         vals[i] = i;
-        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+        assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     g_collect_count = 0;
@@ -1885,7 +1886,7 @@ static int test_tiny_table_stress(void) {
     for (int cycle = 0; cycle < 200; cycle++) {
         char k[16]; snprintf(k, sizeof(k), "t%d", cycle % 5);
         int v = cycle;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
 
         if (cycle % 3 == 0) {
             char rk[16]; snprintf(rk, sizeof(rk), "t%d", (cycle + 1) % 5);
@@ -1920,7 +1921,7 @@ static int test_find_all_null_cb(void) {
     assert(t != NULL);
 
     int v = 1;
-    ht_insert(t, "a", 1, &v, sizeof(v));
+    ht_upsert(t, "a", 1, &v, sizeof(v));
 
     /* Should not crash — early return when cb is NULL */
     ht_find_all(t, 42, NULL, NULL);
@@ -1947,7 +1948,7 @@ static int test_conflicting_load_factors(void) {
     for (int i = 0; i < 20; i++) {
         char k[8]; snprintf(k, sizeof(k), "cf%d", i);
         vals[i] = i;
-        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+        assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     /* Delete 15 — min_load_factor=0.8 > max_load_factor=0.3 means
@@ -1986,7 +1987,7 @@ static int test_resize_rounds_to_same(void) {
     for (int i = 0; i < 5; i++) {
         char k[8]; snprintf(k, sizeof(k), "rs%d", i);
         vals[i] = i;
-        assert(ht_insert(t, k, strlen(k), &vals[i], sizeof(int)));
+        assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     ht_stats_t st;
@@ -2029,7 +2030,7 @@ static int test_find_all_after_compact(void) {
     for (int i = 0; i < 10; i++) {
         char k[8]; snprintf(k, sizeof(k), "fa%d", i);
         vals[i] = i * 3;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     /* Delete half */
@@ -2142,7 +2143,7 @@ static int test_delete_prophylactic_barrier(void) {
     for (int i = 0; i < 10; i++) {
         char k[8]; snprintf(k, sizeof(k), "pb%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
     ht_compact(t);
 
@@ -2189,13 +2190,13 @@ static int test_find_all_user_ctx(void) {
     assert(t != NULL);
 
     int v = 1;
-    ht_insert(t, "a", 1, &v, sizeof(v));
+    ht_upsert(t, "a", 1, &v, sizeof(v));
 
     int flag = 0;
     ht_find_all(t, 42, ctx_check_cb, &flag);
     /* Note: 42 is unlikely to be the hash of "a", so callback may not fire.
      * Use the actual hash via _with_hash. */
-    assert(ht_insert_with_hash(t, 42, "b", 1, &v, sizeof(v)));
+    assert(ht_upsert_with_hash(t, 42, "b", 1, &v, sizeof(v)));
 
     flag = 0;
     ht_find_all(t, 42, ctx_check_cb, &flag);
@@ -2231,13 +2232,13 @@ static int test_find_all_scan_order(void) {
 
     /* Insert into main table via _with_hash with hash=42 */
     int main_v = 100;
-    assert(ht_insert_with_hash(t, 42, "main", 4, &main_v, sizeof(int)));
+    assert(ht_upsert_with_hash(t, 42, "main", 4, &main_v, sizeof(int)));
 
     /* Insert into spill lane with hash=42 — but spill only holds hash 0/1.
      * We can't force same-hash into both spill and main. Instead, verify
      * that spill entries ARE found by find_all for hash=0. */
     int spill_v = 200;
-    assert(ht_insert_with_hash(t, 0, "spill", 5, &spill_v, sizeof(int)));
+    assert(ht_upsert_with_hash(t, 0, "spill", 5, &spill_v, sizeof(int)));
 
     /* find_all(0) should find the spill entry */
     order_check_count = 0;
@@ -2270,7 +2271,7 @@ static int test_inc_spill_via_with_hash(void) {
 
     /* Insert via normal path (zero_hash → hash=0 → spill) */
     int v = 10;
-    ht_insert(t, "x", 1, &v, sizeof(int));
+    ht_upsert(t, "x", 1, &v, sizeof(int));
 
     /* ht_inc re-hashes "x" via zero_hash → hash=0 → finds it in spill,
      * but val_len=4 != sizeof(int64_t), so sets new_val = delta = 50 */
@@ -2307,7 +2308,7 @@ static int test_resize_shrink_with_prophylactic(void) {
     for (int i = 0; i < 20; i++) {
         char k[8]; snprintf(k, sizeof(k), "sp%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
     for (int i = 0; i < 15; i++) {
         char k[8]; snprintf(k, sizeof(k), "sp%d", i);
@@ -2360,7 +2361,7 @@ static int test_remove_with_hash_auto_shrink(void) {
     for (int i = 0; i < 55; i++) {
         char k[8]; snprintf(k, sizeof(k), "aw%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     ht_stats_t st;
@@ -2410,7 +2411,7 @@ static int test_compact_clear_reinsert(void) {
     for (int i = 0; i < 10; i++) {
         char k[8]; snprintf(k, sizeof(k), "cr%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
     ht_compact(t);
 
@@ -2429,7 +2430,7 @@ static int test_compact_clear_reinsert(void) {
     for (int i = 0; i < 5; i++) {
         char k[8]; snprintf(k, sizeof(k), "nw%d", i);
         new_vals[i] = i * 20;
-        assert(ht_insert(t, k, strlen(k), &new_vals[i], sizeof(int)));
+        assert(ht_upsert(t, k, strlen(k), &new_vals[i], sizeof(int)));
     }
 
     for (int i = 0; i < 5; i++) {
@@ -2459,8 +2460,8 @@ static int test_resize_sub_4(void) {
 
     /* Insert 2 entries */
     int v1 = 10, v2 = 20;
-    assert(ht_insert(t, "a", 1, &v1, sizeof(v1)));
-    assert(ht_insert(t, "b", 1, &v2, sizeof(v2)));
+    assert(ht_upsert(t, "a", 1, &v1, sizeof(v1)));
+    assert(ht_upsert(t, "b", 1, &v2, sizeof(v2)));
 
     /* Resize to 2 — next_pow2(2) = 2, which is >= size=2 */
     bool ok = ht_resize(t, 2);
@@ -2498,7 +2499,7 @@ static int test_delete_before_prophylactic(void) {
     for (int i = 0; i < 10; i++) {
         char k[8]; snprintf(k, sizeof(k), "bp%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
     ht_compact(t);
 
@@ -2538,7 +2539,7 @@ static int test_large_spill_resize(void) {
     for (int i = 0; i < 30; i++) {
         char k[8]; snprintf(k, sizeof(k), "ls%d", i);
         vals[i] = i * 11;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     /* Force resize */
@@ -2604,7 +2605,7 @@ static int test_remove_nonexistent_spill(void) {
     assert(t != NULL);
 
     int v = 1;
-    ht_insert(t, "a", 1, &v, sizeof(int));
+    ht_upsert(t, "a", 1, &v, sizeof(int));
 
     /* Remove nonexistent key from spill */
     assert(!ht_remove(t, "b", 1));
@@ -2638,12 +2639,12 @@ static int test_clear_heterogeneous_arena(void) {
         /* Insert with varying sizes */
         const char *longval = "ABCDEFGHIJKLMNOPQRST";  /* 20 bytes */
         int shortval = round * 10;
-        ht_insert(t, "long", 4, longval, strlen(longval));
-        ht_insert(t, "s", 1, &shortval, sizeof(int));
+        ht_upsert(t, "long", 4, longval, strlen(longval));
+        ht_upsert(t, "s", 1, &shortval, sizeof(int));
         char bigkey[100];
         memset(bigkey, 'X', 99);
         bigkey[99] = '\0';
-        ht_insert(t, bigkey, 99, &shortval, sizeof(int));
+        ht_upsert(t, bigkey, 99, &shortval, sizeof(int));
 
         /* Verify */
         size_t vl = 0;
@@ -2678,9 +2679,9 @@ static int test_with_hash_lifecycle(void) {
 
     /* Insert via _with_hash */
     int v = 42;
-    assert(ht_insert_with_hash(t, 100, "k1", 2, &v, sizeof(int)));
-    assert(ht_insert_with_hash(t, 200, "k2", 2, &v, sizeof(int)));
-    assert(ht_insert_with_hash(t, 0,   "k3", 2, &v, sizeof(int)));  /* spill */
+    assert(ht_upsert_with_hash(t, 100, "k1", 2, &v, sizeof(int)));
+    assert(ht_upsert_with_hash(t, 200, "k2", 2, &v, sizeof(int)));
+    assert(ht_upsert_with_hash(t, 0,   "k3", 2, &v, sizeof(int)));  /* spill */
 
     /* Find via _with_hash */
     const int *r;
@@ -2725,7 +2726,7 @@ static int test_with_hash_colliding_find_all(void) {
     for (int i = 0; i < 20; i++) {
         char k[8]; snprintf(k, sizeof(k), "fh%d", i);
         vals[i] = i * 5;
-        assert(ht_insert_with_hash(t, 77, k, strlen(k), &vals[i], sizeof(int)));
+        assert(ht_upsert_with_hash(t, 77, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     /* find_all(77) should return all 20 */

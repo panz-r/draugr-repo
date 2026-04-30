@@ -60,7 +60,7 @@ static int stress_random(void) {
         int k = rand() % N;
         int op = rand() % 100;
         if (op < 45) {
-            ht_insert(t, keys[k].data, keys[k].len, &keys[k].val, sizeof(int));
+            ht_upsert(t, keys[k].data, keys[k].len, &keys[k].val, sizeof(int));
             const int *v = ht_find(t, keys[k].data, keys[k].len, NULL);
             if (v == NULL || *v != keys[k].val) {
                 printf("  FAIL op %d: insert key %d\n", i, k);
@@ -103,7 +103,7 @@ static int stress_collision(void) {
         int action = rand() % 100;
         if (action < 50) {
             vals[k] = k + op;
-            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
             if (!present[k]) { present[k] = 1; present_count++; }
             const int *v = ht_find(t, &k, sizeof(int), NULL);
             if (v == NULL || *v != vals[k]) {
@@ -168,7 +168,7 @@ static int stress_spill(void) {
         int action = rand() % 100;
         if (action < 50) {
             vals[k] = k * 7 + op;
-            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
             present[k] = 1;
         } else if (action < 80) {
             const int *v = ht_find(t, &k, sizeof(int), NULL);
@@ -294,7 +294,7 @@ static int stress_stats_invariants(void) {
 
         if (action < 45) {
             vals[k] = k + op;
-            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
             if (!present[k]) { present[k] = 1; present_count++; }
         } else if (action < 80) {
             const int *v = ht_find(t, &k, sizeof(int), NULL);
@@ -371,7 +371,7 @@ static int stress_delete_compact(void) {
 
         if (action < 40) {
             vals[k] = op;
-            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
             present[k] = 1;
         } else if (action < 60) {
             const int *v = ht_find(t, &k, sizeof(int), NULL);
@@ -428,7 +428,7 @@ static int stress_churn(void) {
         if (action < 30) {
             /* insert */
             vals[k] = k + op;
-            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
             if (!present[k]) { present[k] = 1; present_count++; }
         } else {
             /* delete (70% rate) */
@@ -501,7 +501,7 @@ static int stress_spill_heavy(void) {
         if (action < 50) {
             /* 50% insert */
             vals[k] = k * 3 + op;
-            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
             present[k] = 1;
         } else if (action < 70) {
             /* 20% find */
@@ -561,10 +561,10 @@ static int stress_mixed_api(void) {
             /* Insert — half via normal API, half forced to spill via hash=0 */
             vals[k] = k + op;
             if (rand() % 2 == 0) {
-                ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+                ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
                 use_spill[k] = 0;
             } else {
-                ht_insert_with_hash(t, 0, &k, sizeof(int), &vals[k], sizeof(int));
+                ht_upsert_with_hash(t, 0, &k, sizeof(int), &vals[k], sizeof(int));
                 use_spill[k] = 1;
             }
             present[k] = 1;
@@ -645,7 +645,7 @@ static int stress_update_heavy(void) {
     /* Pre-populate all keys */
     for (int i = 0; i < N; i++) {
         vals[i] = i;
-        ht_insert(t, &i, sizeof(int), &vals[i], sizeof(int));
+        ht_upsert(t, &i, sizeof(int), &vals[i], sizeof(int));
         present[i] = 1;
     }
 
@@ -656,7 +656,7 @@ static int stress_update_heavy(void) {
         if (action < 60) {
             /* Update: reinsert same key with new value */
             vals[k] = k + op;
-            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
             present[k] = 1;
         } else if (action < 80) {
             /* Find */
@@ -719,7 +719,7 @@ static int stress_compact_between_ops(void) {
 
         if (action < 45) {
             vals[k] = k + op;
-            ht_insert(t, &k, sizeof(int), &vals[k], sizeof(int));
+            ht_upsert(t, &k, sizeof(int), &vals[k], sizeof(int));
             present[k] = 1;
         } else if (action < 80) {
             const int *v = ht_find(t, &k, sizeof(int), NULL);

@@ -40,7 +40,7 @@ static void test_grow_and_verify(void) {
     for (int i = 0; i < N; i++) {
         char key[32];
         snprintf(key, sizeof(key), "key%d", i);
-        ht_insert(t, key, strlen(key), &i, sizeof(i));
+        ht_upsert(t, key, strlen(key), &i, sizeof(i));
     }
     
     // Verify all entries are findable
@@ -82,7 +82,7 @@ static void test_grow_delete_compact(void) {
     for (int i = 0; i < N; i++) {
         char key[32];
         snprintf(key, sizeof(key), "key%d", i);
-        ht_insert(t, key, strlen(key), &i, sizeof(i));
+        ht_upsert(t, key, strlen(key), &i, sizeof(i));
         present[i] = 1;
         count++;
     }
@@ -165,7 +165,7 @@ static void test_multiple_grow_compact_cycles(void) {
         for (int i = start; i < end; i++) {
             char key[32];
             snprintf(key, sizeof(key), "key%d", i);
-            ht_insert(t, key, strlen(key), &i, sizeof(i));
+            ht_upsert(t, key, strlen(key), &i, sizeof(i));
         }
         
         // Delete phase: remove half (odd indices: 1, 3, 5, ...)
@@ -228,7 +228,7 @@ static void test_random_workload(void) {
             if (!present[k]) {
                 char key[32];
                 snprintf(key, sizeof(key), "key%d", k);
-                ht_insert(t, key, strlen(key), &k, sizeof(k));
+                ht_upsert(t, key, strlen(key), &k, sizeof(k));
                 present[k] = 1;
                 present_count++;
             }
@@ -320,7 +320,7 @@ static void test_zombie_cleanup(void) {
     for (int i = 0; i < 50; i++) {
         char key[32];
         snprintf(key, sizeof(key), "key%d", i);
-        ht_insert(t, key, strlen(key), &i, sizeof(i));
+        ht_upsert(t, key, strlen(key), &i, sizeof(i));
     }
     
     // Delete many to create tombstones
@@ -340,7 +340,7 @@ static void test_zombie_cleanup(void) {
         char key[32];
         snprintf(key, sizeof(key), "newkey%d", i);
         int val = 1000 + i;
-        ht_insert(t, key, strlen(key), &val, sizeof(val));
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     INV_CHECK(t, "test_zombie_cleanup: after 200 inserts");
@@ -390,7 +390,7 @@ static void test_auto_shrink(void) {
     for (int i = 0; i < 100; i++) {
         char key[32];
         snprintf(key, sizeof(key), "key%d", i);
-        ht_insert(t, key, strlen(key), &i, sizeof(i));
+        ht_upsert(t, key, strlen(key), &i, sizeof(i));
     }
     
     ht_stats_t st1;
@@ -454,7 +454,7 @@ static void test_grow_with_tomb_threshold(void) {
     /* Fill past capacity */
     for (int i = 0; i < 30; i++) {
         char k[16]; snprintf(k, sizeof(k), "gt%d", i);
-        ht_insert(t, k, strlen(k), &i, sizeof(i));
+        ht_upsert(t, k, strlen(k), &i, sizeof(i));
     }
 
     /* Delete many to exceed tomb_threshold */
@@ -467,7 +467,7 @@ static void test_grow_with_tomb_threshold(void) {
     for (int i = 30; i < 60; i++) {
         char k[16]; snprintf(k, sizeof(k), "gt%d", i);
         int v = i;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
 
     INV_CHECK(t, "test_grow_with_tomb_threshold: after growth+tomb");
@@ -500,7 +500,7 @@ static void test_shrink_blocked_at_64(void) {
     /* Insert 10 entries */
     for (int i = 0; i < 10; i++) {
         char k[8]; snprintf(k, sizeof(k), "sb%d", i);
-        ht_insert(t, k, strlen(k), &i, sizeof(i));
+        ht_upsert(t, k, strlen(k), &i, sizeof(i));
     }
 
     /* Delete 9 — load = 1/64 = 0.016 < 0.25, but capacity == 64 (NOT > 64) */
@@ -533,7 +533,7 @@ static void test_shrink_exact_boundary(void) {
     for (int i = 0; i < 90; i++) {
         char k[8]; snprintf(k, sizeof(k), "eb%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     ht_stats_t st;
@@ -576,7 +576,7 @@ static void test_zombie_cursor_reset_on_growth(void) {
     for (int i = 0; i < 20; i++) {
         char k[8]; snprintf(k, sizeof(k), "zr%d", i);
         int v = i;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
     for (int i = 0; i < 10; i++) {
         char k[8]; snprintf(k, sizeof(k), "zr%d", i);
@@ -586,14 +586,14 @@ static void test_zombie_cursor_reset_on_growth(void) {
     for (int i = 20; i < 25; i++) {
         char k[8]; snprintf(k, sizeof(k), "zr%d", i);
         int v = i;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
 
     /* Now trigger growth — zombie_cursor resets to 0 */
     for (int i = 100; i < 150; i++) {
         char k[16]; snprintf(k, sizeof(k), "zg%d", i);
         int v = i;
-        ht_insert(t, k, strlen(k), &v, sizeof(v));
+        ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
 
     /* Verify all entries */
@@ -627,7 +627,7 @@ static void test_zombie_all_deleted(void) {
     for (int i = 0; i < 30; i++) {
         char k[8]; snprintf(k, sizeof(k), "ad%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
     for (int i = 0; i < 30; i++) {
         char k[8]; snprintf(k, sizeof(k), "ad%d", i);
@@ -642,7 +642,7 @@ static void test_zombie_all_deleted(void) {
     for (int i = 0; i < 30; i++) {
         char k[8]; snprintf(k, sizeof(k), "an%d", i);
         int v = i + 100;
-        ht_insert(t, k, strlen(k), &v, sizeof(int));
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     /* Verify new entries */
@@ -677,7 +677,7 @@ static void test_multiple_auto_shrinks(void) {
     for (int i = 0; i < 100; i++) {
         char k[8]; snprintf(k, sizeof(k), "ms%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     ht_stats_t st;
@@ -717,14 +717,14 @@ static void test_grow_data_integrity(void) {
     const char *str_vals[] = { "alpha", "bravo", "charlie", "delta" };
     for (int i = 0; i < 4; i++) {
         char k[8]; snprintf(k, sizeof(k), "s%d", i);
-        ht_insert(t, k, strlen(k), str_vals[i], strlen(str_vals[i]));
+        ht_upsert(t, k, strlen(k), str_vals[i], strlen(str_vals[i]));
     }
 
     int int_vals[20];
     for (int i = 0; i < 20; i++) {
         char k[8]; snprintf(k, sizeof(k), "i%d", i);
         int_vals[i] = i * 100;
-        ht_insert(t, k, strlen(k), &int_vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &int_vals[i], sizeof(int));
     }
 
     ht_stats_t st;
@@ -788,7 +788,7 @@ static void test_shrink_preserves_byte_exact(void) {
         char k[16];
         snprintf(k, sizeof(k), "bk%d", i);
         int vi = i % NVALS;
-        ht_insert(t, k, strlen(k), vstr[vi], vlen[vi]);
+        ht_upsert(t, k, strlen(k), vstr[vi], vlen[vi]);
     }
 
     /* Force growth past capacity 64 */
@@ -796,7 +796,7 @@ static void test_shrink_preserves_byte_exact(void) {
         char k[16];
         snprintf(k, sizeof(k), "bk%d", i);
         int val = i;
-        ht_insert(t, k, strlen(k), &val, sizeof(int));
+        ht_upsert(t, k, strlen(k), &val, sizeof(int));
     }
 
     ht_stats_t st;
@@ -851,7 +851,7 @@ static void test_compact_repeatedly(void) {
             char k[16];
             snprintf(k, sizeof(k), "rc%d", i);
             int v = i;
-            ht_insert(t, k, strlen(k), &v, sizeof(int));
+            ht_upsert(t, k, strlen(k), &v, sizeof(int));
             /* Track in present array */
             if (i >= present_cap) {
                 int new_cap = i + 100;
@@ -919,7 +919,7 @@ static void test_capacity_power_of_2(void) {
 
         if (action == 0) {
             int val = k * 7;
-            ht_insert(t, key, strlen(key), &val, sizeof(int));
+            ht_upsert(t, key, strlen(key), &val, sizeof(int));
         } else if (action == 1) {
             ht_remove(t, key, strlen(key));
         } else {
@@ -945,7 +945,7 @@ static void test_grow_with_zero_hash_entries(void) {
         char k[16];
         snprintf(k, sizeof(k), "zh_%d", i);
         int val = i + 1000;
-        ht_insert_with_hash(t, 0, k, strlen(k), &val, sizeof(int));
+        ht_upsert_with_hash(t, 0, k, strlen(k), &val, sizeof(int));
     }
 
     /* Insert 50 entries with normal fnv1a hash */
@@ -953,7 +953,7 @@ static void test_grow_with_zero_hash_entries(void) {
         char k[16];
         snprintf(k, sizeof(k), "fn_%d", i);
         int val = i + 2000;
-        ht_insert(t, k, strlen(k), &val, sizeof(int));
+        ht_upsert(t, k, strlen(k), &val, sizeof(int));
     }
 
     ht_stats_t st;
@@ -996,7 +996,7 @@ static void test_shrink_to_minimum(void) {
     for (int i = 0; i < 100; i++) {
         char k[8]; snprintf(k, sizeof(k), "sm%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     ht_stats_t st;
@@ -1046,7 +1046,7 @@ static void test_grow_under_heavy_tombstones(void) {
     for (int i = 0; i < 25; i++) {
         char k[8]; snprintf(k, sizeof(k), "ht%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     /* Delete 20 — creating heavy tombstones (20/25 = 80% tombstone ratio) */
@@ -1064,7 +1064,7 @@ static void test_grow_under_heavy_tombstones(void) {
     for (int i = 25; i < 45; i++) {
         char k[8]; snprintf(k, sizeof(k), "ht%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     INV_CHECK(t, "test_grow_under_heavy_tombstones: after reinsert");
@@ -1093,6 +1093,265 @@ static void test_grow_under_heavy_tombstones(void) {
     printf("  PASS\n");
 }
 
+/* ---- Zombie on empty table (size=0, tombstone_cnt=0) ---- */
+
+static void test_zombie_on_empty(void) {
+    printf("Test: zombie steps on empty table...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75,
+                        .zombie_window = 8 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert one to trigger a zombie step, then remove it */
+    int v = 1;
+    assert(ht_upsert(t, "k", 1, &v, sizeof(int)));
+    assert(ht_remove(t, "k", 1));
+
+    /* Insert another — zombie step fires on empty table */
+    v = 2;
+    assert(ht_upsert(t, "k", 1, &v, sizeof(int)));
+
+    INV_CHECK(t, "test_zombie_on_empty: after zombie on empty");
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);
+    assert(*(int *)ht_find(t, "k", 1, NULL) == 2);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+}
+
+/* ---- Tombstone count accuracy under heavy delete churn ---- */
+
+static void test_tombstone_count_accuracy(void) {
+    printf("Test: tombstone count accuracy under churn...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.85,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    int vals[20];
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "tc%d", i);
+        vals[i] = i;
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
+    }
+
+    /* Delete all 20 one by one, check invariant after each */
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "tc%d", i);
+        ht_remove(t, k, strlen(k));
+
+        ht_stats_t st;
+        ht_stats(t, &st);
+        assert(st.size == (size_t)(19 - i));
+        /* size + tombstone_cnt <= capacity */
+        assert(st.size + st.tombstone_cnt <= st.capacity);
+    }
+
+    INV_CHECK(t, "test_tombstone_accuracy: after all deletes");
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+}
+
+/* ---- Compact after deleting all, then reuse ---- */
+
+static void test_compact_all_deleted_reuse(void) {
+    printf("Test: compact after deleting all entries, then reuse...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 20, delete all */
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "cd%d", i);
+        int v = i;
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
+    }
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "cd%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+
+    /* Compact with size=0 */
+    ht_compact(t);
+
+    INV_CHECK(t, "test_compact_all_deleted: after compact");
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    /* Reuse: insert new entries */
+    for (int i = 0; i < 15; i++) {
+        char k[8]; snprintf(k, sizeof(k), "nw%d", i);
+        int v = i * 7;
+        assert(ht_upsert(t, k, strlen(k), &v, sizeof(int)));
+    }
+
+    INV_CHECK(t, "test_compact_all_deleted: after reuse");
+
+    ht_stats(t, &st);
+    assert(st.size == 15);
+
+    for (int i = 0; i < 15; i++) {
+        char k[8]; snprintf(k, sizeof(k), "nw%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL && *v == i * 7);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+}
+
+/* ---- Compact then insert heavy collision chain ---- */
+
+static void test_compact_then_collision_insert(void) {
+    printf("Test: compact then insert colliding keys...\n");
+
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.85,
+                        .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert 20 entries to fill, then delete 15 to create tombstones */
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "cc%d", i);
+        int v = i;
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
+    }
+    for (int i = 0; i < 15; i++) {
+        char k[8]; snprintf(k, sizeof(k), "cc%d", i);
+        ht_remove(t, k, strlen(k));
+    }
+
+    /* Compact — places prophylactic tombstones */
+    ht_compact(t);
+
+    INV_CHECK(t, "test_compact_collision: after compact");
+
+    /* Now insert 20 more with a fixed hash (all collide) —
+     * they must coexist with prophylactic tombstones */
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "cx%d", i);
+        int v = i * 11;
+        assert(ht_upsert_with_hash(t, 42, k, strlen(k), &v, sizeof(int)));
+    }
+
+    INV_CHECK(t, "test_compact_collision: after collision insert");
+
+    /* Verify both original survivors and new collision entries */
+    for (int i = 15; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "cc%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL && *v == i);
+    }
+    for (int i = 0; i < 20; i++) {
+        char k[8]; snprintf(k, sizeof(k), "cx%d", i);
+        const int *v = ht_find_with_hash(t, 42, k, strlen(k), NULL);
+        assert(v != NULL && *v == i * 11);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+}
+
+/* ---- Resize to same capacity while zombie active ---- */
+
+static void test_resize_same_cap_zombie_active(void) {
+    printf("Test: resize to same capacity while zombie active...\n");
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.75,
+                        .min_load_factor = 0.0, .zombie_window = 8 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    /* Insert enough to advance zombie cursor */
+    for (int i = 0; i < 15; i++) {
+        char k[8]; snprintf(k, sizeof(k), "rz%d", i);
+        int v = i;
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    size_t cap_before = st.capacity;
+
+    /* Resize to same capacity — no-op, zombie cursor preserved */
+    assert(ht_resize(t, cap_before));
+
+    ht_stats(t, &st);
+    assert(st.capacity == cap_before);
+
+    /* Insert more — zombie continues */
+    for (int i = 15; i < 30; i++) {
+        char k[8]; snprintf(k, sizeof(k), "rz%d", i);
+        int v = i;
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_resize_same_cap_zombie: after more inserts");
+
+    for (int i = 0; i < 30; i++) {
+        char k[8]; snprintf(k, sizeof(k), "rz%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL && *v == i);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+}
+
+/* ---- Grow-shrink-grow triple oscillation ---- */
+
+static void test_triple_oscillation(void) {
+    printf("Test: grow-shrink-grow triple oscillation...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75,
+                        .min_load_factor = 0.25, .zombie_window = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+
+    for (int round = 0; round < 3; round++) {
+        /* Fill to grow */
+        for (int i = 0; i < 80; i++) {
+            char k[16]; snprintf(k, sizeof(k), "to%d_%d", round, i);
+            int v = round * 1000 + i;
+            ht_upsert(t, k, strlen(k), &v, sizeof(int));
+        }
+
+        ht_stats_t st;
+        ht_stats(t, &st);
+        assert(st.capacity >= 128);
+
+        /* Drain to shrink */
+        for (int i = 0; i < 80; i++) {
+            char k[16]; snprintf(k, sizeof(k), "to%d_%d", round, i);
+            ht_remove(t, k, strlen(k));
+        }
+
+        ht_stats(t, &st);
+        assert(st.size == 0);
+    }
+
+    /* Insert permanent entries to verify across oscillations */
+    for (int i = 0; i < 5; i++) {
+        char k[8]; snprintf(k, sizeof(k), "perm%d", i);
+        int v = i * 99;
+        ht_upsert(t, k, strlen(k), &v, sizeof(int));
+    }
+
+    INV_CHECK(t, "test_triple_oscillation: after oscillations");
+
+    for (int i = 0; i < 5; i++) {
+        char k[8]; snprintf(k, sizeof(k), "perm%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v != NULL && *v == i * 99);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+}
+
 /* Stats invariants: load_factor == size/cap, tombstone_ratio formula */
 static void test_stats_invariants(void) {
     printf("Test: stats formula invariants...\n");
@@ -1104,7 +1363,7 @@ static void test_stats_invariants(void) {
     for (int i = 0; i < 50; i++) {
         char k[8]; snprintf(k, sizeof(k), "si%d", i);
         vals[i] = i;
-        ht_insert(t, k, strlen(k), &vals[i], sizeof(int));
+        ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
     for (int i = 0; i < 25; i++) {
         char k[8]; snprintf(k, sizeof(k), "si%d", i * 2);
@@ -1160,6 +1419,12 @@ int main(void) {
     test_grow_with_zero_hash_entries();
     test_shrink_to_minimum();
     test_grow_under_heavy_tombstones();
+    test_zombie_on_empty();
+    test_tombstone_count_accuracy();
+    test_compact_all_deleted_reuse();
+    test_compact_then_collision_insert();
+    test_resize_same_cap_zombie_active();
+    test_triple_oscillation();
 
     printf("\nAll grow/shrink tests passed!\n");
     return 0;
