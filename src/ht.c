@@ -1100,12 +1100,17 @@ static uint32_t alloc_entry(ht_table_t *t, uint16_t hash_hi,
 static bool update_entry_value(ht_table_t *t, uint32_t eidx,
                                const void *key, size_t key_len,
                                const void *value, size_t value_len) {
+    ht_entry_t *e = &t->entries[eidx];
+    if (value_len == e->val_len) {
+        memcpy(t->arena + e->arena_offset + e->key_len, value, value_len);
+        return true;
+    }
     void *data = arena_alloc(t, key_len + value_len);
     if (!data) return false;
     memcpy(data, key, key_len);
     memcpy((uint8_t *)data + key_len, value, value_len);
-    t->entries[eidx].val_len = (uint32_t)value_len;
-    t->entries[eidx].arena_offset = (uint32_t)((uint8_t *)data - t->arena);
+    e->val_len = (uint32_t)value_len;
+    e->arena_offset = (uint32_t)((uint8_t *)data - t->arena);
     return true;
 }
 
@@ -1546,6 +1551,29 @@ int64_t ht_inc(ht_table_t *t, const void *key, size_t key_len, int64_t delta) {
     return new_val;
 }
 
+int64_t ht_inc_with_hash(ht_table_t *t, uint64_t hash,
+                          const void *key, size_t key_len, int64_t delta,
+                          bool *ok) {
+    if (!t || !key) { if (ok) *ok = false; return 0; }
+
+    size_t val_len;
+    const void *found = ht_find_with_hash(t, hash, key, key_len, &val_len);
+
+    int64_t new_val;
+    if (found && val_len == sizeof(int64_t)) {
+        new_val = *(const int64_t *)found + delta;
+    } else {
+        new_val = delta;
+    }
+    bool inserted = ht_upsert_with_hash(t, hash, key, key_len, &new_val, sizeof(new_val));
+    if (!found && !inserted) {
+        if (ok) *ok = false;
+        return 0;
+    }
+    if (ok) *ok = true;
+    return new_val;
+}
+
 // ============================================================================
 // High-Level Public API: Delete
 // ============================================================================
@@ -1949,6 +1977,11 @@ bool ht_iter_next(ht_table_t *t, ht_iter_t *iter,
 
 void ht_stats(const ht_table_t *t, ht_stats_t *out_stats) {
     ht_bare_stats(&t->bare, out_stats);
+}
+
+size_t ht_size(const ht_table_t *t) {
+    if (!t) return 0;
+    return t->bare.size;
 }
 
 void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {

@@ -118,6 +118,9 @@ bool ht_unsert_with_hash(ht_table_t *t, uint64_t hash,
                          const void *value, size_t value_len);
 
 int64_t ht_inc(ht_table_t *t, const void *key, size_t key_len, int64_t delta);
+int64_t ht_inc_with_hash(ht_table_t *t, uint64_t hash,
+                          const void *key, size_t key_len, int64_t delta,
+                          bool *ok);
 
 // ============================================================================
 // Lookup
@@ -200,6 +203,7 @@ typedef struct {
 
 void ht_stats(const ht_table_t *t, ht_stats_t *out_stats);
 void ht_dump(const ht_table_t *t, uint32_t h32, size_t count);
+size_t ht_size(const ht_table_t *t);
 
 void ht_bare_stats(const ht_bare_t *t, ht_stats_t *out_stats);
 const char *ht_bare_check_invariants(const ht_bare_t *t);
