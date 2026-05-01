@@ -1,45 +1,34 @@
 /**
- * Draugr Hash Table Implementation
+ * Draugr Hash Table Implementation — Structure-of-Arrays (SoA)
  *
  * Robin-Hood linear probing + Graveyard prophylactic tombstones +
  * Zombie de-amortized rebuild.
  *
- * Sentinel encoding:
+ * SoA Layout:
+ *   hash_pd[i]  — uint64_t: lower 48 bits = hash, upper 16 bits = probe_dist
+ *   data_idx[i] — uint32_t: index into entries[] (DATA_IDX_NONE if empty/tomb)
+ *
+ *   hash_pd and data_idx are position-synced: moving an entry during
+ *   Robin-Hood swaps exchanges only these two values (12 bytes) — no
+ *   key/value bytes are copied during displacement.
+ *
+ *   entries[] is a separate array of ht_entry_t (12 bytes each), storing
+ *   key_len, val_len, and arena_offset.  Accessed only after a probe hit,
+ *   never touched during the probe scan itself.
+ *
+ * Sentinels:
  *   hash == HASH_EMPTY (0)  →  unoccupied slot
  *   hash == HASH_TOMB  (1)  →  tombstone (deleted entry)
  *   hash >= 2               →  live entry
  *
- * The hash values 0 and 1 are reserved and can never appear in a live
- * entry's stored hash.  When a user-supplied hash has lower 32 bits of
- * 0 or 1, the entry is placed in a small "spill lane" instead of the
- * main table.  This is exceedingly rare (2 out of 2^32) but guarantees
- * correctness for every possible hash value.
+ * Hash values 0 and 1 (in the lower 48 bits) are reserved.  Entries whose
+ * hash falls in this range go to a small "spill lane" instead of the main
+ * table.  Probability: 2/2^48 per entry.
  *
  * Spill lane:
- *   A separate small array of slots, searched linearly.  Insert / find /
- *   remove / iterate all check the spill lane in addition to the main
- *   table.  The spill lane never stores tombstones — removal simply
- *   shifts subsequent entries down (like a tiny open-addressing array
- *   with immediate compaction).
- *
- * Robin-Hood insertion (main table only):
- *   Classic Robin-Hood with probe_dist comparison.  On insert, if the
- *   current slot's occupant has a smaller probe_dist, they swap.  Tomb-
- *   stones (HASH_TOMB) are "available" and can be overwritten.
- *
- * Lookup / Delete (main table):
- *   Probe from ideal position.  Skip HASH_TOMB.  Stop when:
- *     - HASH_EMPTY found (key not present in main table)
- *     - slot.probe_dist < our distance (Robin-Hood invariant)
- *   Then also check the spill lane.
- *
- * Graveyard (Bender et al., FOCS 2021):
- *   On rebuild, place prophylactic tombstones at evenly-spaced positions
- *   to break up primary clustering.  c_p = 3.
- *
- * Zombie (Chesetti et al., SIGMOD 2025):
- *   De-amortized tombstone redistribution via incremental interval
- *   rebuilds.  One interval of c_b * x slots per insert.  c_b = 3.
+ *   Same SoA pattern (spill_hash_pd[], spill_data_idx[]), shares entries[]
+ *   and arena with the main table.  Linear scan, no tombstones — removal
+ *   compacts immediately.
  */
 
 #include "draugr/ht.h"
@@ -49,27 +38,51 @@
 #include <string.h>
 
 // ============================================================================
-// Slot Layout
+// SoA Type Definitions
 // ============================================================================
 
 typedef struct {
-    uint32_t hash;        // HASH_EMPTY, HASH_TOMB, or live hash (>= 2)
-    uint16_t probe_dist;  // Distance from ideal position
-    uint16_t key_len;     // Max 65535 bytes
+    uint16_t key_len;
+    uint16_t _pad;
     uint32_t val_len;
-    uint32_t offset;      // Byte offset into data arena (max 4 GB)
-} ht_slot_t;
+    uint32_t arena_offset;
+} ht_entry_t;  // 12 bytes
 
 // ============================================================================
-// Sentinels
+// Sentinels & Pack/Unpack
 // ============================================================================
 
-#define HASH_EMPTY 0u
-#define HASH_TOMB  1u
+#define HASH_EMPTY     0ULL
+#define HASH_TOMB      1ULL
+#define HASH_MASK      0x0000FFFFFFFFFFFFULL
+#define DATA_IDX_NONE  UINT32_MAX
 
-// Can this hash value go into the main table?
-static inline bool hash_is_live(uint32_t h) {
-    return h >= 2;
+static inline uint64_t hpd_hash(uint64_t hpd) {
+    return hpd & HASH_MASK;
+}
+
+static inline uint16_t hpd_pd(uint64_t hpd) {
+    return (uint16_t)(hpd >> 48);
+}
+
+static inline bool hpd_empty(uint64_t hpd) {
+    return hpd_hash(hpd) == HASH_EMPTY;
+}
+
+static inline bool hpd_tomb(uint64_t hpd) {
+    return hpd_hash(hpd) == HASH_TOMB;
+}
+
+static inline bool hpd_available(uint64_t hpd) {
+    return hpd_hash(hpd) <= HASH_TOMB;
+}
+
+static inline bool hpd_live(uint64_t hpd) {
+    return hpd_hash(hpd) >= 2;
+}
+
+static inline uint64_t hpd_pack(uint64_t hash, uint16_t probe_dist) {
+    return ((uint64_t)probe_dist << 48) | (hash & HASH_MASK);
 }
 
 // ============================================================================
@@ -77,37 +90,44 @@ static inline bool hash_is_live(uint32_t h) {
 // ============================================================================
 
 struct ht_table {
-    ht_slot_t    *slots;
-    size_t        capacity;       // Main table size (power of 2)
-    size_t        size;           // Live entries (main + spill)
-    size_t        tombstone_cnt;  // Tombstones in main table
+    // Main table (SoA probe arrays)
+    uint64_t   *hash_pd;
+    uint32_t   *data_idx;
+    size_t      capacity;
+    size_t      size;
+    size_t      tombstone_cnt;
 
-    // Spill lane: entries whose hash collides with sentinels (0 or 1).
-    // Linear array, no tombstones — removal compacts immediately.
-    ht_slot_t    *spill;
-    size_t        spill_cap;
-    size_t        spill_len;      // Number of live entries in spill lane
+    // Spill lane (SoA)
+    uint64_t   *spill_hash_pd;
+    uint32_t   *spill_data_idx;
+    size_t      spill_cap;
+    size_t      spill_len;
 
-    // Data arena (key+value bytes)
-    uint8_t      *data_arena;
-    size_t        data_size;
-    size_t        data_cap;
+    // Entry storage
+    ht_entry_t *entries;
+    size_t      entry_count;
+    size_t      entry_cap;
+
+    // Arena (key+value bytes)
+    uint8_t    *arena;
+    size_t      arena_size;
+    size_t      arena_cap;
 
     // Functions
-    ht_hash_fn    hash_fn;
-    ht_eq_fn      eq_fn;
-    void         *user_ctx;
+    ht_hash_fn  hash_fn;
+    ht_eq_fn    eq_fn;
+    void       *user_ctx;
 
     // Config
-    double        max_load_factor;
-    double        min_load_factor;
-    double        tomb_threshold;
-    size_t        zombie_window;
+    double      max_load_factor;
+    double      min_load_factor;
+    double      tomb_threshold;
+    size_t      zombie_window;
 
     // Zombie rebuild state
-    size_t        zombie_cursor;
+    size_t      zombie_cursor;
 
-    bool          resizing;
+    bool        resizing;
 };
 
 // ============================================================================
@@ -137,63 +157,100 @@ static size_t next_pow2(size_t n) {
     return r;
 }
 
+// ============================================================================
+// Arena Management
+// ============================================================================
+
 static bool grow_arena(ht_table_t *t, size_t needed) {
-    if (t->data_size + needed <= t->data_cap) return true;
-    size_t new_cap = t->data_cap ? t->data_cap * 2 : 1024;
-    while (new_cap < t->data_size + needed) new_cap *= 2;
+    if (t->arena_size + needed <= t->arena_cap) return true;
+    size_t new_cap = t->arena_cap ? t->arena_cap * 2 : 1024;
+    while (new_cap < t->arena_size + needed) new_cap *= 2;
     if (new_cap > UINT32_MAX) return false;
-    uint8_t *p = realloc(t->data_arena, new_cap);
+    uint8_t *p = realloc(t->arena, new_cap);
     if (!p) return false;
-    t->data_arena = p;
-    t->data_cap = new_cap;
+    t->arena = p;
+    t->arena_cap = new_cap;
     return true;
 }
 
 static void *arena_alloc(ht_table_t *t, size_t n) {
     if (!grow_arena(t, n)) return NULL;
-    void *p = t->data_arena + t->data_size;
-    t->data_size += n;
+    void *p = t->arena + t->arena_size;
+    t->arena_size += n;
     return p;
 }
 
-static inline bool slot_empty(const ht_slot_t *s) {
-    return s->hash == HASH_EMPTY;
+// ============================================================================
+// Entry Management
+// ============================================================================
+
+// Allocate an entry in entries[], copy key+value to arena.
+// Returns entry index, or DATA_IDX_NONE on failure.
+static uint32_t alloc_entry(ht_table_t *t,
+                            const void *key, size_t key_len,
+                            const void *value, size_t value_len) {
+    if (key_len > UINT16_MAX) return DATA_IDX_NONE;
+
+    if (t->entry_count >= t->entry_cap) {
+        size_t new_cap = t->entry_cap ? t->entry_cap * 2 : 64;
+        ht_entry_t *ne = realloc(t->entries, new_cap * sizeof(ht_entry_t));
+        if (!ne) return DATA_IDX_NONE;
+        t->entries = ne;
+        t->entry_cap = new_cap;
+    }
+
+    void *data = arena_alloc(t, key_len + value_len);
+    if (!data) return DATA_IDX_NONE;
+    memcpy(data, key, key_len);
+    memcpy((uint8_t *)data + key_len, value, value_len);
+
+    uint32_t eidx = (uint32_t)t->entry_count++;
+    t->entries[eidx].key_len = (uint16_t)key_len;
+    t->entries[eidx]._pad = 0;
+    t->entries[eidx].val_len = (uint32_t)value_len;
+    t->entries[eidx].arena_offset = (uint32_t)((uint8_t *)data - t->arena);
+    return eidx;
 }
 
-static inline bool slot_is_tomb(const ht_slot_t *s) {
-    return s->hash == HASH_TOMB;
+// Update an existing entry's value (for UPSERT in-place update).
+static bool update_entry_value(ht_table_t *t, uint32_t eidx,
+                               const void *key, size_t key_len,
+                               const void *value, size_t value_len) {
+    void *data = arena_alloc(t, key_len + value_len);
+    if (!data) return false;
+    memcpy(data, key, key_len);
+    memcpy((uint8_t *)data + key_len, value, value_len);
+    t->entries[eidx].val_len = (uint32_t)value_len;
+    t->entries[eidx].arena_offset = (uint32_t)((uint8_t *)data - t->arena);
+    return true;
 }
 
-static inline bool slot_available(const ht_slot_t *s) {
-    return s->hash == HASH_EMPTY || s->hash == HASH_TOMB;
-}
+// ============================================================================
+// Key / Value Matching
+// ============================================================================
 
-static inline const void *slot_key_ptr(const ht_table_t *t, const ht_slot_t *s) {
-    return t->data_arena + s->offset;
-}
-
-static inline const void *slot_val_ptr(const ht_table_t *t, const ht_slot_t *s) {
-    return t->data_arena + s->offset + s->key_len;
-}
-
-static inline bool keys_match(const ht_table_t *t, const ht_slot_t *s,
+static inline bool keys_match(const ht_table_t *t, uint32_t eidx,
                               const void *key, size_t key_len) {
-    if (s->key_len != key_len) return false;
+    const ht_entry_t *e = &t->entries[eidx];
+    if (e->key_len != key_len) return false;
+    const void *entry_key = t->arena + e->arena_offset;
     if (t->eq_fn)
-        return t->eq_fn(slot_key_ptr(t, s), s->key_len, key, key_len, t->user_ctx);
-    return memcmp(slot_key_ptr(t, s), key, key_len) == 0;
+        return t->eq_fn(entry_key, e->key_len, key, key_len, t->user_ctx);
+    return memcmp(entry_key, key, key_len) == 0;
+}
+
+static inline bool vals_match(const ht_table_t *t, uint32_t eidx,
+                              const void *val, size_t val_len) {
+    const ht_entry_t *e = &t->entries[eidx];
+    if (e->val_len != val_len) return false;
+    const void *entry_val = t->arena + e->arena_offset + e->key_len;
+    return memcmp(entry_val, val, val_len) == 0;
 }
 
 // Insert modes (internal)
-#define INS_UPSERT  0   // remove all for key, insert/update single value
-#define INS_ALWAYS  1   // always insert new entry (multi-value)
-#define INS_UNIQUE  2   // insert only if exact k,v pair not found
-
-static inline bool vals_match(const ht_table_t *t, const ht_slot_t *s,
-                              const void *val, size_t val_len) {
-    if (s->val_len != val_len) return false;
-    return memcmp(slot_val_ptr(t, s), val, val_len) == 0;
-}
+#define INS_UPSERT  0
+#define INS_ALWAYS  1
+#define INS_UNIQUE  2
 
 static double compute_x(const ht_table_t *t) {
     double lf = (double)t->size / (double)t->capacity;
@@ -203,51 +260,31 @@ static double compute_x(const ht_table_t *t) {
 }
 
 // ============================================================================
-// Place entry into a slot (copies key+value into arena)
-// ============================================================================
-
-static bool place_entry(ht_table_t *t, ht_slot_t *slot,
-                        uint32_t h32, uint16_t probe_dist,
-                        const void *key, size_t key_len,
-                        const void *value, size_t value_len) {
-    if (key_len > UINT16_MAX) return false;
-    if (!grow_arena(t, key_len + value_len)) return false;
-    void *data = arena_alloc(t, key_len + value_len);
-    if (!data) return false;
-    memcpy(data, key, key_len);
-    memcpy((uint8_t *)data + key_len, value, value_len);
-
-    slot->hash = h32;
-    slot->probe_dist = probe_dist;
-    slot->key_len = (uint16_t)key_len;
-    slot->val_len = (uint32_t)value_len;
-    slot->offset = (uint32_t)((uint8_t *)data - t->data_arena);
-    return true;
-}
-
-// ============================================================================
 // Spill Lane Operations
-//
-// The spill lane holds entries whose hash (lower 32 bits) is 0 or 1 —
-// values reserved as HASH_EMPTY and HASH_TOMB sentinels.  This is
-// exceedingly rare (probability 2/2^32 per entry) but must exist for
-// correctness.  No tombstones — removal compacts immediately.
 // ============================================================================
 
 static bool spill_grow(ht_table_t *t) {
     size_t new_cap = t->spill_cap ? t->spill_cap * 2 : SPILL_INITIAL;
-    ht_slot_t *ns = realloc(t->spill, new_cap * sizeof(ht_slot_t));
-    if (!ns) return false;
-    // Zero new entries
-    memset(ns + t->spill_cap, 0, (new_cap - t->spill_cap) * sizeof(ht_slot_t));
-    t->spill = ns;
+
+    uint64_t *new_hpd = realloc(t->spill_hash_pd, new_cap * sizeof(uint64_t));
+    if (!new_hpd) return false;
+
+    uint32_t *new_didx = realloc(t->spill_data_idx, new_cap * sizeof(uint32_t));
+    if (!new_didx) {
+        t->spill_hash_pd = new_hpd;
+        return false;
+    }
+
+    memset(new_hpd + t->spill_cap, 0, (new_cap - t->spill_cap) * sizeof(uint64_t));
+    memset(new_didx + t->spill_cap, 0xFF, (new_cap - t->spill_cap) * sizeof(uint32_t));
+
+    t->spill_hash_pd = new_hpd;
+    t->spill_data_idx = new_didx;
     t->spill_cap = new_cap;
     return true;
 }
 
-// Insert into spill lane with mode support.
-// Returns true if new entry inserted, false if updated (UPSERT) or duplicate (UNIQUE).
-static bool spill_insert_ex(ht_table_t *t, uint32_t h32,
+static bool spill_insert_ex(ht_table_t *t, uint64_t h48,
                              const void *key, size_t key_len,
                              const void *value, size_t value_len,
                              int mode) {
@@ -256,26 +293,27 @@ static bool spill_insert_ex(ht_table_t *t, uint32_t h32,
     } else if (mode == INS_UPSERT) {
         bool found = false;
         for (size_t i = 0; i < t->spill_len; ) {
-            ht_slot_t *s = &t->spill[i];
-            if (s->hash == h32 && keys_match(t, s, key, key_len)) {
-                if (!found) {
-                    // Update first match in-place
-                    if (!grow_arena(t, key_len + value_len)) return false;
-                    void *data = arena_alloc(t, key_len + value_len);
-                    if (!data) return false;
-                    memcpy(data, key, key_len);
-                    memcpy((uint8_t *)data + key_len, value, value_len);
-                    s->val_len = (uint32_t)value_len;
-                    s->offset = (uint32_t)((uint8_t *)data - t->data_arena);
-                    found = true;
-                    i++;
+            uint64_t shpd = t->spill_hash_pd[i];
+            if (hpd_hash(shpd) == h48) {
+                uint32_t eidx = t->spill_data_idx[i];
+                if (keys_match(t, eidx, key, key_len)) {
+                    if (!found) {
+                        if (!update_entry_value(t, eidx, key, key_len, value, value_len))
+                            return false;
+                        found = true;
+                        i++;
+                    } else {
+                        memmove(&t->spill_hash_pd[i], &t->spill_hash_pd[i + 1],
+                                (t->spill_len - i - 1) * sizeof(uint64_t));
+                        memmove(&t->spill_data_idx[i], &t->spill_data_idx[i + 1],
+                                (t->spill_len - i - 1) * sizeof(uint32_t));
+                        t->spill_len--;
+                        t->spill_hash_pd[t->spill_len] = HASH_EMPTY;
+                        t->spill_data_idx[t->spill_len] = DATA_IDX_NONE;
+                        t->size--;
+                    }
                 } else {
-                    // Remove additional matches
-                    memmove(&t->spill[i], &t->spill[i + 1],
-                            (t->spill_len - i - 1) * sizeof(ht_slot_t));
-                    t->spill_len--;
-                    t->spill[t->spill_len] = (ht_slot_t){0};
-                    t->size--;
+                    i++;
                 }
             } else {
                 i++;
@@ -284,9 +322,10 @@ static bool spill_insert_ex(ht_table_t *t, uint32_t h32,
         if (found) return false;
     } else { // INS_UNIQUE
         for (size_t i = 0; i < t->spill_len; i++) {
-            ht_slot_t *s = &t->spill[i];
-            if (s->hash == h32 && keys_match(t, s, key, key_len) &&
-                vals_match(t, s, value, value_len))
+            uint64_t shpd = t->spill_hash_pd[i];
+            if (hpd_hash(shpd) == h48 &&
+                keys_match(t, t->spill_data_idx[i], key, key_len) &&
+                vals_match(t, t->spill_data_idx[i], value, value_len))
                 return false;
         }
     }
@@ -295,61 +334,69 @@ static bool spill_insert_ex(ht_table_t *t, uint32_t h32,
     if (t->spill_len >= t->spill_cap) {
         if (!spill_grow(t)) return false;
     }
-    if (!place_entry(t, &t->spill[t->spill_len], h32, 0,
-                     key, key_len, value, value_len))
-        return false;
+    uint32_t eidx = alloc_entry(t, key, key_len, value, value_len);
+    if (eidx == DATA_IDX_NONE) return false;
+    t->spill_hash_pd[t->spill_len] = hpd_pack(h48, 0);
+    t->spill_data_idx[t->spill_len] = eidx;
     t->spill_len++;
     t->size++;
     return true;
 }
 
-// Legacy wrapper for reinsert_spill (always behaves as UPSERT during rebuilds)
-static bool spill_insert(ht_table_t *t, uint32_t h32,
+static bool spill_insert(ht_table_t *t, uint64_t h48,
                          const void *key, size_t key_len,
                          const void *value, size_t value_len) {
-    return spill_insert_ex(t, h32, key, key_len, value, value_len, INS_UPSERT);
+    return spill_insert_ex(t, h48, key, key_len, value, value_len, INS_UPSERT);
 }
 
-// Find in spill lane
-static const void *spill_find(const ht_table_t *t, uint32_t h32,
+static const void *spill_find(const ht_table_t *t, uint64_t h48,
                               const void *key, size_t key_len,
                               size_t *out_value_len) {
     for (size_t i = 0; i < t->spill_len; i++) {
-        ht_slot_t *s = &t->spill[i];
-        if (s->hash == h32 && keys_match(t, s, key, key_len)) {
-            if (out_value_len) *out_value_len = s->val_len;
-            return slot_val_ptr(t, s);
+        uint64_t shpd = t->spill_hash_pd[i];
+        if (hpd_hash(shpd) == h48) {
+            uint32_t eidx = t->spill_data_idx[i];
+            if (keys_match(t, eidx, key, key_len)) {
+                const ht_entry_t *e = &t->entries[eidx];
+                if (out_value_len) *out_value_len = e->val_len;
+                return t->arena + e->arena_offset + e->key_len;
+            }
         }
     }
     return NULL;
 }
 
-// Remove from spill lane (compact after removal)
-static bool spill_remove(ht_table_t *t, uint32_t h32,
+static bool spill_remove(ht_table_t *t, uint64_t h48,
                          const void *key, size_t key_len) {
     for (size_t i = 0; i < t->spill_len; i++) {
-        ht_slot_t *s = &t->spill[i];
-        if (s->hash == h32 && keys_match(t, s, key, key_len)) {
-            // Shift remaining entries down
-            memmove(&t->spill[i], &t->spill[i + 1],
-                    (t->spill_len - i - 1) * sizeof(ht_slot_t));
-            t->spill_len--;
-            t->spill[t->spill_len] = (ht_slot_t){0};  // clear tail
-            t->size--;
-            return true;
+        uint64_t shpd = t->spill_hash_pd[i];
+        if (hpd_hash(shpd) == h48) {
+            uint32_t eidx = t->spill_data_idx[i];
+            if (keys_match(t, eidx, key, key_len)) {
+                memmove(&t->spill_hash_pd[i], &t->spill_hash_pd[i + 1],
+                        (t->spill_len - i - 1) * sizeof(uint64_t));
+                memmove(&t->spill_data_idx[i], &t->spill_data_idx[i + 1],
+                        (t->spill_len - i - 1) * sizeof(uint32_t));
+                t->spill_len--;
+                t->spill_hash_pd[t->spill_len] = HASH_EMPTY;
+                t->spill_data_idx[t->spill_len] = DATA_IDX_NONE;
+                t->size--;
+                return true;
+            }
         }
     }
     return false;
 }
 
-// Iterate all spill-lane entries via callback
-static void spill_find_all(const ht_table_t *t, uint32_t h32,
+static void spill_find_all(const ht_table_t *t, uint64_t h48,
                            ht_dup_callback cb, void *user_ctx) {
     for (size_t i = 0; i < t->spill_len; i++) {
-        ht_slot_t *s = &t->spill[i];
-        if (s->hash == h32) {
-            if (!cb(slot_key_ptr(t, s), s->key_len,
-                    slot_val_ptr(t, s), s->val_len, user_ctx))
+        uint64_t shpd = t->spill_hash_pd[i];
+        if (hpd_hash(shpd) == h48) {
+            uint32_t eidx = t->spill_data_idx[i];
+            const ht_entry_t *e = &t->entries[eidx];
+            if (!cb(t->arena + e->arena_offset, e->key_len,
+                    t->arena + e->arena_offset + e->key_len, e->val_len, user_ctx))
                 return;
         }
     }
@@ -361,56 +408,44 @@ static void spill_find_all(const ht_table_t *t, uint32_t h32,
 
 static bool resize_table(ht_table_t *t);
 
-static bool rh_insert_ex(ht_table_t *t, uint32_t h32,
+static bool rh_insert_ex(ht_table_t *t, uint64_t h48,
                          const void *key, size_t key_len,
                          const void *value, size_t value_len,
                          int mode) {
     size_t cap_mask = t->capacity - 1;
-    size_t ideal = h32 & cap_mask;
+    size_t ideal = h48 & cap_mask;
 
-    // Phase 1: Scan probe chain.
-    // INS_ALWAYS: skip Phase 1 entirely — go to Phase 2.
-    // INS_UPSERT: on first key match, update in-place; tombstone additional matches.
-    // INS_UNIQUE: if exact k,v pair found, return false; otherwise fall through.
+    // Phase 1: Scan probe chain for existing entries.
     if (mode != INS_ALWAYS) {
         size_t idx = ideal;
         uint16_t dist = 0;
         bool upsert_updated = false;
         for (size_t steps = 0; steps <= t->capacity; steps++) {
-            ht_slot_t *s = &t->slots[idx];
+            uint64_t slot_hpd = t->hash_pd[idx];
 
-            if (slot_empty(s)) break;
+            if (hpd_empty(slot_hpd)) break;
 
-            if (slot_is_tomb(s)) {
+            if (hpd_tomb(slot_hpd)) {
                 idx = (idx + 1) & cap_mask;
                 dist++;
                 continue;
             }
 
-            if (s->probe_dist < dist) break;
+            if (hpd_pd(slot_hpd) < dist) break;
 
-            if (s->hash == h32 && keys_match(t, s, key, key_len)) {
+            if (hpd_hash(slot_hpd) == h48 && keys_match(t, t->data_idx[idx], key, key_len)) {
                 if (mode == INS_UNIQUE) {
-                    if (vals_match(t, s, value, value_len))
-                        return false; // exact k,v exists
-                    // Different value — keep scanning
+                    if (vals_match(t, t->data_idx[idx], value, value_len))
+                        return false;
                 } else { // INS_UPSERT
                     if (!upsert_updated) {
-                        // Update first match in-place
-                        if (!grow_arena(t, key_len + value_len)) return false;
-                        void *data = arena_alloc(t, key_len + value_len);
-                        if (!data) return false;
-                        memcpy(data, key, key_len);
-                        memcpy((uint8_t *)data + key_len, value, value_len);
-                        s->val_len = (uint32_t)value_len;
-                        s->offset = (uint32_t)((uint8_t *)data - t->data_arena);
+                        if (!update_entry_value(t, t->data_idx[idx],
+                                                key, key_len, value, value_len))
+                            return false;
                         upsert_updated = true;
                     } else {
-                        // Tombstone additional matches
-                        s->hash = HASH_TOMB;
-                        s->key_len = 0;
-                        s->val_len = 0;
-                        s->offset = 0;
+                        t->hash_pd[idx] = HASH_TOMB;
+                        t->data_idx[idx] = DATA_IDX_NONE;
                         t->tombstone_cnt++;
                         t->size--;
                     }
@@ -421,76 +456,59 @@ static bool rh_insert_ex(ht_table_t *t, uint32_t h32,
             dist++;
         }
 
-        if (upsert_updated) return false; // updated existing, no new entry
+        if (upsert_updated) return false;
     }
 
-    // Phase 2: Key not found — Robin-Hood insert (new entry).
+    // Phase 2: Robin-Hood insert (new entry).
     {
+        uint32_t eidx = alloc_entry(t, key, key_len, value, value_len);
+        if (eidx == DATA_IDX_NONE) return false;
+
+        uint32_t cur_didx = eidx;
         size_t idx = ideal;
         uint16_t dist = 0;
 
-        const void *cur_key = key;
-        const void *cur_val = value;
-        size_t cur_klen = key_len;
-        size_t cur_vlen = value_len;
-
         while (1) {
-            ht_slot_t *s = &t->slots[idx];
+            uint64_t slot_hpd = t->hash_pd[idx];
 
             // Empty or tombstone — place entry here
-            if (slot_available(s)) {
-                // Stranding prevention: placing at a tombstone at position p
-                // with dist d blocks searches for any entry at p+k whose
-                // probe_dist > d+k (their ideal is before p, and early
-                // termination at p stops the search).  Check nearby entries.
-                if (slot_is_tomb(s)) {
+            if (hpd_available(slot_hpd)) {
+                if (hpd_tomb(slot_hpd)) {
                     bool blocked = false;
                     for (size_t k = 1; k <= BSHIFT_CAP; k++) {
                         size_t chk = (idx + k) & cap_mask;
-                        ht_slot_t *sc = &t->slots[chk];
-                        if (slot_empty(sc)) break;
-                        if (slot_is_tomb(sc)) continue;
-                        if (sc->probe_dist > dist + (uint16_t)k) {
+                        uint64_t chk_hpd = t->hash_pd[chk];
+                        if (hpd_empty(chk_hpd)) break;
+                        if (hpd_tomb(chk_hpd)) continue;
+                        if (hpd_pd(chk_hpd) > dist + (uint16_t)k) {
                             blocked = true;
                             break;
                         }
                     }
                     if (blocked) {
-                        // Skip tombstone — treat as unavailable
                         idx = (idx + 1) & cap_mask;
                         dist++;
                         continue;
                     }
                     t->tombstone_cnt--;
                 }
-                if (!place_entry(t, s, h32, dist, cur_key, cur_klen, cur_val, cur_vlen))
-                    return false;
+                t->hash_pd[idx] = hpd_pack(h48, dist);
+                t->data_idx[idx] = cur_didx;
                 t->size++;
                 return true;
             }
 
             // Robin-Hood swap: occupant has shorter probe distance
-            if (s->probe_dist < dist) {
-                uint32_t old_hash = s->hash;
-                uint16_t old_dist = s->probe_dist;
-                uint16_t old_klen = s->key_len;
-                uint32_t old_vlen = s->val_len;
-                uint32_t old_offset = s->offset;
+            if (hpd_pd(slot_hpd) < dist) {
+                uint32_t old_didx = t->data_idx[idx];
 
-                void *old_key_copy = alloca(old_klen);
-                void *old_val_copy = alloca(old_vlen);
-                memcpy(old_key_copy, t->data_arena + old_offset, old_klen);
-                memcpy(old_val_copy, t->data_arena + old_offset + old_klen, old_vlen);
+                t->hash_pd[idx] = hpd_pack(h48, dist);
+                t->data_idx[idx] = cur_didx;
 
-                if (!place_entry(t, s, h32, dist, cur_key, cur_klen, cur_val, cur_vlen))
-                    return false;
+                h48 = hpd_hash(slot_hpd);
+                dist = hpd_pd(slot_hpd) + 1;
+                cur_didx = old_didx;
 
-                h32 = old_hash;
-                dist = old_dist + 1;
-                cur_key = old_key_copy;
-                cur_val = old_val_copy;
-                cur_klen = old_klen;
-                cur_vlen = old_vlen;
                 idx = (idx + 1) & cap_mask;
                 continue;
             }
@@ -499,113 +517,94 @@ static bool rh_insert_ex(ht_table_t *t, uint32_t h32,
             dist++;
 
             if (dist > t->capacity) {
+                // Save current entry's key/val to stack before resize
+                ht_entry_t *e = &t->entries[cur_didx];
+                size_t ek = e->key_len, ev = e->val_len;
+                void *sk = alloca(ek), *sv = alloca(ev);
+                memcpy(sk, t->arena + e->arena_offset, ek);
+                memcpy(sv, t->arena + e->arena_offset + ek, ev);
                 if (!resize_table(t)) return false;
-                return rh_insert_ex(t, h32, cur_key, cur_klen, cur_val, cur_vlen, mode);
+                return rh_insert_ex(t, h48, sk, ek, sv, ev, mode);
             }
         }
     }
 }
 
-// Legacy wrapper for reinsert_live (always behaves as UPSERT during rebuilds)
-static bool rh_insert(ht_table_t *t, uint32_t h32,
+static bool rh_insert(ht_table_t *t, uint64_t h48,
                       const void *key, size_t key_len,
                       const void *value, size_t value_len) {
-    return rh_insert_ex(t, h32, key, key_len, value, value_len, INS_UPSERT);
+    return rh_insert_ex(t, h48, key, key_len, value, value_len, INS_UPSERT);
 }
 
 // ============================================================================
 // Zombie Interval Rebuild
 // ============================================================================
 
-// Delete compaction: capped backward shift after deleting an entry at `idx`.
-//
-// Scans forward at most BSHIFT_CAP entries, collecting tombstones and live
-// entries until EMPTY or probe_dist==0.  If the chain ends within the cap
-// and verify_ideal_safe passes, shifts all collected entries backward to
-// eliminate the tombstone.
-//
-// Cost: O(BSHIFT_CAP) = O(1) worst case per delete.
-//
-// Stranding prevention: if the chain extends past the cap, the tombstone
-// stays.  The insert path (rh_insert Phase 2) prevents new entries from
-// placing at the tombstone position when it would block entries past it
-// (the "dist==0 wall" check).
-
-// Verify ideal-position safety for entries in the range [idx+1, idx+1+len).
-// Returns true if all live entries can safely shift to their compacted positions.
 static bool verify_ideal_safe(const ht_table_t *t, size_t idx, size_t len) {
     size_t cap_mask = t->capacity - 1;
     size_t write_offset = 0;
     for (size_t i = 0; i < len; i++) {
         size_t pos = (idx + 1 + i) & cap_mask;
-        const ht_slot_t *s = &t->slots[pos];
-        if (!hash_is_live(s->hash)) continue;
+        uint64_t hpd = t->hash_pd[pos];
+        if (!hpd_live(hpd)) continue;
 
         size_t target = (idx + write_offset) & cap_mask;
-        size_t ideal = s->hash & cap_mask;
+        size_t ideal = hpd_hash(hpd) & cap_mask;
         if (ideal > target && (ideal - target) < t->capacity / 2) return false;
         write_offset++;
     }
     return true;
 }
 
-// Commit a full backward shift for entries in [idx+1, idx+1+len).
-// Absorbs tombstones, adjusts probe_dist, decrements tombstone_cnt.
 static void commit_backward_shift(ht_table_t *t, size_t idx, size_t len) {
     size_t cap_mask = t->capacity - 1;
     size_t write_offset = 0;
     for (size_t i = 0; i < len; i++) {
         size_t read_pos = (idx + 1 + i) & cap_mask;
-        ht_slot_t *s = &t->slots[read_pos];
+        uint64_t hpd = t->hash_pd[read_pos];
 
-        if (hash_is_live(s->hash)) {
+        if (hpd_live(hpd)) {
             size_t write_pos = (idx + write_offset) & cap_mask;
             size_t shift = (i + 1) - write_offset;
-            t->slots[write_pos] = *s;
-            t->slots[write_pos].probe_dist -= (uint16_t)shift;
+            t->hash_pd[write_pos] = hpd_pack(hpd_hash(hpd), hpd_pd(hpd) - (uint16_t)shift);
+            t->data_idx[write_pos] = t->data_idx[read_pos];
             write_offset++;
         } else {
-            // Absorb tombstone (delete or prophylactic)
             t->tombstone_cnt--;
         }
-        t->slots[read_pos] = (ht_slot_t){0};
+        t->hash_pd[read_pos] = HASH_EMPTY;
+        t->data_idx[read_pos] = DATA_IDX_NONE;
     }
-    // Caller's tombstone at idx was overwritten by the first live entry.
     t->tombstone_cnt--;
 }
 
 static void delete_compact(ht_table_t *t, size_t idx) {
     size_t cap_mask = t->capacity - 1;
 
-    // Capped scan: at most BSHIFT_CAP entries.
     size_t chain_len = 0;
     size_t live_count = 0;
     bool ends_at_empty = false;
 
     size_t scan = (idx + 1) & cap_mask;
     for (size_t steps = 0; steps < BSHIFT_CAP; steps++) {
-        ht_slot_t *s = &t->slots[scan];
+        uint64_t hpd = t->hash_pd[scan];
 
-        if (slot_empty(s)) { ends_at_empty = true; break; }
-        if (slot_is_tomb(s)) {
+        if (hpd_empty(hpd)) { ends_at_empty = true; break; }
+        if (hpd_tomb(hpd)) {
             chain_len++;
             scan = (scan + 1) & cap_mask;
             continue;
         }
-        if (s->probe_dist == 0) break;  // chain boundary
+        if (hpd_pd(hpd) == 0) break;
         live_count++;
         chain_len++;
         scan = (scan + 1) & cap_mask;
     }
 
-    // Only compact if the chain ends cleanly within our scan window.
     if (ends_at_empty && live_count > 0 &&
         verify_ideal_safe(t, idx, chain_len)) {
         commit_backward_shift(t, idx, chain_len);
     }
-    // Otherwise: tombstone stays at idx.  The insert path prevents
-    // new entries from creating dist==0 walls that would block entries
-    // past the tombstone.
 }
 
 static void zombie_step(ht_table_t *t) {
@@ -620,21 +619,17 @@ static void zombie_step(ht_table_t *t) {
 
     for (size_t n = 0; n < step; n++) {
         size_t idx = t->zombie_cursor;
-        ht_slot_t *s = &t->slots[idx];
+        uint64_t hpd = t->hash_pd[idx];
 
         double prim_spacing = x * C_P_DEFAULT;
         size_t spacing = (size_t)prim_spacing;
         if (spacing < 2) spacing = 2;
         bool is_prim = (idx % spacing == 0);
 
-        if (slot_is_tomb(s)) {
-            // Non-primitive tombstone: skip (don't clear).
-        } else if (is_prim && slot_empty(s) && t->size > 0) {
-            // Don't place primitive tombstones during zombie scan.
-            // Placing tombstones at EMPTY positions in the middle of probe
-            // chains can make previously-unreachable entries reachable,
-            // breaking the consistency of insert/update/remove operations.
-            // Prophylactic tombstones are placed during rebuild (compact/resize).
+        if (hpd_tomb(hpd)) {
+            // Non-primitive tombstone: skip
+        } else if (is_prim && hpd_empty(hpd) && t->size > 0) {
+            // Don't place primitive tombstones during zombie scan
         }
 
         t->zombie_cursor = (idx + 1) & cap_mask;
@@ -658,16 +653,40 @@ ht_table_t *ht_create(const ht_config_t *cfg,
     if (c.initial_capacity < 4) c.initial_capacity = 4;
 
     t->capacity = next_pow2(c.initial_capacity);
-    t->slots = calloc(t->capacity, sizeof(ht_slot_t));
-    if (!t->slots) { free(t); return NULL; }
+
+    t->hash_pd = calloc(t->capacity, sizeof(uint64_t));
+    if (!t->hash_pd) { free(t); return NULL; }
+
+    t->data_idx = malloc(t->capacity * sizeof(uint32_t));
+    if (!t->data_idx) { free(t->hash_pd); free(t); return NULL; }
+    memset(t->data_idx, 0xFF, t->capacity * sizeof(uint32_t));
 
     t->spill_cap = SPILL_INITIAL;
-    t->spill = calloc(t->spill_cap, sizeof(ht_slot_t));
-    if (!t->spill) { free(t->slots); free(t); return NULL; }
+    t->spill_hash_pd = calloc(t->spill_cap, sizeof(uint64_t));
+    if (!t->spill_hash_pd) { free(t->data_idx); free(t->hash_pd); free(t); return NULL; }
 
-    t->data_arena = malloc(1024);
-    t->data_cap = 1024;
-    if (!t->data_arena) { free(t->spill); free(t->slots); free(t); return NULL; }
+    t->spill_data_idx = malloc(t->spill_cap * sizeof(uint32_t));
+    if (!t->spill_data_idx) {
+        free(t->spill_hash_pd); free(t->data_idx); free(t->hash_pd); free(t);
+        return NULL;
+    }
+    memset(t->spill_data_idx, 0xFF, t->spill_cap * sizeof(uint32_t));
+
+    t->entries = calloc(64, sizeof(ht_entry_t));
+    t->entry_cap = 64;
+    if (!t->entries) {
+        free(t->spill_data_idx); free(t->spill_hash_pd);
+        free(t->data_idx); free(t->hash_pd); free(t);
+        return NULL;
+    }
+
+    t->arena = malloc(1024);
+    t->arena_cap = 1024;
+    if (!t->arena) {
+        free(t->entries); free(t->spill_data_idx); free(t->spill_hash_pd);
+        free(t->data_idx); free(t->hash_pd); free(t);
+        return NULL;
+    }
 
     t->hash_fn = hash_fn;
     t->eq_fn = eq_fn;
@@ -683,20 +702,24 @@ ht_table_t *ht_create(const ht_config_t *cfg,
 
 void ht_destroy(ht_table_t *t) {
     if (!t) return;
-    free(t->spill);
-    free(t->slots);
-    free(t->data_arena);
+    free(t->spill_hash_pd);
+    free(t->spill_data_idx);
+    free(t->hash_pd);
+    free(t->data_idx);
+    free(t->entries);
+    free(t->arena);
     free(t);
 }
 
 void ht_clear(ht_table_t *t) {
     if (!t) return;
-    memset(t->slots, 0, t->capacity * sizeof(ht_slot_t));
-    memset(t->spill, 0, t->spill_cap * sizeof(ht_slot_t));
+    memset(t->hash_pd, 0, t->capacity * sizeof(uint64_t));
+    memset(t->spill_hash_pd, 0, t->spill_cap * sizeof(uint64_t));
     t->size = 0;
     t->tombstone_cnt = 0;
     t->spill_len = 0;
-    t->data_size = 0;
+    t->arena_size = 0;
+    t->entry_count = 0;
     t->zombie_cursor = 0;
 }
 
@@ -711,10 +734,10 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
     if (!t || !key) return false;
     if (!value && value_len > 0) value_len = 0;
 
-    uint32_t h32 = (uint32_t)hash;
+    uint64_t h48 = hash & HASH_MASK;
 
-    if (!hash_is_live(h32))
-        return spill_insert_ex(t, h32, key, key_len, value, value_len, mode);
+    if (h48 < 2)
+        return spill_insert_ex(t, h48, key, key_len, value, value_len, mode);
 
     if (!t->resizing && (double)(t->size + 1) / t->capacity > t->max_load_factor)
         ht_resize(t, t->capacity * 2);
@@ -724,7 +747,7 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
         for (int i = 0; i < 4; i++) zombie_step(t);
     }
 
-    bool result = rh_insert_ex(t, h32, key, key_len, value, value_len, mode);
+    bool result = rh_insert_ex(t, h48, key, key_len, value, value_len, mode);
 
     if (result) {
         zombie_step(t);
@@ -733,7 +756,6 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
     return result;
 }
 
-// ht_insert: always-add (multi-value)
 bool ht_insert_with_hash(ht_table_t *t, uint64_t hash,
                          const void *key, size_t key_len,
                          const void *value, size_t value_len) {
@@ -748,7 +770,6 @@ bool ht_insert(ht_table_t *t, const void *key, size_t key_len,
                                key, key_len, value, value_len);
 }
 
-// ht_upsert: remove-all + insert single
 bool ht_upsert_with_hash(ht_table_t *t, uint64_t hash,
                          const void *key, size_t key_len,
                          const void *value, size_t value_len) {
@@ -763,7 +784,6 @@ bool ht_upsert(ht_table_t *t, const void *key, size_t key_len,
                                key, key_len, value, value_len);
 }
 
-// ht_unsert: insert only if exact k,v pair doesn't exist
 bool ht_unsert_with_hash(ht_table_t *t, uint64_t hash,
                          const void *key, size_t key_len,
                          const void *value, size_t value_len) {
@@ -794,34 +814,32 @@ const void *ht_find_with_hash(const ht_table_t *t, uint64_t hash,
                               size_t *out_value_len) {
     if (!t || !key) return NULL;
 
-    uint32_t h32 = (uint32_t)hash;
+    uint64_t h48 = hash & HASH_MASK;
 
-    // Spill lane
-    if (!hash_is_live(h32)) {
-        return spill_find(t, h32, key, key_len, out_value_len);
-    }
+    if (h48 < 2)
+        return spill_find(t, h48, key, key_len, out_value_len);
 
-    // Main table: Robin-Hood probe
     size_t cap_mask = t->capacity - 1;
-    size_t idx = h32 & cap_mask;
+    size_t idx = h48 & cap_mask;
     uint16_t dist = 0;
 
     for (size_t steps = 0; steps <= t->capacity; steps++) {
-        ht_slot_t *s = &t->slots[idx];
+        uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (slot_empty(s)) return NULL;
+        if (hpd_empty(slot_hpd)) return NULL;
 
-        if (slot_is_tomb(s)) {
+        if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
             dist++;
             continue;
         }
 
-        if (s->probe_dist < dist) return NULL;
+        if (hpd_pd(slot_hpd) < dist) return NULL;
 
-        if (s->hash == h32 && keys_match(t, s, key, key_len)) {
-            if (out_value_len) *out_value_len = s->val_len;
-            return slot_val_ptr(t, s);
+        if (hpd_hash(slot_hpd) == h48 && keys_match(t, t->data_idx[idx], key, key_len)) {
+            const ht_entry_t *e = &t->entries[t->data_idx[idx]];
+            if (out_value_len) *out_value_len = e->val_len;
+            return t->arena + e->arena_offset + e->key_len;
         }
 
         idx = (idx + 1) & cap_mask;
@@ -835,35 +853,35 @@ void ht_find_all(const ht_table_t *t, uint64_t hash,
                  ht_dup_callback cb, void *user_ctx) {
     if (!t || !cb) return;
 
-    uint32_t h32 = (uint32_t)hash;
+    uint64_t h48 = hash & HASH_MASK;
 
-    // Spill lane first
-    if (!hash_is_live(h32)) {
-        spill_find_all(t, h32, cb, user_ctx);
+    if (h48 < 2) {
+        spill_find_all(t, h48, cb, user_ctx);
         return;
     }
 
-    // Main table
     size_t cap_mask = t->capacity - 1;
-    size_t idx = h32 & cap_mask;
+    size_t idx = h48 & cap_mask;
     uint16_t dist = 0;
 
     for (size_t steps = 0; steps <= t->capacity; steps++) {
-        ht_slot_t *s = &t->slots[idx];
+        uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (slot_empty(s)) return;
+        if (hpd_empty(slot_hpd)) return;
 
-        if (slot_is_tomb(s)) {
+        if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
             dist++;
             continue;
         }
 
-        if (s->probe_dist < dist) return;
+        if (hpd_pd(slot_hpd) < dist) return;
 
-        if (s->hash == h32) {
-            if (!cb(slot_key_ptr(t, s), s->key_len,
-                    slot_val_ptr(t, s), s->val_len, user_ctx))
+        if (hpd_hash(slot_hpd) == h48) {
+            uint32_t eidx = t->data_idx[idx];
+            const ht_entry_t *e = &t->entries[eidx];
+            if (!cb(t->arena + e->arena_offset, e->key_len,
+                    t->arena + e->arena_offset + e->key_len, e->val_len, user_ctx))
                 return;
         }
 
@@ -872,47 +890,52 @@ void ht_find_all(const ht_table_t *t, uint64_t hash,
     }
 }
 
-// ht_find_key_all: iterate all entries matching exact key (not just hash).
 void ht_find_key_all_with_hash(const ht_table_t *t, uint64_t hash,
                                const void *key, size_t key_len,
                                ht_dup_callback cb, void *user_ctx) {
     if (!t || !key || !cb) return;
 
-    uint32_t h32 = (uint32_t)hash;
+    uint64_t h48 = hash & HASH_MASK;
 
     // Spill lane
     for (size_t i = 0; i < t->spill_len; i++) {
-        ht_slot_t *s = &t->spill[i];
-        if (s->hash == h32 && keys_match(t, s, key, key_len)) {
-            if (!cb(slot_key_ptr(t, s), s->key_len,
-                    slot_val_ptr(t, s), s->val_len, user_ctx))
-                return;
+        uint64_t shpd = t->spill_hash_pd[i];
+        if (hpd_hash(shpd) == h48) {
+            uint32_t eidx = t->spill_data_idx[i];
+            if (keys_match(t, eidx, key, key_len)) {
+                const ht_entry_t *e = &t->entries[eidx];
+                if (!cb(t->arena + e->arena_offset, e->key_len,
+                        t->arena + e->arena_offset + e->key_len, e->val_len, user_ctx))
+                    return;
+            }
         }
     }
 
     // Main table
-    if (!hash_is_live(h32)) return;
+    if (h48 < 2) return;
 
     size_t cap_mask = t->capacity - 1;
-    size_t idx = h32 & cap_mask;
+    size_t idx = h48 & cap_mask;
     uint16_t dist = 0;
 
     for (size_t steps = 0; steps <= t->capacity; steps++) {
-        ht_slot_t *s = &t->slots[idx];
+        uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (slot_empty(s)) return;
+        if (hpd_empty(slot_hpd)) return;
 
-        if (slot_is_tomb(s)) {
+        if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
             dist++;
             continue;
         }
 
-        if (s->probe_dist < dist) return;
+        if (hpd_pd(slot_hpd) < dist) return;
 
-        if (s->hash == h32 && keys_match(t, s, key, key_len)) {
-            if (!cb(slot_key_ptr(t, s), s->key_len,
-                    slot_val_ptr(t, s), s->val_len, user_ctx))
+        if (hpd_hash(slot_hpd) == h48 && keys_match(t, t->data_idx[idx], key, key_len)) {
+            uint32_t eidx = t->data_idx[idx];
+            const ht_entry_t *e = &t->entries[eidx];
+            if (!cb(t->arena + e->arena_offset, e->key_len,
+                    t->arena + e->arena_offset + e->key_len, e->val_len, user_ctx))
                 return;
         }
 
@@ -928,49 +951,54 @@ void ht_find_key_all(const ht_table_t *t, const void *key, size_t key_len,
     ht_find_key_all_with_hash(t, hash, key, key_len, cb, user_ctx);
 }
 
-// ht_find_kv: find first entry matching exact key AND value.
 const void *ht_find_kv_with_hash(const ht_table_t *t, uint64_t hash,
                                  const void *key, size_t key_len,
                                  const void *value, size_t value_len,
                                  size_t *out_value_len) {
     if (!t || !key || !value) return NULL;
 
-    uint32_t h32 = (uint32_t)hash;
+    uint64_t h48 = hash & HASH_MASK;
 
     // Spill lane
     for (size_t i = 0; i < t->spill_len; i++) {
-        ht_slot_t *s = &t->spill[i];
-        if (s->hash == h32 && keys_match(t, s, key, key_len) &&
-            vals_match(t, s, value, value_len)) {
-            if (out_value_len) *out_value_len = s->val_len;
-            return slot_val_ptr(t, s);
+        uint64_t shpd = t->spill_hash_pd[i];
+        if (hpd_hash(shpd) == h48) {
+            uint32_t eidx = t->spill_data_idx[i];
+            if (keys_match(t, eidx, key, key_len) &&
+                vals_match(t, eidx, value, value_len)) {
+                const ht_entry_t *e = &t->entries[eidx];
+                if (out_value_len) *out_value_len = e->val_len;
+                return t->arena + e->arena_offset + e->key_len;
+            }
         }
     }
 
     // Main table
-    if (!hash_is_live(h32)) return NULL;
+    if (h48 < 2) return NULL;
 
     size_t cap_mask = t->capacity - 1;
-    size_t idx = h32 & cap_mask;
+    size_t idx = h48 & cap_mask;
     uint16_t dist = 0;
 
     for (size_t steps = 0; steps <= t->capacity; steps++) {
-        ht_slot_t *s = &t->slots[idx];
+        uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (slot_empty(s)) return NULL;
+        if (hpd_empty(slot_hpd)) return NULL;
 
-        if (slot_is_tomb(s)) {
+        if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
             dist++;
             continue;
         }
 
-        if (s->probe_dist < dist) return NULL;
+        if (hpd_pd(slot_hpd) < dist) return NULL;
 
-        if (s->hash == h32 && keys_match(t, s, key, key_len) &&
-            vals_match(t, s, value, value_len)) {
-            if (out_value_len) *out_value_len = s->val_len;
-            return slot_val_ptr(t, s);
+        if (hpd_hash(slot_hpd) == h48 &&
+            keys_match(t, t->data_idx[idx], key, key_len) &&
+            vals_match(t, t->data_idx[idx], value, value_len)) {
+            const ht_entry_t *e = &t->entries[t->data_idx[idx]];
+            if (out_value_len) *out_value_len = e->val_len;
+            return t->arena + e->arena_offset + e->key_len;
         }
 
         idx = (idx + 1) & cap_mask;
@@ -1012,25 +1040,32 @@ int64_t ht_inc(ht_table_t *t, const void *key, size_t key_len, int64_t delta) {
 // Delete
 // ============================================================================
 
-// ht_remove: remove ALL entries for key, return count removed.
 size_t ht_remove_with_hash(ht_table_t *t, uint64_t hash,
                             const void *key, size_t key_len) {
     if (!t || !key) return 0;
 
-    uint32_t h32 = (uint32_t)hash;
+    uint64_t h48 = hash & HASH_MASK;
     size_t removed = 0;
 
     // Spill lane
-    if (!hash_is_live(h32)) {
+    if (h48 < 2) {
         for (size_t i = 0; i < t->spill_len; ) {
-            ht_slot_t *s = &t->spill[i];
-            if (s->hash == h32 && keys_match(t, s, key, key_len)) {
-                memmove(&t->spill[i], &t->spill[i + 1],
-                        (t->spill_len - i - 1) * sizeof(ht_slot_t));
-                t->spill_len--;
-                t->spill[t->spill_len] = (ht_slot_t){0};
-                t->size--;
-                removed++;
+            uint64_t shpd = t->spill_hash_pd[i];
+            if (hpd_hash(shpd) == h48) {
+                uint32_t eidx = t->spill_data_idx[i];
+                if (keys_match(t, eidx, key, key_len)) {
+                    memmove(&t->spill_hash_pd[i], &t->spill_hash_pd[i + 1],
+                            (t->spill_len - i - 1) * sizeof(uint64_t));
+                    memmove(&t->spill_data_idx[i], &t->spill_data_idx[i + 1],
+                            (t->spill_len - i - 1) * sizeof(uint32_t));
+                    t->spill_len--;
+                    t->spill_hash_pd[t->spill_len] = HASH_EMPTY;
+                    t->spill_data_idx[t->spill_len] = DATA_IDX_NONE;
+                    t->size--;
+                    removed++;
+                } else {
+                    i++;
+                }
             } else {
                 i++;
             }
@@ -1038,35 +1073,31 @@ size_t ht_remove_with_hash(ht_table_t *t, uint64_t hash,
         return removed;
     }
 
-    // Main table: walk full probe chain, tombstone ALL matches
+    // Main table
     size_t cap_mask = t->capacity - 1;
-    size_t idx = h32 & cap_mask;
+    size_t idx = h48 & cap_mask;
     uint16_t dist = 0;
 
     for (size_t steps = 0; steps <= t->capacity; steps++) {
-        ht_slot_t *s = &t->slots[idx];
+        uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (slot_empty(s)) break;
+        if (hpd_empty(slot_hpd)) break;
 
-        if (slot_is_tomb(s)) {
+        if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
             dist++;
             continue;
         }
 
-        if (s->probe_dist < dist) break;
+        if (hpd_pd(slot_hpd) < dist) break;
 
-        if (s->hash == h32 && keys_match(t, s, key, key_len)) {
+        if (hpd_hash(slot_hpd) == h48 && keys_match(t, t->data_idx[idx], key, key_len)) {
             t->size--;
-            s->hash = HASH_TOMB;
-            s->key_len = 0;
-            s->val_len = 0;
-            s->offset = 0;
+            t->hash_pd[idx] = HASH_TOMB;
+            t->data_idx[idx] = DATA_IDX_NONE;
             t->tombstone_cnt++;
             removed++;
             delete_compact(t, idx);
-            // After compact, re-scan from same position
-            // (compact may have shifted entries)
             continue;
         }
 
@@ -1091,27 +1122,34 @@ size_t ht_remove(ht_table_t *t, const void *key, size_t key_len) {
     return ht_remove_with_hash(t, hash, key, key_len);
 }
 
-// ht_remove_kv: remove ALL entries matching both key and value, return count.
 size_t ht_remove_kv_with_hash(ht_table_t *t, uint64_t hash,
                                const void *key, size_t key_len,
                                const void *value, size_t value_len) {
     if (!t || !key || !value) return 0;
 
-    uint32_t h32 = (uint32_t)hash;
+    uint64_t h48 = hash & HASH_MASK;
     size_t removed = 0;
 
     // Spill lane
-    if (!hash_is_live(h32)) {
+    if (h48 < 2) {
         for (size_t i = 0; i < t->spill_len; ) {
-            ht_slot_t *s = &t->spill[i];
-            if (s->hash == h32 && keys_match(t, s, key, key_len) &&
-                vals_match(t, s, value, value_len)) {
-                memmove(&t->spill[i], &t->spill[i + 1],
-                        (t->spill_len - i - 1) * sizeof(ht_slot_t));
-                t->spill_len--;
-                t->spill[t->spill_len] = (ht_slot_t){0};
-                t->size--;
-                removed++;
+            uint64_t shpd = t->spill_hash_pd[i];
+            if (hpd_hash(shpd) == h48) {
+                uint32_t eidx = t->spill_data_idx[i];
+                if (keys_match(t, eidx, key, key_len) &&
+                    vals_match(t, eidx, value, value_len)) {
+                    memmove(&t->spill_hash_pd[i], &t->spill_hash_pd[i + 1],
+                            (t->spill_len - i - 1) * sizeof(uint64_t));
+                    memmove(&t->spill_data_idx[i], &t->spill_data_idx[i + 1],
+                            (t->spill_len - i - 1) * sizeof(uint32_t));
+                    t->spill_len--;
+                    t->spill_hash_pd[t->spill_len] = HASH_EMPTY;
+                    t->spill_data_idx[t->spill_len] = DATA_IDX_NONE;
+                    t->size--;
+                    removed++;
+                } else {
+                    i++;
+                }
             } else {
                 i++;
             }
@@ -1121,29 +1159,28 @@ size_t ht_remove_kv_with_hash(ht_table_t *t, uint64_t hash,
 
     // Main table
     size_t cap_mask = t->capacity - 1;
-    size_t idx = h32 & cap_mask;
+    size_t idx = h48 & cap_mask;
     uint16_t dist = 0;
 
     for (size_t steps = 0; steps <= t->capacity; steps++) {
-        ht_slot_t *s = &t->slots[idx];
+        uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (slot_empty(s)) break;
+        if (hpd_empty(slot_hpd)) break;
 
-        if (slot_is_tomb(s)) {
+        if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
             dist++;
             continue;
         }
 
-        if (s->probe_dist < dist) break;
+        if (hpd_pd(slot_hpd) < dist) break;
 
-        if (s->hash == h32 && keys_match(t, s, key, key_len) &&
-            vals_match(t, s, value, value_len)) {
+        if (hpd_hash(slot_hpd) == h48 &&
+            keys_match(t, t->data_idx[idx], key, key_len) &&
+            vals_match(t, t->data_idx[idx], value, value_len)) {
             t->size--;
-            s->hash = HASH_TOMB;
-            s->key_len = 0;
-            s->val_len = 0;
-            s->offset = 0;
+            t->hash_pd[idx] = HASH_TOMB;
+            t->data_idx[idx] = DATA_IDX_NONE;
             t->tombstone_cnt++;
             removed++;
             delete_compact(t, idx);
@@ -1164,26 +1201,31 @@ size_t ht_remove_kv(ht_table_t *t, const void *key, size_t key_len,
     return ht_remove_kv_with_hash(t, hash, key, key_len, value, value_len);
 }
 
-// ht_remove_kv_one: remove FIRST entry matching both key and value.
 bool ht_remove_kv_one_with_hash(ht_table_t *t, uint64_t hash,
                                 const void *key, size_t key_len,
                                 const void *value, size_t value_len) {
     if (!t || !key || !value) return false;
 
-    uint32_t h32 = (uint32_t)hash;
+    uint64_t h48 = hash & HASH_MASK;
 
     // Spill lane
-    if (!hash_is_live(h32)) {
+    if (h48 < 2) {
         for (size_t i = 0; i < t->spill_len; i++) {
-            ht_slot_t *s = &t->spill[i];
-            if (s->hash == h32 && keys_match(t, s, key, key_len) &&
-                vals_match(t, s, value, value_len)) {
-                memmove(&t->spill[i], &t->spill[i + 1],
-                        (t->spill_len - i - 1) * sizeof(ht_slot_t));
-                t->spill_len--;
-                t->spill[t->spill_len] = (ht_slot_t){0};
-                t->size--;
-                return true;
+            uint64_t shpd = t->spill_hash_pd[i];
+            if (hpd_hash(shpd) == h48) {
+                uint32_t eidx = t->spill_data_idx[i];
+                if (keys_match(t, eidx, key, key_len) &&
+                    vals_match(t, eidx, value, value_len)) {
+                    memmove(&t->spill_hash_pd[i], &t->spill_hash_pd[i + 1],
+                            (t->spill_len - i - 1) * sizeof(uint64_t));
+                    memmove(&t->spill_data_idx[i], &t->spill_data_idx[i + 1],
+                            (t->spill_len - i - 1) * sizeof(uint32_t));
+                    t->spill_len--;
+                    t->spill_hash_pd[t->spill_len] = HASH_EMPTY;
+                    t->spill_data_idx[t->spill_len] = DATA_IDX_NONE;
+                    t->size--;
+                    return true;
+                }
             }
         }
         return false;
@@ -1191,29 +1233,28 @@ bool ht_remove_kv_one_with_hash(ht_table_t *t, uint64_t hash,
 
     // Main table
     size_t cap_mask = t->capacity - 1;
-    size_t idx = h32 & cap_mask;
+    size_t idx = h48 & cap_mask;
     uint16_t dist = 0;
 
     for (size_t steps = 0; steps <= t->capacity; steps++) {
-        ht_slot_t *s = &t->slots[idx];
+        uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (slot_empty(s)) return false;
+        if (hpd_empty(slot_hpd)) return false;
 
-        if (slot_is_tomb(s)) {
+        if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
             dist++;
             continue;
         }
 
-        if (s->probe_dist < dist) return false;
+        if (hpd_pd(slot_hpd) < dist) return false;
 
-        if (s->hash == h32 && keys_match(t, s, key, key_len) &&
-            vals_match(t, s, value, value_len)) {
+        if (hpd_hash(slot_hpd) == h48 &&
+            keys_match(t, t->data_idx[idx], key, key_len) &&
+            vals_match(t, t->data_idx[idx], value, value_len)) {
             t->size--;
-            s->hash = HASH_TOMB;
-            s->key_len = 0;
-            s->val_len = 0;
-            s->offset = 0;
+            t->hash_pd[idx] = HASH_TOMB;
+            t->data_idx[idx] = DATA_IDX_NONE;
             t->tombstone_cnt++;
             delete_compact(t, idx);
 
@@ -1250,51 +1291,50 @@ static bool resize_table(ht_table_t *t) {
     return ht_resize(t, t->capacity * 2);
 }
 
-// Helper: reinsert all live entries from a slot array into the current table.
-// Used by both resize and compact.
-static void reinsert_live(ht_table_t *t, ht_slot_t *old, size_t old_cap,
-                          uint8_t *old_arena) {
+static void reinsert_live(ht_table_t *t,
+                          const uint64_t *old_hash_pd, const uint32_t *old_data_idx,
+                          const ht_entry_t *old_entries, const uint8_t *old_arena,
+                          size_t old_cap) {
     for (size_t i = 0; i < old_cap; i++) {
-        ht_slot_t *s = &old[i];
-        if (hash_is_live(s->hash) && s->key_len > 0) {
-            const void *k = old_arena + s->offset;
-            const void *v = old_arena + s->offset + s->key_len;
-            rh_insert(t, s->hash, k, s->key_len, v, s->val_len);
-        }
+        uint64_t hpd = old_hash_pd[i];
+        if (!hpd_live(hpd)) continue;
+        uint32_t eidx = old_data_idx[i];
+        const ht_entry_t *e = &old_entries[eidx];
+        if (e->key_len == 0) continue;
+        const void *k = old_arena + e->arena_offset;
+        const void *v = old_arena + e->arena_offset + e->key_len;
+        rh_insert(t, hpd_hash(hpd), k, e->key_len, v, e->val_len);
     }
 }
 
-// Helper: place prophylactic tombstones after rebuild.
 static void place_prophylactic_tombstones(ht_table_t *t) {
     double x = compute_x(t);
     size_t spacing = (size_t)(x * C_P_DEFAULT);
     if (spacing < 4) spacing = 4;
 
     for (size_t pos = 0; pos < t->capacity; pos += spacing) {
-        ht_slot_t *s = &t->slots[pos];
-        if (slot_empty(s)) {
-            s->hash = HASH_TOMB;
-            s->probe_dist = 0;
-            s->key_len = 0;
-            s->val_len = 0;
-            s->offset = 0;
+        if (hpd_empty(t->hash_pd[pos])) {
+            t->hash_pd[pos] = HASH_TOMB;
+            t->data_idx[pos] = DATA_IDX_NONE;
             t->tombstone_cnt++;
         }
     }
 }
 
-// Helper: save spill-lane entries to stack, then reinsert into table.
-// Called after the old arena is still valid but the table has been reset.
-// spill entries reference offsets into old_arena which is about to be freed.
-static void reinsert_spill(ht_table_t *t, ht_slot_t *old_spill, size_t old_spill_len,
-                           uint8_t *old_arena) {
+static void reinsert_spill(ht_table_t *t,
+                           const uint64_t *old_spill_hash_pd,
+                           const uint32_t *old_spill_data_idx,
+                           const ht_entry_t *old_entries,
+                           const uint8_t *old_arena,
+                           size_t old_spill_len) {
     for (size_t i = 0; i < old_spill_len; i++) {
-        ht_slot_t *s = &old_spill[i];
-        if (s->key_len > 0) {
-            const void *k = old_arena + s->offset;
-            const void *v = old_arena + s->offset + s->key_len;
-            spill_insert(t, s->hash, k, s->key_len, v, s->val_len);
-        }
+        uint32_t eidx = old_spill_data_idx[i];
+        if (eidx == DATA_IDX_NONE) continue;
+        const ht_entry_t *e = &old_entries[eidx];
+        if (e->key_len == 0) continue;
+        const void *k = old_arena + e->arena_offset;
+        const void *v = old_arena + e->arena_offset + e->key_len;
+        spill_insert(t, hpd_hash(old_spill_hash_pd[i]), k, e->key_len, v, e->val_len);
     }
 }
 
@@ -1312,53 +1352,92 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
     }
 
     // Save old state
-    ht_slot_t *old_slots = t->slots;
+    uint64_t *old_hash_pd = t->hash_pd;
+    uint32_t *old_data_idx = t->data_idx;
+    ht_entry_t *old_entries = t->entries;
+    uint8_t *old_arena = t->arena;
     size_t old_cap = t->capacity;
-    uint8_t *old_arena = t->data_arena;
-    ht_slot_t *old_spill = t->spill;
+    size_t old_arena_cap = t->arena_cap;
+
+    uint64_t *old_spill_hash_pd = t->spill_hash_pd;
+    uint32_t *old_spill_data_idx = t->spill_data_idx;
     size_t old_spill_len = t->spill_len;
 
     // Allocate new main table
-    ht_slot_t *new_slots = calloc(new_capacity, sizeof(ht_slot_t));
-    if (!new_slots) { t->resizing = false; return false; }
+    uint64_t *new_hash_pd = calloc(new_capacity, sizeof(uint64_t));
+    if (!new_hash_pd) { t->resizing = false; return false; }
 
-    uint8_t *new_arena = malloc(t->data_cap > 0 ? t->data_cap : 1024);
+    uint32_t *new_data_idx = malloc(new_capacity * sizeof(uint32_t));
+    if (!new_data_idx) {
+        free(new_hash_pd);
+        t->resizing = false;
+        return false;
+    }
+    memset(new_data_idx, 0xFF, new_capacity * sizeof(uint32_t));
+
+    // Allocate new entries
+    size_t new_entry_cap = t->entry_cap;
+    ht_entry_t *new_entries = calloc(new_entry_cap, sizeof(ht_entry_t));
+    if (!new_entries) {
+        free(new_data_idx); free(new_hash_pd);
+        t->resizing = false;
+        return false;
+    }
+
+    // Allocate new arena
+    uint8_t *new_arena = malloc(old_arena_cap > 0 ? old_arena_cap : 1024);
     if (!new_arena) {
-        free(new_slots);
+        free(new_entries); free(new_data_idx); free(new_hash_pd);
         t->resizing = false;
         return false;
     }
 
-    // Allocate fresh spill lane
+    // Allocate new spill lane
     size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    ht_slot_t *new_spill = calloc(new_spill_cap, sizeof(ht_slot_t));
-    if (!new_spill) {
-        free(new_arena);
-        free(new_slots);
+    uint64_t *new_spill_hash_pd = calloc(new_spill_cap, sizeof(uint64_t));
+    if (!new_spill_hash_pd) {
+        free(new_arena); free(new_entries); free(new_data_idx); free(new_hash_pd);
         t->resizing = false;
         return false;
     }
+
+    uint32_t *new_spill_data_idx = malloc(new_spill_cap * sizeof(uint32_t));
+    if (!new_spill_data_idx) {
+        free(new_spill_hash_pd); free(new_arena); free(new_entries);
+        free(new_data_idx); free(new_hash_pd);
+        t->resizing = false;
+        return false;
+    }
+    memset(new_spill_data_idx, 0xFF, new_spill_cap * sizeof(uint32_t));
 
     // Swap to new state
-    t->slots = new_slots;
+    t->hash_pd = new_hash_pd;
+    t->data_idx = new_data_idx;
     t->capacity = new_capacity;
     t->size = 0;
     t->tombstone_cnt = 0;
-    t->data_arena = new_arena;
-    t->data_size = 0;
-    t->data_cap = t->data_cap > 0 ? t->data_cap : 1024;
-    t->spill = new_spill;
+    t->entries = new_entries;
+    t->entry_count = 0;
+    t->entry_cap = new_entry_cap;
+    t->arena = new_arena;
+    t->arena_size = 0;
+    t->arena_cap = old_arena_cap > 0 ? old_arena_cap : 1024;
+    t->spill_hash_pd = new_spill_hash_pd;
+    t->spill_data_idx = new_spill_data_idx;
     t->spill_cap = new_spill_cap;
     t->spill_len = 0;
     t->zombie_cursor = 0;
 
-    reinsert_live(t, old_slots, old_cap, old_arena);
-    reinsert_spill(t, old_spill, old_spill_len, old_arena);
+    reinsert_live(t, old_hash_pd, old_data_idx, old_entries, old_arena, old_cap);
+    reinsert_spill(t, old_spill_hash_pd, old_spill_data_idx, old_entries, old_arena, old_spill_len);
     place_prophylactic_tombstones(t);
 
-    free(old_slots);
+    free(old_hash_pd);
+    free(old_data_idx);
+    free(old_entries);
     free(old_arena);
-    free(old_spill);
+    free(old_spill_hash_pd);
+    free(old_spill_data_idx);
     t->resizing = false;
     return true;
 }
@@ -1366,38 +1445,86 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
 void ht_compact(ht_table_t *t) {
     if (!t) return;
 
-    // Save spill-lane entries
-    ht_slot_t *old_spill = t->spill;
+    // Save old state
+    uint64_t *old_hash_pd = t->hash_pd;
+    uint32_t *old_data_idx = t->data_idx;
+    ht_entry_t *old_entries = t->entries;
+    uint8_t *old_arena = t->arena;
+    size_t old_cap = t->capacity;
+    size_t old_arena_cap = t->arena_cap;
+
+    uint64_t *old_spill_hash_pd = t->spill_hash_pd;
+    uint32_t *old_spill_data_idx = t->spill_data_idx;
     size_t old_spill_len = t->spill_len;
 
-    t->spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    t->spill = calloc(t->spill_cap, sizeof(ht_slot_t));
-    if (!t->spill) {
-        t->spill = old_spill;
+    // Allocate new main table (same capacity)
+    uint64_t *new_hash_pd = calloc(old_cap, sizeof(uint64_t));
+    if (!new_hash_pd) return;
+
+    uint32_t *new_data_idx = malloc(old_cap * sizeof(uint32_t));
+    if (!new_data_idx) {
+        free(new_hash_pd);
         return;
     }
-    t->spill_len = 0;
+    memset(new_data_idx, 0xFF, old_cap * sizeof(uint32_t));
 
-    ht_slot_t *old_slots = t->slots;
-    size_t old_cap = t->capacity;
-    uint8_t *old_arena = t->data_arena;
-    size_t old_data_cap = t->data_cap;
+    // Allocate new entries
+    size_t new_entry_cap = t->entry_cap;
+    ht_entry_t *new_entries = calloc(new_entry_cap, sizeof(ht_entry_t));
+    if (!new_entries) {
+        free(new_data_idx); free(new_hash_pd);
+        return;
+    }
 
-    t->slots = calloc(old_cap, sizeof(ht_slot_t));
-    t->data_arena = malloc(old_data_cap > 0 ? old_data_cap : 1024);
-    t->data_size = 0;
-    t->data_cap = old_data_cap > 0 ? old_data_cap : 1024;
+    // Allocate new arena
+    uint8_t *new_arena = malloc(old_arena_cap > 0 ? old_arena_cap : 1024);
+    if (!new_arena) {
+        free(new_entries); free(new_data_idx); free(new_hash_pd);
+        return;
+    }
+
+    // Allocate new spill lane
+    size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
+    uint64_t *new_spill_hash_pd = calloc(new_spill_cap, sizeof(uint64_t));
+    if (!new_spill_hash_pd) {
+        free(new_arena); free(new_entries); free(new_data_idx); free(new_hash_pd);
+        return;
+    }
+
+    uint32_t *new_spill_data_idx = malloc(new_spill_cap * sizeof(uint32_t));
+    if (!new_spill_data_idx) {
+        free(new_spill_hash_pd); free(new_arena); free(new_entries);
+        free(new_data_idx); free(new_hash_pd);
+        return;
+    }
+    memset(new_spill_data_idx, 0xFF, new_spill_cap * sizeof(uint32_t));
+
+    // Swap to new state
+    t->hash_pd = new_hash_pd;
+    t->data_idx = new_data_idx;
+    t->entries = new_entries;
+    t->entry_count = 0;
+    t->arena = new_arena;
+    t->arena_size = 0;
+    t->arena_cap = old_arena_cap > 0 ? old_arena_cap : 1024;
     t->size = 0;
     t->tombstone_cnt = 0;
+    t->spill_hash_pd = new_spill_hash_pd;
+    t->spill_data_idx = new_spill_data_idx;
+    t->spill_cap = new_spill_cap;
+    t->spill_len = 0;
     t->zombie_cursor = 0;
 
-    reinsert_live(t, old_slots, old_cap, old_arena);
-    reinsert_spill(t, old_spill, old_spill_len, old_arena);
+    reinsert_live(t, old_hash_pd, old_data_idx, old_entries, old_arena, old_cap);
+    reinsert_spill(t, old_spill_hash_pd, old_spill_data_idx, old_entries, old_arena, old_spill_len);
     place_prophylactic_tombstones(t);
 
-    free(old_slots);
+    free(old_hash_pd);
+    free(old_data_idx);
+    free(old_entries);
     free(old_arena);
-    free(old_spill);
+    free(old_spill_hash_pd);
+    free(old_spill_data_idx);
 }
 
 // ============================================================================
@@ -1416,26 +1543,31 @@ bool ht_iter_next(ht_table_t *t, ht_iter_t *iter,
     if (!t || !iter) return false;
 
     while (iter->idx < t->capacity) {
-        ht_slot_t *s = &t->slots[iter->idx++];
-        if (hash_is_live(s->hash) && s->key_len > 0) {
-            if (out_key) *out_key = slot_key_ptr(t, s);
-            if (out_key_len) *out_key_len = s->key_len;
-            if (out_value) *out_value = slot_val_ptr(t, s);
-            if (out_value_len) *out_value_len = s->val_len;
+        uint64_t hpd = t->hash_pd[iter->idx];
+        uint32_t didx = t->data_idx[iter->idx];
+        iter->idx++;
+        if (hpd_live(hpd) && didx != DATA_IDX_NONE) {
+            const ht_entry_t *e = &t->entries[didx];
+            if (out_key) *out_key = t->arena + e->arena_offset;
+            if (out_key_len) *out_key_len = e->key_len;
+            if (out_value) *out_value = t->arena + e->arena_offset + e->key_len;
+            if (out_value_len) *out_value_len = e->val_len;
             return true;
         }
     }
 
-    // Then iterate spill lane (encode idx as capacity + spill index)
+    // Then iterate spill lane (no tombstones — all entries within spill_len are live)
     size_t spill_idx = iter->idx - t->capacity;
     while (spill_idx < t->spill_len) {
-        ht_slot_t *s = &t->spill[spill_idx++];
-        iter->idx = t->capacity + spill_idx;  // update so next call resumes
-        if (s->key_len > 0) {
-            if (out_key) *out_key = slot_key_ptr(t, s);
-            if (out_key_len) *out_key_len = s->key_len;
-            if (out_value) *out_value = slot_val_ptr(t, s);
-            if (out_value_len) *out_value_len = s->val_len;
+        uint32_t sdidx = t->spill_data_idx[spill_idx];
+        spill_idx++;
+        iter->idx = t->capacity + spill_idx;
+        if (sdidx != DATA_IDX_NONE) {
+            const ht_entry_t *e = &t->entries[sdidx];
+            if (out_key) *out_key = t->arena + e->arena_offset;
+            if (out_key_len) *out_key_len = e->key_len;
+            if (out_value) *out_value = t->arena + e->arena_offset + e->key_len;
+            if (out_value_len) *out_value_len = e->val_len;
             return true;
         }
     }
@@ -1464,19 +1596,27 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
     printf("Dump for h32=0x%x, ideal_idx=%zu:\n", h32, start_idx);
     for (size_t i = 0; i < count; i++) {
         size_t idx = (start_idx + i) & (t->capacity - 1);
-        ht_slot_t *s = &t->slots[idx];
-        const char *tag = slot_empty(s) ? "EMPTY" : slot_is_tomb(s) ? "TOMB" : "LIVE";
-        printf("  [%4zu]: hash=0x%08x dist=%3u [%s] klen=%3u vlen=%3u off=%5" PRIu32 "\n",
-               idx, s->hash, s->probe_dist, tag,
-               s->key_len, s->val_len, s->offset);
+        uint64_t hpd = t->hash_pd[idx];
+        const char *tag = hpd_empty(hpd) ? "EMPTY" : hpd_tomb(hpd) ? "TOMB" : "LIVE";
+        if (hpd_live(hpd)) {
+            uint32_t eidx = t->data_idx[idx];
+            const ht_entry_t *e = &t->entries[eidx];
+            printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s] klen=%3u vlen=%3u off=%5" PRIu32 "\n",
+                   idx, hpd_hash(hpd), hpd_pd(hpd), tag,
+                   e->key_len, e->val_len, e->arena_offset);
+        } else {
+            printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s]\n",
+                   idx, hpd_hash(hpd), hpd_pd(hpd), tag);
+        }
     }
-    // Also dump spill lane
     if (t->spill_len > 0) {
         printf("  Spill lane (%zu entries):\n", t->spill_len);
         for (size_t i = 0; i < t->spill_len; i++) {
-            ht_slot_t *s = &t->spill[i];
-            printf("  spill[%zu]: hash=0x%08x klen=%3u vlen=%3u off=%5" PRIu32 "\n",
-                   i, s->hash, s->key_len, s->val_len, s->offset);
+            uint64_t shpd = t->spill_hash_pd[i];
+            uint32_t eidx = t->spill_data_idx[i];
+            const ht_entry_t *e = &t->entries[eidx];
+            printf("  spill[%zu]: hash=0x%08" PRIx64 " klen=%3u vlen=%3u off=%5" PRIu32 "\n",
+                   i, hpd_hash(shpd), e->key_len, e->val_len, e->arena_offset);
         }
     }
 }
@@ -1495,28 +1635,31 @@ const char *ht_check_invariants(const ht_table_t *t) {
 
     // Invariant 1: probe_dist == (pos - ideal) % capacity for every live entry
     for (size_t i = 0; i < t->capacity; i++) {
-        const ht_slot_t *s = &t->slots[i];
-        if (slot_empty(s)) continue;
-        if (slot_is_tomb(s)) {
+        uint64_t hpd = t->hash_pd[i];
+        if (hpd_empty(hpd)) continue;
+        if (hpd_tomb(hpd)) {
             tomb_count++;
             continue;
         }
         live_count++;
 
-        size_t ideal = s->hash & cap_mask;
+        uint64_t h48 = hpd_hash(hpd);
+        uint16_t pd = hpd_pd(hpd);
+        size_t ideal = h48 & cap_mask;
         size_t expected_dist = (i >= ideal) ? (i - ideal) : (t->capacity - ideal + i);
-        if (s->probe_dist != expected_dist) {
+        if (pd != expected_dist) {
             static char buf[256];
             snprintf(buf, sizeof(buf),
-                     "slot[%zu]: probe_dist=%u but expected %zu (hash=0x%x ideal=%zu)",
-                     i, s->probe_dist, expected_dist, s->hash, ideal);
+                     "slot[%zu]: probe_dist=%u but expected %zu (hash=0x%" PRIx64 " ideal=%zu)",
+                     i, pd, expected_dist, h48, ideal);
             return buf;
         }
     }
 
-    // Count spill lane
+    // Count spill lane (no tombstones — all within spill_len are live)
     for (size_t i = 0; i < t->spill_len; i++) {
-        if (t->spill[i].key_len > 0) spill_live++;
+        if (t->spill_data_idx[i] != DATA_IDX_NONE)
+            spill_live++;
     }
 
     // Invariant 2: size matches actual live count
@@ -1538,40 +1681,39 @@ const char *ht_check_invariants(const ht_table_t *t) {
     }
 
     // Invariant 4: No live entry exists that early termination would skip.
-    // For every live entry at position p, verify that searching from its
-    // ideal position would NOT be stopped by early termination before
-    // reaching p.
     {
         for (size_t i = 0; i < t->capacity; i++) {
-            const ht_slot_t *s = &t->slots[i];
-            if (!hash_is_live(s->hash)) continue;
+            uint64_t hpd = t->hash_pd[i];
+            if (!hpd_live(hpd)) continue;
 
-            size_t ideal = s->hash & cap_mask;
+            uint64_t h48 = hpd_hash(hpd);
+            uint16_t pd = hpd_pd(hpd);
+            size_t ideal = h48 & cap_mask;
             uint16_t dist = 0;
             for (size_t steps = 0; steps <= t->capacity; steps++) {
                 size_t pos = (ideal + dist) & cap_mask;
-                if (pos == i) break; // reached our entry — OK
+                if (pos == i) break;
 
-                const ht_slot_t *scan = &t->slots[pos];
-                if (slot_empty(scan)) {
+                uint64_t scan_hpd = t->hash_pd[pos];
+                if (hpd_empty(scan_hpd)) {
                     static char buf[256];
                     snprintf(buf, sizeof(buf),
-                             "slot[%zu] (hash=0x%x ideal=%zu dist=%u) unreachable: "
+                             "slot[%zu] (hash=0x%" PRIx64 " ideal=%zu dist=%u) unreachable: "
                              "hit EMPTY at [%zu] while probing from ideal",
-                             i, s->hash, ideal, s->probe_dist, pos);
+                             i, h48, ideal, pd, pos);
                     return buf;
                 }
-                if (slot_is_tomb(scan)) {
+                if (hpd_tomb(scan_hpd)) {
                     dist++;
                     continue;
                 }
-                if (scan->probe_dist < dist) {
+                if (hpd_pd(scan_hpd) < dist) {
                     static char buf[256];
                     snprintf(buf, sizeof(buf),
-                             "slot[%zu] (hash=0x%x ideal=%zu dist=%u) unreachable: "
+                             "slot[%zu] (hash=0x%" PRIx64 " ideal=%zu dist=%u) unreachable: "
                              "early termination at [%zu] (dist=%u < %u)",
-                             i, s->hash, ideal, s->probe_dist,
-                             pos, scan->probe_dist, dist);
+                             i, h48, ideal, pd,
+                             pos, hpd_pd(scan_hpd), dist);
                     return buf;
                 }
                 dist++;
@@ -1579,5 +1721,5 @@ const char *ht_check_invariants(const ht_table_t *t) {
         }
     }
 
-    return NULL; // all good
+    return NULL;
 }
