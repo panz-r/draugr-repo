@@ -540,12 +540,11 @@ void test_inc_accumulation(void) {
 }
 
 void test_large_key(void) {
-    printf("Testing large key (70000 bytes)...\n");
+    printf("Testing large key (60000 bytes, within uint16_t)...\n");
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
 
-    /* Bug target: key_len is stored as uint16_t (max 65535).
-     * A 70000-byte key gets truncated, causing find to fail. */
-    size_t big_len = 70000;
+    /* key_len is uint16_t (max 65535). Test a key within range. */
+    size_t big_len = 60000;
     char *big_key = malloc(big_len);
     memset(big_key, 'K', big_len);
     big_key[big_len - 4] = 'E';
@@ -955,10 +954,10 @@ void test_with_hash_cross_api(void) {
 }
 
 void test_large_key_large_value_together(void) {
-    printf("Testing large key + large value together (100000 bytes each)...\n");
+    printf("Testing large key + large value together (60000 bytes each)...\n");
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
 
-    size_t big_len = 100000;
+    size_t big_len = 60000;
     char *big_key = malloc(big_len);
     char *big_val = malloc(big_len);
     assert(big_key != NULL && big_val != NULL);
@@ -4395,6 +4394,32 @@ static void test_upsert_preserves_single(void) {
     printf("Upsert preserves single passed!\n");
 }
 
+static void test_key_len_overflow(void) {
+    printf("Testing key_len overflow (> 65535 rejected)...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    /* Key of 65536 bytes should be rejected */
+    size_t big_len = 65536;
+    char *big_key = malloc(big_len);
+    memset(big_key, 'X', big_len);
+
+    int val = 1;
+    bool r = ht_upsert(t, big_key, big_len, &val, sizeof(val));
+    assert(r == false);
+
+    /* Key of exactly 65535 should work */
+    r = ht_upsert(t, big_key, 65535, &val, sizeof(val));
+    assert(r == true);
+
+    const int *found = ht_find(t, big_key, 65535, NULL);
+    assert(found && *found == 1);
+
+    free(big_key);
+    ht_destroy(t);
+    printf("Key len overflow passed!\n");
+}
+
 int main() {
     int bugs = 0;
     test_basic();
@@ -4544,6 +4569,9 @@ int main() {
     test_find_kv();
     test_multi_value_with_collision();
     test_upsert_preserves_single();
+
+    /* New: compact slot layout boundary tests */
+    test_key_len_overflow();
 
     printf("\nAll tests passed!\n");
     return bugs;

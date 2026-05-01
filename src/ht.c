@@ -55,9 +55,9 @@
 typedef struct {
     uint32_t hash;        // HASH_EMPTY, HASH_TOMB, or live hash (>= 2)
     uint16_t probe_dist;  // Distance from ideal position
-    uint32_t key_len;
+    uint16_t key_len;     // Max 65535 bytes
     uint32_t val_len;
-    uint64_t offset;      // Byte offset into data arena
+    uint32_t offset;      // Byte offset into data arena (max 4 GB)
 } ht_slot_t;
 
 // ============================================================================
@@ -106,9 +106,7 @@ struct ht_table {
 
     // Zombie rebuild state
     size_t        zombie_cursor;
-    size_t        rebuild_age;
 
-    double        c_p;            // Primitive tombstone spacing factor
     bool          resizing;
 };
 
@@ -143,6 +141,7 @@ static bool grow_arena(ht_table_t *t, size_t needed) {
     if (t->data_size + needed <= t->data_cap) return true;
     size_t new_cap = t->data_cap ? t->data_cap * 2 : 1024;
     while (new_cap < t->data_size + needed) new_cap *= 2;
+    if (new_cap > UINT32_MAX) return false;
     uint8_t *p = realloc(t->data_arena, new_cap);
     if (!p) return false;
     t->data_arena = p;
@@ -211,6 +210,7 @@ static bool place_entry(ht_table_t *t, ht_slot_t *slot,
                         uint32_t h32, uint16_t probe_dist,
                         const void *key, size_t key_len,
                         const void *value, size_t value_len) {
+    if (key_len > UINT16_MAX) return false;
     if (!grow_arena(t, key_len + value_len)) return false;
     void *data = arena_alloc(t, key_len + value_len);
     if (!data) return false;
@@ -219,9 +219,9 @@ static bool place_entry(ht_table_t *t, ht_slot_t *slot,
 
     slot->hash = h32;
     slot->probe_dist = probe_dist;
-    slot->key_len = (uint32_t)key_len;
+    slot->key_len = (uint16_t)key_len;
     slot->val_len = (uint32_t)value_len;
-    slot->offset = (uint64_t)((uint8_t *)data - t->data_arena);
+    slot->offset = (uint32_t)((uint8_t *)data - t->data_arena);
     return true;
 }
 
@@ -266,7 +266,7 @@ static bool spill_insert_ex(ht_table_t *t, uint32_t h32,
                     memcpy(data, key, key_len);
                     memcpy((uint8_t *)data + key_len, value, value_len);
                     s->val_len = (uint32_t)value_len;
-                    s->offset = (uint64_t)((uint8_t *)data - t->data_arena);
+                    s->offset = (uint32_t)((uint8_t *)data - t->data_arena);
                     found = true;
                     i++;
                 } else {
@@ -403,7 +403,7 @@ static bool rh_insert_ex(ht_table_t *t, uint32_t h32,
                         memcpy(data, key, key_len);
                         memcpy((uint8_t *)data + key_len, value, value_len);
                         s->val_len = (uint32_t)value_len;
-                        s->offset = (uint64_t)((uint8_t *)data - t->data_arena);
+                        s->offset = (uint32_t)((uint8_t *)data - t->data_arena);
                         upsert_updated = true;
                     } else {
                         // Tombstone additional matches
@@ -473,9 +473,9 @@ static bool rh_insert_ex(ht_table_t *t, uint32_t h32,
             if (s->probe_dist < dist) {
                 uint32_t old_hash = s->hash;
                 uint16_t old_dist = s->probe_dist;
-                uint32_t old_klen = s->key_len;
+                uint16_t old_klen = s->key_len;
                 uint32_t old_vlen = s->val_len;
-                uint64_t old_offset = s->offset;
+                uint32_t old_offset = s->offset;
 
                 void *old_key_copy = alloca(old_klen);
                 void *old_val_copy = alloca(old_vlen);
@@ -677,7 +677,6 @@ ht_table_t *ht_create(const ht_config_t *cfg,
     t->min_load_factor = (c.min_load_factor >= 0) ? c.min_load_factor : 0.20;
     t->tomb_threshold = (c.tomb_threshold > 0) ? c.tomb_threshold : 0.20;
     t->zombie_window = c.zombie_window;
-    t->c_p = C_P_DEFAULT;
 
     return t;
 }
@@ -729,7 +728,6 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
 
     if (result) {
         zombie_step(t);
-        t->rebuild_age++;
     }
 
     return result;
@@ -1353,7 +1351,6 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
     t->spill_cap = new_spill_cap;
     t->spill_len = 0;
     t->zombie_cursor = 0;
-    t->rebuild_age = 0;
 
     reinsert_live(t, old_slots, old_cap, old_arena);
     reinsert_spill(t, old_spill, old_spill_len, old_arena);
@@ -1393,7 +1390,6 @@ void ht_compact(ht_table_t *t) {
     t->size = 0;
     t->tombstone_cnt = 0;
     t->zombie_cursor = 0;
-    t->rebuild_age = 0;
 
     reinsert_live(t, old_slots, old_cap, old_arena);
     reinsert_spill(t, old_spill, old_spill_len, old_arena);
@@ -1470,7 +1466,7 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
         size_t idx = (start_idx + i) & (t->capacity - 1);
         ht_slot_t *s = &t->slots[idx];
         const char *tag = slot_empty(s) ? "EMPTY" : slot_is_tomb(s) ? "TOMB" : "LIVE";
-        printf("  [%4zu]: hash=0x%08x dist=%3u [%s] klen=%3u vlen=%3u off=%5" PRIu64 "\n",
+        printf("  [%4zu]: hash=0x%08x dist=%3u [%s] klen=%3u vlen=%3u off=%5" PRIu32 "\n",
                idx, s->hash, s->probe_dist, tag,
                s->key_len, s->val_len, s->offset);
     }
@@ -1479,7 +1475,7 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
         printf("  Spill lane (%zu entries):\n", t->spill_len);
         for (size_t i = 0; i < t->spill_len; i++) {
             ht_slot_t *s = &t->spill[i];
-            printf("  spill[%zu]: hash=0x%08x klen=%3u vlen=%3u off=%5" PRIu64 "\n",
+            printf("  spill[%zu]: hash=0x%08x klen=%3u vlen=%3u off=%5" PRIu32 "\n",
                    i, s->hash, s->key_len, s->val_len, s->offset);
         }
     }
