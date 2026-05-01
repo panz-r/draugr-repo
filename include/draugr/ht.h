@@ -25,6 +25,7 @@
 extern "C" {
 #endif
 
+typedef struct ht_bare ht_bare_t;
 typedef struct ht_table ht_table_t;
 
 struct ht_iter {
@@ -48,6 +49,36 @@ typedef struct {
 typedef bool (*ht_dup_callback)(const void *key, size_t key_len,
                                 const void *value, size_t value_len,
                                 void *user_ctx);
+
+// ============================================================================
+// Bare Table: hash → uint32_t
+// ============================================================================
+
+// Callback for ht_bare_find_all. Return false to stop iteration.
+// Note: UINT32_MAX (0xFFFFFFFF) is reserved and cannot be stored as a value.
+typedef bool (*ht_bare_callback)(uint32_t val, void *user_ctx);
+
+ht_bare_t *ht_bare_create(const ht_config_t *cfg);
+void ht_bare_destroy(ht_bare_t *t);
+void ht_bare_clear(ht_bare_t *t);
+
+bool ht_bare_insert(ht_bare_t *t, uint64_t hash, uint32_t val);
+bool ht_bare_find(const ht_bare_t *t, uint64_t hash, uint32_t *out_val);
+void ht_bare_find_all(const ht_bare_t *t, uint64_t hash,
+                      ht_bare_callback cb, void *user_ctx);
+size_t ht_bare_remove(ht_bare_t *t, uint64_t hash);
+bool ht_bare_remove_val(ht_bare_t *t, uint64_t hash, uint32_t val);
+
+bool ht_bare_resize(ht_bare_t *t, size_t new_capacity);
+void ht_bare_compact(ht_bare_t *t);
+
+ht_iter_t ht_bare_iter_begin(const ht_bare_t *t);
+bool ht_bare_iter_next(ht_bare_t *t, ht_iter_t *iter,
+                       uint64_t *out_hash, uint32_t *out_val);
+
+// ============================================================================
+// High-Level Table: key → value
+// ============================================================================
 
 // ============================================================================
 // Lifecycle
@@ -169,6 +200,10 @@ typedef struct {
 
 void ht_stats(const ht_table_t *t, ht_stats_t *out_stats);
 void ht_dump(const ht_table_t *t, uint32_t h32, size_t count);
+
+void ht_bare_stats(const ht_bare_t *t, ht_stats_t *out_stats);
+const char *ht_bare_check_invariants(const ht_bare_t *t);
+void ht_bare_dump(const ht_bare_t *t, uint64_t hash, size_t count);
 
 // Returns NULL if invariants hold, or a static error string.
 // Invariants checked:
