@@ -5,7 +5,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Library definition
-add_library(draugr src/ht.c)
+add_library(draugr src/ht.c src/ht_cache.c)
 
 target_include_directories(draugr
     PUBLIC
