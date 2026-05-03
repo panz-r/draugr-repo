@@ -549,10 +549,10 @@ bool ht_bare_insert(ht_bare_t *t, uint64_t hash, uint32_t val) {
     if (h48 < 2)
         return bare_spill_insert(t, h48, val);
 
-    if (!t->resizing && (double)(t->size + 1) / t->capacity > t->max_load_factor)
+    if (!t->resizing && (double)(t->size + 1) / (double)t->capacity > t->max_load_factor)
         ht_bare_resize(t, t->capacity * 2);
 
-    double total = t->size + t->tombstone_cnt;
+    double total = (double)t->size + (double)t->tombstone_cnt;
     if (total > 0 && (double)t->tombstone_cnt / total > t->tomb_threshold) {
         for (int i = 0; i < 4; i++) bare_zombie_step(t);
     }
@@ -919,9 +919,9 @@ void ht_bare_stats(const ht_bare_t *t, ht_stats_t *out_stats) {
     out_stats->size = t->size;
     out_stats->capacity = t->capacity;
     out_stats->tombstone_cnt = t->tombstone_cnt;
-    out_stats->load_factor = (double)t->size / t->capacity;
+    out_stats->load_factor = (double)t->size / (double)t->capacity;
     out_stats->tombstone_ratio = (t->size + t->tombstone_cnt > 0)
-        ? (double)t->tombstone_cnt / (t->size + t->tombstone_cnt)
+        ? (double)t->tombstone_cnt / (double)(t->size + t->tombstone_cnt)
         : 0.0;
 }
 
@@ -1382,10 +1382,10 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
 
     // Phase 2: Insert new entry
     ht_bare_t *b = &t->bare;
-    if (!b->resizing && (double)(b->size + 1) / b->capacity > b->max_load_factor)
+    if (!b->resizing && (double)(b->size + 1) / (double)b->capacity > b->max_load_factor)
         ht_resize(t, b->capacity * 2);
 
-    double total = b->size + b->tombstone_cnt;
+    double total = (double)b->size + (double)b->tombstone_cnt;
     if (total > 0 && (double)b->tombstone_cnt / total > b->tomb_threshold) {
         for (int i = 0; i < 4; i++) bare_zombie_step(b);
     }
@@ -1595,7 +1595,7 @@ size_t ht_remove_with_hash(ht_table_t *t, uint64_t hash,
         ht_bare_remove_val(&t->bare, hash, ctx.matches[i]);
 
     if (removed > 0 && t->bare.min_load_factor > 0 && t->bare.size > 0 &&
-        (double)t->bare.size / t->bare.capacity < t->bare.min_load_factor &&
+        (double)t->bare.size / (double)t->bare.capacity < t->bare.min_load_factor &&
         t->bare.capacity > 64) {
         size_t new_cap = t->bare.capacity / 2;
         if (new_cap >= 64 && new_cap >= t->bare.size * 2)
@@ -1662,7 +1662,7 @@ bool ht_remove_kv_one_with_hash(ht_table_t *t, uint64_t hash,
             ht_bare_remove_val(&t->bare, hash, matches[i]);
 
             if (t->bare.min_load_factor > 0 && t->bare.size > 0 &&
-                (double)t->bare.size / t->bare.capacity < t->bare.min_load_factor &&
+                (double)t->bare.size / (double)t->bare.capacity < t->bare.min_load_factor &&
                 t->bare.capacity > 64) {
                 size_t new_cap = t->bare.capacity / 2;
                 if (new_cap >= 64 && new_cap >= t->bare.size * 2)

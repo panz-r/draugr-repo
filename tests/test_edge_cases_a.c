@@ -131,7 +131,7 @@ static bool collect_val_cb(const void *key, size_t klen,
 
 static bool collect_stop_2_cb(const void *key, size_t klen,
                               const void *val, size_t vlen, void *ctx) {
-    (void)key; (void)klen; (void)vlen; (void)ctx;
+    (void)key; (void)klen; (void)val; (void)vlen; (void)ctx;
     g_collect_count++;
     return g_collect_count < 2;
 }
@@ -1027,7 +1027,7 @@ static int test_stats_consistency(void) {
     ht_remove(t, "k1", 2);
     ht_stats(t, &st);
     assert(st.size == 10);
-    assert(st.tombstone_cnt >= 0 && st.tombstone_cnt <= 2); // backshift may eliminate tombstones
+    assert(st.tombstone_cnt <= 2); // backshift may eliminate tombstones
 
     ht_compact(t);
     ht_stats(t, &st);
@@ -1245,6 +1245,7 @@ static int test_resize_up_down(void) {
     ht_stats(t, &st1);
     assert(st1.size == 100);
     size_t cap_up = st1.capacity;
+    (void)cap_up;
 
     // Manual resize down to 256
     assert(ht_resize(t, 256));

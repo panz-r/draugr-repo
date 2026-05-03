@@ -69,7 +69,7 @@ static void *entry_at(const ht_cache_t *c, uint32_t idx) {
 
 /* Get index from entry pointer */
 static uint32_t entry_index(const ht_cache_t *c, const void *entry) {
-    size_t offset = (const uint8_t *)entry - c->entries;
+    size_t offset = (size_t)((const uint8_t *)entry - c->entries);
     return (uint32_t)(offset / c->entry_size);
 }
 

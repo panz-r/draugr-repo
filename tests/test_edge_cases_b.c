@@ -91,7 +91,7 @@ static bool collect_val_cb(const void *key, size_t klen,
 
 static bool collect_stop_2_cb(const void *key, size_t klen,
                               const void *val, size_t vlen, void *ctx) {
-    (void)key; (void)klen; (void)vlen; (void)ctx;
+    (void)key; (void)klen; (void)val; (void)vlen; (void)ctx;
     g_collect_count++;
     return g_collect_count < 2;
 }
@@ -637,7 +637,7 @@ static int test_bulk_insert_delete_reinsert(void) {
 
     ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == N);
+    assert(st.size == (size_t)N);
 
     // Delete all
     for (int i = 0; i < N; i++) {
@@ -1053,7 +1053,7 @@ static int test_resize_with_many_tombstones(void) {
     ht_stats(t, &st);
     assert(st.size == 50);
     // Some chains may be backward-shifted (0 tombs), others tombstoned
-    assert(st.tombstone_cnt >= 0);
+    assert(st.tombstone_cnt <= st.capacity);
 
     // Resize down — should handle tombstones correctly
     ht_resize(t, 128);
@@ -1171,8 +1171,7 @@ static int test_find_all_after_churn(void) {
     ht_find_all(t, 42, collect_val_cb, NULL);
     assert(g_collect_count == 5);
 
-    // Verify the values: 1*10, 3*10, 5→999, 7*10, 9*10
-    int expected[] = {10, 30, 50, 70, 90};
+    // Verify the values: check that 999 (updated value for key5) is present
     int found_999 = 0;
     for (int i = 0; i < g_collect_count; i++) {
         if (g_collect_vals[i] == 999) found_999 = 1;
@@ -1208,7 +1207,7 @@ static int test_tombstone_count_accuracy(void) {
         ht_remove(t, key, strlen(key));
         ht_stats(t, &st);
         // size should decrease by 1 each time
-        assert(st.size == 40 - i - 1);
+        assert(st.size == (size_t)(40 - i - 1));
         // tombstone_cnt + size must not exceed capacity
         assert(st.size + st.tombstone_cnt <= st.capacity);
     }
@@ -1343,7 +1342,6 @@ static int test_backshift_ideal_position_abort(void) {
     ht_stats_t st;
     ht_stats(t, &st);
     assert(st.size == 10);
-    assert(st.tombstone_cnt >= 0);
     assert(st.size + st.tombstone_cnt <= st.capacity);
 
     ht_destroy(t);
@@ -1371,23 +1369,22 @@ static int test_dynamic_cap_high_load(void) {
 
     ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == n);
+    assert(st.size == (size_t)n);
 
     // Delete from the end (tail of probe chains) — backshift should fire
     // for many of these, especially with the higher dynamic cap at 90% load.
-    size_t tombs_before = st.tombstone_cnt;
     for (int i = n - 20; i < n; i++) {
         char key[16]; snprintf(key, sizeof(key), "dk%d", i);
         ht_remove(t, key, strlen(key));
     }
 
     ht_stats(t, &st);
-    assert(st.size == n - 20);
+    assert(st.size == (size_t)(n - 20));
 
     // With dynamic cap at high load (compute_x ≈ 10, cap ≈ 20),
     // backshift should handle chains up to ~16 slots. Tombstone count
     // should be less than 20 (some were eliminated by backshift).
-    assert(st.tombstone_cnt >= 0 && st.tombstone_cnt <= 20);
+    assert(st.tombstone_cnt <= 20);
 
     // All remaining keys must be findable
     for (int i = 0; i < n - 20; i++) {
@@ -1430,7 +1427,7 @@ static int test_push_forward_long_chain(void) {
 
     ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == N);
+    assert(st.size == (size_t)N);
 
     // Delete first 5 entries in the chain — tests push-forward/fallback
     for (int i = 0; i < 5; i++) {
@@ -1439,7 +1436,7 @@ static int test_push_forward_long_chain(void) {
     }
 
     ht_stats(t, &st);
-    assert(st.size == N - 5);
+    assert(st.size == (size_t)(N - 5));
     assert(st.size + st.tombstone_cnt <= st.capacity);
 
     // All remaining entries must be findable
