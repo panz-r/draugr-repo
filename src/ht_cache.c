@@ -1,41 +1,15 @@
-#include "draugr/ht_cache.h"
-#include "draugr/ht.h"
+#include "draugr/ht_cache_internal.h"
 #include <stdlib.h>
 #include <string.h>
 
-#define NONE UINT32_MAX
-
-struct ht_cache {
-    ht_bare_t *bare;
-
-    uint8_t  *entries;
-    uint64_t *hashes;
-    uint8_t  *live;
-    uint32_t *lru_prev;
-    uint32_t *lru_next;
-    uint32_t *free_stack;
-    size_t    free_top;
-
-    uint32_t lru_head;
-    uint32_t lru_tail;
-
-    size_t capacity;
-    size_t entry_size;
-    size_t size;
-
-    ht_cache_hash_fn hash_fn;
-    ht_cache_eq_fn   eq_fn;
-    void            *user_ctx;
-};
-
-static size_t cache_next_pow2(size_t n) {
+size_t cache_next_pow2(size_t n) {
     size_t r = 1;
     while (r < n) r <<= 1;
     return r;
 }
 
 /* LRU helpers */
-static void lru_add_head(ht_cache_t *c, uint32_t idx) {
+void lru_add_head(ht_cache_t *c, uint32_t idx) {
     c->lru_prev[idx] = NONE;
     c->lru_next[idx] = c->lru_head;
     if (c->lru_head != NONE)
@@ -45,7 +19,7 @@ static void lru_add_head(ht_cache_t *c, uint32_t idx) {
         c->lru_tail = idx;
 }
 
-static void lru_remove(ht_cache_t *c, uint32_t idx) {
+void lru_remove(ht_cache_t *c, uint32_t idx) {
     uint32_t prev = c->lru_prev[idx];
     uint32_t next = c->lru_next[idx];
     if (prev != NONE) c->lru_next[prev] = next;
@@ -56,7 +30,7 @@ static void lru_remove(ht_cache_t *c, uint32_t idx) {
     c->lru_next[idx] = NONE;
 }
 
-static void lru_promote(ht_cache_t *c, uint32_t idx) {
+void lru_promote(ht_cache_t *c, uint32_t idx) {
     if (c->lru_head == idx) return;
     lru_remove(c, idx);
     lru_add_head(c, idx);

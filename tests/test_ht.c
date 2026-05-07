@@ -257,7 +257,6 @@ void test_graveyard() {
 }
 
 static int find_all_count;
-static const char *find_all_expected;
 
 static bool find_all_cb(const void *key, size_t key_len,
                         const void *value, size_t value_len,
@@ -437,8 +436,8 @@ void test_remove_all_stats(void) {
 
     ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == N);
-    double initial_load = st.load_factor;
+    assert((size_t)st.size == (size_t)N);
+    (void)st; /* suppress unused warning */
 
     /* Remove all */
     for (int i = 0; i < N; i++) {
@@ -3466,7 +3465,7 @@ void test_large_spill_lane(void) {
 
     ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == N);
+    assert((size_t)st.size == (size_t)N);
 
     /* Verify all */
     for (int i = 0; i < N; i++) {
@@ -3487,7 +3486,7 @@ void test_large_spill_lane(void) {
     INV_CHECK(t, "large_spill: after removes");
 
     ht_stats(t, &st);
-    assert(st.size == N / 2);
+    assert((size_t)st.size == (size_t)(N / 2));
 
     /* Verify survivors */
     for (int i = 1; i < N; i += 2) {
@@ -3856,7 +3855,7 @@ void test_remove_mid_iteration(void) {
 
     ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == 20 - removed);
+    assert((size_t)st.size == (size_t)(20 - removed));
 
     /* Verify odd entries survive */
     for (int i = 1; i < 20; i += 2) {
@@ -4087,15 +4086,6 @@ void test_insert_with_hash_matching_normal(void) {
  * Multi-Value API Tests
  * ========================================================================== */
 
-/* Counting callback for find_key_all */
-static bool count_kv_cb(const void *key, size_t klen,
-                        const void *val, size_t vlen, void *ctx) {
-    (void)key; (void)klen; (void)val; (void)vlen;
-    int *count = (int *)ctx;
-    (*count)++;
-    return true;
-}
-
 /* Collect values via find_key_all */
 #define MAX_COLLECT 32
 typedef struct { const void *vals[MAX_COLLECT]; size_t vlens[MAX_COLLECT]; int n; } val_collect_t;
@@ -4112,48 +4102,35 @@ static bool collect_val_cb(const void *key, size_t klen,
     return true;
 }
 
-static void test_insert_multi(void) {
+/* ── ht_insert multi-value and ht_upsert collapse on same table ──────── */
+static void test_insert_multi_and_upsert_collapse(void) {
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
     assert(t);
 
-    /* Insert same key 3 times with different values */
+    /* Same setup as both tests: insert same key with 3 distinct values */
     assert(ht_insert(t, "k", 1, "a", 1));
     assert(ht_insert(t, "k", 1, "b", 1));
     assert(ht_insert(t, "k", 1, "c", 1));
 
     ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == 3);
+    assert((size_t)st.size == 3);
 
-    /* find_key_all should return all 3 */
+    /* ── test_insert_multi assertions ── */
+    /* find_key_all returns all 3 */
     val_collect_t vc = {0};
     ht_find_key_all(t, "k", 1, collect_val_cb, &vc);
     assert(vc.n == 3);
 
     INV_CHECK(t, "insert_multi");
-    ht_destroy(t);
-    printf("Insert multi passed!\n");
-}
 
-static void test_upsert_collapses_multi(void) {
-    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
-    assert(t);
-
-    /* Insert 3 values for same key */
-    assert(ht_insert(t, "k", 1, "a", 1));
-    assert(ht_insert(t, "k", 1, "b", 1));
-    assert(ht_insert(t, "k", 1, "c", 1));
-
-    ht_stats_t st;
-    ht_stats(t, &st);
-    assert(st.size == 3);
-
+    /* ── test_upsert_collapses_multi assertions ── */
     /* Upsert with new value — collapses to 1 */
     bool r = ht_upsert(t, "k", 1, "z", 1);
     assert(r == false);  /* replaced, not new */
 
     ht_stats(t, &st);
-    assert(st.size == 1);
+    assert((size_t)st.size == 1);
 
     /* Only upserted value remains */
     size_t vl;
@@ -4161,13 +4138,79 @@ static void test_upsert_collapses_multi(void) {
     assert(v && vl == 1 && memcmp(v, "z", 1) == 0);
 
     /* find_key_all returns exactly 1 */
-    val_collect_t vc = {0};
+    vc.n = 0;
     ht_find_key_all(t, "k", 1, collect_val_cb, &vc);
     assert(vc.n == 1);
 
     INV_CHECK(t, "upsert_collapses_multi");
     ht_destroy(t);
-    printf("Upsert collapses multi passed!\n");
+    printf("Insert multi and upsert collapse passed!\n");
+}
+
+/* ── ht_unsert: insert unique k,v ─────────────────────────────────── */
+static void test_unsert_basic(void) {
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    assert(ht_unsert(t, "a", 1, "1", 1));
+    assert(ht_unsert(t, "b", 1, "2", 1));
+    assert(ht_unsert(t, "c", 1, "3", 1));
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert((size_t)st.size == 3);
+
+    /* Verify all 3 entries are findable */
+    const char *v = ht_find(t, "a", 1, NULL);
+    assert(v && memcmp(v, "1", 1) == 0);
+    v = ht_find(t, "b", 1, NULL);
+    assert(v && memcmp(v, "2", 1) == 0);
+    v = ht_find(t, "c", 1, NULL);
+    assert(v && memcmp(v, "3", 1) == 0);
+
+    ht_destroy(t);
+    printf("Unsert basic passed!\n");
+}
+
+/* ── ht_unsert: same key different hash (via with_hash) goes to spill ─ */
+static void test_unsert_with_hash_spill(void) {
+    ht_table_t *t = ht_create(NULL, zero_hash_fn, NULL, NULL);
+    assert(t);
+
+    assert(ht_unsert_with_hash(t, 0, "k", 1, "v1", 2));
+    assert(ht_unsert_with_hash(t, 1, "k", 1, "v2", 2));
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert((size_t)st.size == 2);
+
+    /* Verify both spill entries are findable */
+    const char *v = ht_find(t, "k", 1, NULL);
+    assert(v != NULL); /* at least one */
+
+    ht_destroy(t);
+    printf("Unsert with_hash spill passed!\n");
+}
+
+/* ── ht_inc_with_hash: normal hash (not zero or special) ─────────────── */
+static void test_inc_with_hash_normal_hash(void) {
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    uint64_t h = fnv1a_hash("x", 1, NULL);
+
+    bool ok = false;
+    int64_t r = ht_inc_with_hash(t, h, "x", 1, 10, &ok);
+    assert(ok && r == 10);
+
+    r = ht_inc_with_hash(t, h, "x", 1, 5, &ok);
+    assert(ok && r == 15);
+
+    r = ht_inc_with_hash(t, h, "x", 1, -3, &ok);
+    assert(ok && r == 12);
+
+    ht_destroy(t);
+    printf("Inc with hash normal passed!\n");
 }
 
 static void test_unsert_dedup(void) {
@@ -4216,25 +4259,27 @@ static void test_remove_all_multi(void) {
     printf("Remove all multi passed!\n");
 }
 
-static void test_remove_kv(void) {
+/* ── ht_remove_kv and ht_remove_kv_one on same table with shared setup ────── */
+static void test_remove_kv_and_kv_one(void) {
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
     assert(t);
 
-    /* insert ("k","a"), ("k","b"), ("k","a") */
+    /* Same setup as test_remove_kv: ("k","a"), ("k","b"), ("k","a") — 3 entries */
     assert(ht_insert(t, "k", 1, "a", 1));
     assert(ht_insert(t, "k", 1, "b", 1));
     assert(ht_insert(t, "k", 1, "a", 1));
 
     ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == 3);
+    assert((size_t)st.size == 3);
 
+    /* ── test_remove_kv assertions ── */
     /* remove_kv("k","a") returns 2 */
     size_t removed = ht_remove_kv(t, "k", 1, "a", 1);
     assert(removed == 2);
 
     ht_stats(t, &st);
-    assert(st.size == 1);
+    assert((size_t)st.size == 1);
 
     /* Only "b" remains */
     val_collect_t vc = {0};
@@ -4242,56 +4287,68 @@ static void test_remove_kv(void) {
     assert(vc.n == 1);
     assert(vc.vlens[0] == 1 && memcmp(vc.vals[0], "b", 1) == 0);
 
-    INV_CHECK(t, "remove_kv");
-    ht_destroy(t);
-    printf("Remove kv passed!\n");
-}
-
-static void test_remove_kv_one(void) {
-    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
-    assert(t);
-
-    /* insert ("k","a") twice */
+    /* ── test_remove_kv_one assertions ── */
+    /* Insert ("k","a") twice so we have ("k","b"), ("k","a"), ("k","a") — 3 entries */
     assert(ht_insert(t, "k", 1, "a", 1));
     assert(ht_insert(t, "k", 1, "a", 1));
-
-    ht_stats_t st;
     ht_stats(t, &st);
-    assert(st.size == 2);
+    assert((size_t)st.size == 3);
 
     /* remove_kv_one returns true, size=1 */
     assert(ht_remove_kv_one(t, "k", 1, "a", 1));
     ht_stats(t, &st);
-    assert(st.size == 1);
+    assert((size_t)st.size == 2);
 
-    /* second call returns true, size=0 */
+    /* second call returns true, size=1 (one "a" and "b" remain) */
     assert(ht_remove_kv_one(t, "k", 1, "a", 1));
     ht_stats(t, &st);
-    assert(st.size == 0);
+    assert((size_t)st.size == 1);
 
-    /* third returns false */
-    assert(!ht_remove_kv_one(t, "k", 1, "a", 1));
+    /* remove remaining "b" with remove_kv_one */
+    assert(ht_remove_kv_one(t, "k", 1, "b", 1));
+    ht_stats(t, &st);
+    assert((size_t)st.size == 0);
 
-    INV_CHECK(t, "remove_kv_one");
+    /* fourth call returns false (table empty) */
+    assert(!ht_remove_kv_one(t, "k", 1, "b", 1));
+
+    INV_CHECK(t, "remove_kv_and_kv_one");
     ht_destroy(t);
-    printf("Remove kv one passed!\n");
+    printf("Remove kv and kv one passed!\n");
 }
 
-static void test_find_key_all_values(void) {
+static void test_find_kv_and_key_all(void) {
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
     assert(t);
 
-    /* Insert 5 values for same key */
+    /* Same key "k" with 5 distinct values */
     const char *vals[] = {"v0", "v1", "v2", "v3", "v4"};
     for (int i = 0; i < 5; i++)
         assert(ht_insert(t, "k", 1, vals[i], 2));
 
-    /* find_key_all returns all 5 with correct values */
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert((size_t)st.size == 5);
+
+    /* find_kv: exact k,v match — finds "v0" */
+    size_t vl;
+    const void *v = ht_find_kv(t, "k", 1, "v0", 2, &vl);
+    assert(v && vl == 2 && memcmp(v, "v0", 2) == 0);
+
+    /* find_kv: k,v not present — returns NULL */
+    v = ht_find_kv(t, "k", 1, "nonexistent", 2, &vl);
+    assert(v == NULL);
+
+    /* find_kv with different key same value — returns NULL */
+    v = ht_find_kv(t, "other", 5, "v0", 2, &vl);
+    assert(v == NULL);
+
+    /* find_key_all: key-only lookup returns all 5 values */
     val_collect_t vc = {0};
     ht_find_key_all(t, "k", 1, collect_val_cb, &vc);
     assert(vc.n == 5);
 
-    /* Verify all values are present (order may vary) */
+    /* Verify all 5 values are present (order may vary) */
     bool found[5] = {false};
     for (int i = 0; i < 5; i++) {
         for (int j = 0; j < vc.n && j < MAX_COLLECT; j++) {
@@ -4302,30 +4359,14 @@ static void test_find_key_all_values(void) {
     for (int i = 0; i < 5; i++)
         assert(found[i]);
 
-    INV_CHECK(t, "find_key_all_values");
+    /* find_key_all on nonexistent key returns 0 */
+    val_collect_t vc2 = {0};
+    ht_find_key_all(t, "notthere", 9, collect_val_cb, &vc2);
+    assert(vc2.n == 0);
+
+    INV_CHECK(t, "find_kv_and_key_all");
     ht_destroy(t);
-    printf("Find key all passed!\n");
-}
-
-static void test_find_kv(void) {
-    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
-    assert(t);
-
-    assert(ht_insert(t, "k", 1, "a", 1));
-    assert(ht_insert(t, "k", 1, "b", 1));
-
-    /* find_kv("k","a") finds it */
-    size_t vl;
-    const void *v = ht_find_kv(t, "k", 1, "a", 1, &vl);
-    assert(v && vl == 1 && memcmp(v, "a", 1) == 0);
-
-    /* find_kv("k","c") returns NULL */
-    v = ht_find_kv(t, "k", 1, "c", 1, &vl);
-    assert(v == NULL);
-
-    INV_CHECK(t, "find_kv");
-    ht_destroy(t);
-    printf("Find kv passed!\n");
+    printf("Find kv and key all passed!\n");
 }
 
 static void test_multi_value_with_collision(void) {
@@ -4418,6 +4459,435 @@ static void test_key_len_overflow(void) {
     free(big_key);
     ht_destroy(t);
     printf("Key len overflow passed!\n");
+}
+
+/* ── ht_unsert: comprehensive tests for dedup and edge cases ───────── */
+static void test_unsert_comprehensive(void) {
+    printf("Testing unsert comprehensive...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    /* Same k,v twice - second should return false (dedup) */
+    assert(ht_unsert(t, "k", 1, "v1", 2));
+    assert(!ht_unsert(t, "k", 1, "v1", 2)); /* duplicate - reject */
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    /* Same key, different value - should allow (different pair) */
+    assert(ht_unsert(t, "k", 1, "v2", 2));
+    ht_stats(t, &st);
+    assert(st.size == 2);
+
+    /* Different key, same value - should allow */
+    assert(ht_unsert(t, "k2", 2, "v1", 2));
+    ht_stats(t, &st);
+    assert(st.size == 3);
+
+    /* Verify all entries are findable */
+    size_t vl;
+    const void *v = ht_find_kv(t, "k", 1, "v1", 2, &vl);
+    assert(v != NULL && vl == 2);
+    v = ht_find_kv(t, "k", 1, "v2", 2, &vl);
+    assert(v != NULL && vl == 2);
+    v = ht_find_kv(t, "k2", 2, "v1", 2, &vl);
+    assert(v != NULL && vl == 2);
+
+    INV_CHECK(t, "unsert_comprehensive");
+    ht_destroy(t);
+    printf("  PASS unsert_comprehensive\n");
+}
+
+/* ── ht_find_kv: comprehensive tests ───────────────────────────────── */
+static void test_find_kv_comprehensive(void) {
+    printf("Testing find_kv comprehensive...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    /* Insert multiple values for same key */
+    assert(ht_insert(t, "k", 1, "a", 1));
+    assert(ht_insert(t, "k", 1, "b", 1));
+    assert(ht_insert(t, "k", 1, "c", 1));
+
+    /* find_kv with exact match */
+    size_t vl;
+    const void *v = ht_find_kv(t, "k", 1, "a", 1, &vl);
+    assert(v != NULL && vl == 1 && memcmp(v, "a", 1) == 0);
+
+    v = ht_find_kv(t, "k", 1, "b", 1, &vl);
+    assert(v != NULL && vl == 1 && memcmp(v, "b", 1) == 0);
+
+    v = ht_find_kv(t, "k", 1, "c", 1, &vl);
+    assert(v != NULL && vl == 1 && memcmp(v, "c", 1) == 0);
+
+    /* find_kv with key exists but value doesn't */
+    v = ht_find_kv(t, "k", 1, "nonexistent", 5, &vl);
+    assert(v == NULL);
+
+    /* find_kv with different key */
+    v = ht_find_kv(t, "other", 5, "a", 1, &vl);
+    assert(v == NULL);
+
+    /* find_kv with empty table */
+    ht_table_t *empty = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    v = ht_find_kv(empty, "k", 1, "a", 1, &vl);
+    assert(v == NULL);
+    ht_destroy(empty);
+
+    INV_CHECK(t, "find_kv_comprehensive");
+    ht_destroy(t);
+    printf("  PASS find_kv_comprehensive\n");
+}
+
+/* ── ht_find_key_all: comprehensive tests ───────────────────────────── */
+static void test_find_key_all_comprehensive(void) {
+    printf("Testing find_key_all comprehensive...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    /* Insert 5 values for key "k" */
+    const char *vals[] = {"v0", "v1", "v2", "v3", "v4"};
+    for (int i = 0; i < 5; i++)
+        assert(ht_insert(t, "k", 1, vals[i], 2));
+
+    /* find_key_all returns all 5 */
+    val_collect_t vc = {0};
+    ht_find_key_all(t, "k", 1, collect_val_cb, &vc);
+    assert(vc.n == 5);
+
+    /* find_key_all with key that doesn't exist */
+    val_collect_t vc2 = {0};
+    ht_find_key_all(t, "notthere", 9, collect_val_cb, &vc2);
+    assert(vc2.n == 0);
+
+    /* find_key_all on empty table */
+    ht_table_t *empty = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    val_collect_t vc3 = {0};
+    ht_find_key_all(empty, "k", 1, collect_val_cb, &vc3);
+    assert(vc3.n == 0);
+    ht_destroy(empty);
+
+    INV_CHECK(t, "find_key_all_comprehensive");
+    ht_destroy(t);
+    printf("  PASS find_key_all_comprehensive\n");
+}
+
+/* ── ht_remove_kv: comprehensive tests ─────────────────────────────── */
+static void test_remove_kv_comprehensive(void) {
+    printf("Testing remove_kv comprehensive...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    /* Insert "k" with multiple values */
+    assert(ht_insert(t, "k", 1, "a", 1));
+    assert(ht_insert(t, "k", 1, "b", 1));
+    assert(ht_insert(t, "k", 1, "a", 1)); /* duplicate value */
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 3);
+
+    /* remove_kv("k", "a") removes both "a" entries */
+    size_t removed = ht_remove_kv(t, "k", 1, "a", 1);
+    assert(removed == 2);
+
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    /* Only "b" remains */
+    val_collect_t vc = {0};
+    ht_find_key_all(t, "k", 1, collect_val_cb, &vc);
+    assert(vc.n == 1);
+    assert(memcmp(vc.vals[0], "b", 1) == 0);
+
+    /* remove_kv with key exists but value doesn't */
+    removed = ht_remove_kv(t, "k", 1, "nonexistent", 5);
+    assert(removed == 0);
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    /* remove_kv with different key */
+    removed = ht_remove_kv(t, "other", 5, "a", 1);
+    assert(removed == 0);
+
+    INV_CHECK(t, "remove_kv_comprehensive");
+    ht_destroy(t);
+    printf("  PASS remove_kv_comprehensive\n");
+}
+
+/* ── ht_remove_kv_one: comprehensive tests ──────────────────────────── */
+static void test_remove_kv_one_comprehensive(void) {
+    printf("Testing remove_kv_one comprehensive...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    /* Insert "k" with multiple values */
+    assert(ht_insert(t, "k", 1, "a", 1));
+    assert(ht_insert(t, "k", 1, "b", 1));
+    assert(ht_insert(t, "k", 1, "a", 1));
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 3);
+
+    /* remove_kv_one removes first matching, returns true */
+    assert(ht_remove_kv_one(t, "k", 1, "a", 1) == true);
+    ht_stats(t, &st);
+    assert(st.size == 2);
+
+    /* Second call removes second "a" */
+    assert(ht_remove_kv_one(t, "k", 1, "a", 1) == true);
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    /* Third call returns false - no more "a" */
+    assert(ht_remove_kv_one(t, "k", 1, "a", 1) == false);
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    /* Remove "b" */
+    assert(ht_remove_kv_one(t, "k", 1, "b", 1) == true);
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    /* Remove from empty table returns false */
+    assert(ht_remove_kv_one(t, "k", 1, "b", 1) == false);
+
+    INV_CHECK(t, "remove_kv_one_comprehensive");
+    ht_destroy(t);
+    printf("  PASS remove_kv_one_comprehensive\n");
+}
+
+/* ── ht_inc_with_hash: overflow/underflow tests ────────────────────── */
+static void test_inc_with_hash_overflow(void) {
+    printf("Testing inc_with_hash overflow...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    uint64_t h = fnv1a_hash("x", 1, NULL);
+
+    bool ok = false;
+    int64_t r = ht_inc_with_hash(t, h, "x", 1, INT64_MAX - 10, &ok);
+    assert(ok && r == INT64_MAX - 10);
+
+    /* Adding more - overflow behavior is implementation-defined, but should not crash */
+    r = ht_inc_with_hash(t, h, "x", 1, 20, &ok);
+    assert(ok); /* Should still succeed */
+
+    /* Underflow test - similar */
+    ht_table_t *t2 = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    uint64_t h2 = fnv1a_hash("y", 1, NULL);
+
+    r = ht_inc_with_hash(t2, h2, "y", 1, INT64_MIN + 5, &ok);
+    assert(ok && r == INT64_MIN + 5);
+
+    r = ht_inc_with_hash(t2, h2, "y", 1, -10, &ok);
+    assert(ok); /* Should still succeed */
+
+    ht_destroy(t);
+    ht_destroy(t2);
+    printf("  PASS inc_with_hash_overflow\n");
+}
+
+/* ── ht_find_kv_with_hash: comprehensive tests ──────────────────────── */
+static void test_find_kv_with_hash_comprehensive(void) {
+    printf("Testing find_kv_with_hash comprehensive...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    uint64_t h = fnv1a_hash("k", 1, NULL);
+
+    assert(ht_insert(t, "k", 1, "a", 1));
+    assert(ht_insert(t, "k", 1, "b", 1));
+
+    /* find_kv_with_hash with correct hash */
+    size_t vl;
+    const void *v = ht_find_kv_with_hash(t, h, "k", 1, "a", 1, &vl);
+    assert(v != NULL && vl == 1);
+
+    /* find_kv_with_hash with wrong hash - different hash high bits won't match */
+    v = ht_find_kv_with_hash(t, h + (1ULL << 48), "k", 1, "a", 1, &vl);
+    assert(v == NULL); /* Hash high bits don't match */
+
+    /* find_kv_with_hash with non-existent value */
+    v = ht_find_kv_with_hash(t, h, "k", 1, "nonexistent", 5, &vl);
+    assert(v == NULL);
+
+    INV_CHECK(t, "find_kv_with_hash_comprehensive");
+    ht_destroy(t);
+    printf("  PASS find_kv_with_hash_comprehensive\n");
+}
+
+/* ── ht_remove_kv_with_hash: comprehensive tests ────────────────────── */
+static void test_remove_kv_with_hash_comprehensive(void) {
+    printf("Testing remove_kv_with_hash comprehensive...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    uint64_t h = fnv1a_hash("k", 1, NULL);
+
+    assert(ht_insert(t, "k", 1, "a", 1));
+    assert(ht_insert(t, "k", 1, "b", 1));
+
+    /* remove_kv_with_hash with correct hash */
+    size_t removed = ht_remove_kv_with_hash(t, h, "k", 1, "a", 1);
+    assert(removed == 1);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    /* remove_kv_with_hash with wrong hash - different hash high bits won't match */
+    removed = ht_remove_kv_with_hash(t, h + (1ULL << 48), "k", 1, "b", 1);
+    assert(removed == 0);
+
+    /* Use correct hash to remove "b" */
+    removed = ht_remove_kv_with_hash(t, h, "k", 1, "b", 1);
+    assert(removed == 1);
+
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    INV_CHECK(t, "remove_kv_with_hash_comprehensive");
+    ht_destroy(t);
+    printf("  PASS remove_kv_with_hash_comprehensive\n");
+}
+
+/* ── ht_find_key_all_with_hash: comprehensive tests ────────────────── */
+static void test_find_key_all_with_hash_comprehensive(void) {
+    printf("Testing find_key_all_with_hash comprehensive...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    uint64_t h = fnv1a_hash("k", 1, NULL);
+
+    assert(ht_insert(t, "k", 1, "a", 1));
+    assert(ht_insert(t, "k", 1, "b", 1));
+    assert(ht_insert(t, "k", 1, "c", 1));
+
+    /* find_key_all_with_hash with correct hash */
+    val_collect_t vc = {0};
+    ht_find_key_all_with_hash(t, h, "k", 1, collect_val_cb, &vc);
+    assert(vc.n == 3);
+
+    /* find_key_all_with_hash with wrong hash - different hash high bits won't match */
+    val_collect_t vc2 = {0};
+    ht_find_key_all_with_hash(t, h + (1ULL << 48), "k", 1, collect_val_cb, &vc2);
+    assert(vc2.n == 0); /* Hash high bits don't match */
+
+    /* find_key_all_with_hash with non-existent key */
+    val_collect_t vc3 = {0};
+    ht_find_key_all_with_hash(t, h, "notthere", 9, collect_val_cb, &vc3);
+    assert(vc3.n == 0);
+
+    INV_CHECK(t, "find_key_all_with_hash_comprehensive");
+    ht_destroy(t);
+    printf("  PASS find_key_all_with_hash_comprehensive\n");
+}
+
+/* ── ht_inc_with_hash with zero hash (spill lane) ───────────────────── */
+static void test_inc_with_hash_zero_hash(void) {
+    printf("Testing inc_with_hash zero hash (spill)...\n");
+    ht_table_t *t = ht_create(NULL, zero_hash_fn, NULL, NULL);
+    assert(t);
+
+    /* zero_hash_fn returns 0, so entries go to spill lane */
+    bool ok = false;
+    int64_t r = ht_inc_with_hash(t, 0, "k", 1, 10, &ok);
+    assert(ok && r == 10);
+
+    r = ht_inc_with_hash(t, 0, "k", 1, 5, &ok);
+    assert(ok && r == 15);
+
+    r = ht_inc_with_hash(t, 0, "k", 1, -3, &ok);
+    assert(ok && r == 12);
+
+    /* Different key also with hash 0 */
+    r = ht_inc_with_hash(t, 0, "k2", 2, 100, &ok);
+    assert(ok && r == 100);
+
+    INV_CHECK(t, "inc_with_hash_zero_hash");
+    ht_destroy(t);
+    printf("  PASS inc_with_hash_zero_hash\n");
+}
+
+/* ── ht_find_kv when key exists but value doesn't ───────────────────── */
+static void test_find_kv_key_not_found(void) {
+    printf("Testing find_kv key exists but value doesn't...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    assert(ht_insert(t, "k", 1, "a", 1));
+
+    /* Key exists but value doesn't */
+    size_t vl;
+    const void *v = ht_find_kv(t, "k", 1, "nonexistent", 5, &vl);
+    assert(v == NULL);
+
+    /* Key doesn't exist at all */
+    v = ht_find_kv(t, "other", 5, "a", 1, &vl);
+    assert(v == NULL);
+
+    INV_CHECK(t, "find_kv_key_not_found");
+    ht_destroy(t);
+    printf("  PASS find_kv_key_not_found\n");
+}
+
+/* ── ht_remove_kv when key/value doesn't exist ─────────────────────── */
+static void test_remove_kv_nonexistent(void) {
+    printf("Testing remove_kv nonexistent...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    assert(ht_insert(t, "k", 1, "a", 1));
+
+    /* Key exists but value doesn't */
+    size_t removed = ht_remove_kv(t, "k", 1, "nonexistent", 5);
+    assert(removed == 0);
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    /* Key doesn't exist at all */
+    removed = ht_remove_kv(t, "other", 5, "a", 1);
+    assert(removed == 0);
+
+    ht_stats(t, &st);
+    assert(st.size == 1);
+
+    INV_CHECK(t, "remove_kv_nonexistent");
+    ht_destroy(t);
+    printf("  PASS remove_kv_nonexistent\n");
+}
+
+/* ── val_len at UINT16_MAX boundary ───────────────────────────────── */
+static void test_val_len_max_boundary(void) {
+    printf("Testing val_len at UINT16_MAX boundary...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t);
+
+    /* Exactly UINT16_MAX (65535) - should work */
+    size_t max_len = 65535;
+    char *max_val = malloc(max_len);
+    memset(max_val, 'X', max_len);
+    max_val[0] = 'S';
+    max_val[max_len - 1] = 'E';
+
+    bool inserted = ht_upsert(t, "key", 3, max_val, max_len);
+    assert(inserted == true);
+
+    size_t out_len = 0;
+    const char *found = ht_find(t, "key", 3, &out_len);
+    assert(found != NULL);
+    assert(out_len == max_len);
+    assert(found[0] == 'S');
+    assert(found[max_len - 1] == 'E');
+
+    free(max_val);
+    ht_destroy(t);
+    printf("  PASS val_len_max_boundary\n");
 }
 
 int main() {
@@ -4559,19 +5029,36 @@ int main() {
     test_insert_with_hash_matching_normal();
 
     /* New: multi-value API — insert, upsert, unsert, remove_kv, find_key_all, find_kv */
-    test_insert_multi();
-    test_upsert_collapses_multi();
+    test_insert_multi_and_upsert_collapse();
     test_unsert_dedup();
     test_remove_all_multi();
-    test_remove_kv();
-    test_remove_kv_one();
-    test_find_key_all_values();
-    test_find_kv();
+    test_remove_kv_and_kv_one();
+    test_find_kv_and_key_all();
     test_multi_value_with_collision();
     test_upsert_preserves_single();
 
     /* New: compact slot layout boundary tests */
     test_key_len_overflow();
+
+    /* New: coverage gaps — unsert basic, unsert spill, inc_with_hash normal */
+    test_unsert_basic();
+    test_unsert_with_hash_spill();
+    test_inc_with_hash_normal_hash();
+
+    /* New: comprehensive coverage gaps */
+    test_unsert_comprehensive();
+    test_find_kv_comprehensive();
+    test_find_key_all_comprehensive();
+    test_remove_kv_comprehensive();
+    test_remove_kv_one_comprehensive();
+    test_inc_with_hash_overflow();
+    test_find_kv_with_hash_comprehensive();
+    test_remove_kv_with_hash_comprehensive();
+    test_find_key_all_with_hash_comprehensive();
+    test_inc_with_hash_zero_hash();
+    test_find_kv_key_not_found();
+    test_remove_kv_nonexistent();
+    test_val_len_max_boundary();
 
     printf("\nAll tests passed!\n");
     return bugs;

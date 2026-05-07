@@ -754,11 +754,6 @@ static void test_grow_data_integrity(void) {
     printf("  PASS\n");
 }
 
-static uint64_t zero_hash(const void *key, size_t len, void *ctx) {
-    (void)key; (void)len; (void)ctx;
-    return 0;
-}
-
 static void test_shrink_preserves_byte_exact(void) {
     printf("Test: shrink preserves byte-exact values...\n");
     ht_config_t cfg = {

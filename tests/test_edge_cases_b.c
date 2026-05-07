@@ -89,13 +89,6 @@ static bool collect_val_cb(const void *key, size_t klen,
     return true;
 }
 
-static bool collect_stop_2_cb(const void *key, size_t klen,
-                              const void *val, size_t vlen, void *ctx) {
-    (void)key; (void)klen; (void)val; (void)vlen; (void)ctx;
-    g_collect_count++;
-    return g_collect_count < 2;
-}
-
 // ============================================================================
 // 32. Multiple resizes with spill + collisions
 // ============================================================================
@@ -656,7 +649,7 @@ static int test_bulk_insert_delete_reinsert(void) {
     }
 
     ht_stats(t, &st);
-    assert(st.size == N);
+    assert((size_t)st.size == (size_t)N);
 
     // Verify all
     for (int i = 0; i < N; i++) {
@@ -1214,7 +1207,6 @@ static int test_tombstone_count_accuracy(void) {
 
     // Final check: tombstone_cnt is non-negative and consistent
     ht_stats(t, &st);
-    assert(st.tombstone_cnt >= 0);
     assert(st.size == 20);
 
     // Verify all remaining keys are findable
@@ -2747,6 +2739,45 @@ static int test_with_hash_colliding_find_all(void) {
 }
 
 // ============================================================================
+// 71. Backward shift ideal-position abort scenario
+// ============================================================================
+
+static int test_backshift_abort_scenario(void) {
+    printf("Test: backshift ideal-position abort scenario...\n");
+
+    ht_config_t cfg = { .initial_capacity = 32, .max_load_factor = 0.9,
+                        .zombie_window = 0, .min_load_factor = 0 };
+    ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[16]; snprintf(key, sizeof(key), "bk%d", i);
+        int val = i;
+        ht_upsert(t, key, strlen(key), &val, sizeof(val));
+    }
+
+    for (int i = 0; i < 20; i += 2) {
+        char key[16]; snprintf(key, sizeof(key), "bk%d", i);
+        ht_remove(t, key, strlen(key));
+    }
+
+    for (int i = 1; i < 20; i += 2) {
+        char key[16]; snprintf(key, sizeof(key), "bk%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v && *v == i);
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 10);
+    assert(st.size + st.tombstone_cnt <= st.capacity);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -2831,9 +2862,12 @@ int main(void) {
     fails += test_with_hash_lifecycle();
     fails += test_with_hash_colliding_find_all();
 
+    // New tests (71-72): backward shift abort
+    fails += test_backshift_abort_scenario();
+
     printf("\n");
     if (fails == 0) {
-        printf("All edge case B tests passed! (60/60)\n");
+        printf("All edge case B tests passed! (61/61)\n");
     } else {
         printf("%d test(s) FAILED!\n", fails);
     }

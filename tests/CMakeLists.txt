@@ -25,3 +25,7 @@ add_test(NAME ht_edge_case_b_tests COMMAND test_edge_cases_b)
 add_executable(test_ht_cache test_ht_cache.c)
 target_link_libraries(test_ht_cache draugr)
 add_test(NAME ht_cache_tests COMMAND test_ht_cache)
+
+add_executable(test_internal test_internal.c)
+target_link_libraries(test_internal draugr)
+add_test(NAME ht_internal_tests COMMAND test_internal)

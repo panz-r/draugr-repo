@@ -48,8 +48,7 @@ static int test_migration_interleaved(void) {
         .max_load_factor = 0.5,  // Trigger resize at 50% load
         .min_load_factor = 0.0,  // Disable auto-shrink
         .tomb_threshold = 0.5,
-        .zombie_window = 0,      // Disable zombie
-        .zombie_window = 0       // Disable zombie
+        .zombie_window = 0
     };
     ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
     
@@ -198,7 +197,6 @@ static int test_sequential_resizes(void) {
         .initial_capacity = 32,
         .max_load_factor = 0.5,
         .min_load_factor = 0.0,
-        .zombie_window = 0,
         .zombie_window = 0
     };
     ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);

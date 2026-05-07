@@ -2939,6 +2939,125 @@ static int test_delete_tail_find_head(void) {
 }
 
 // ============================================================================
+// 71. ht_unsert basic insert
+// ============================================================================
+
+static int test_unsert_basic(void) {
+    printf("Test: unsert basic insert...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    assert(ht_unsert(t, "a", 1, "1", 1));
+    assert(ht_unsert(t, "b", 1, "2", 1));
+    assert(ht_unsert(t, "c", 1, "3", 1));
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 3);
+
+    const char *v = ht_find(t, "a", 1, NULL);
+    assert(v && memcmp(v, "1", 1) == 0);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 72. ht_unsert with_hash goes to spill
+// ============================================================================
+
+static int test_unsert_with_hash_spill(void) {
+    printf("Test: unsert with_hash spill...\n");
+    ht_table_t *t = ht_create(NULL, zero_hash, NULL, NULL);
+    assert(t != NULL);
+
+    assert(ht_unsert_with_hash(t, 0, "k", 1, "v1", 2));
+    assert(ht_unsert_with_hash(t, 1, "k", 1, "v2", 2));
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 2);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 73. ht_inc_with_hash normal hash
+// ============================================================================
+
+static int test_inc_with_hash_normal_hash(void) {
+    printf("Test: inc_with_hash normal hash...\n");
+    ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
+    assert(t != NULL);
+
+    uint64_t h = fnv1a_hash("x", 1, NULL);
+
+    bool ok = false;
+    int64_t r = ht_inc_with_hash(t, h, "x", 1, 10, &ok);
+    assert(ok && r == 10);
+
+    r = ht_inc_with_hash(t, h, "x", 1, 5, &ok);
+    assert(ok && r == 15);
+
+    r = ht_inc_with_hash(t, h, "x", 1, -3, &ok);
+    assert(ok && r == 12);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// 74. Spill remove all + reinsert
+// ============================================================================
+
+static int test_spill_remove_all_reinsert(void) {
+    printf("Test: spill remove all + reinsert...\n");
+    ht_table_t *t = ht_create(NULL, zero_hash, NULL, NULL);
+    assert(t != NULL);
+
+    for (int i = 0; i < 8; i++) {
+        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        int v = i * 3;
+        assert(ht_upsert(t, k, strlen(k), &v, sizeof(v)));
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 8);
+
+    for (int i = 0; i < 8; i++) {
+        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        assert(ht_remove(t, k, strlen(k)));
+    }
+
+    ht_stats(t, &st);
+    assert(st.size == 0);
+
+    for (int i = 0; i < 8; i++) {
+        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        int v = i * 7;
+        assert(ht_upsert(t, k, strlen(k), &v, sizeof(v)));
+    }
+
+    ht_stats(t, &st);
+    assert(st.size == 8);
+
+    for (int i = 0; i < 8; i++) {
+        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        const int *v = ht_find(t, k, strlen(k), NULL);
+        assert(v && *v == i * 7);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -3054,6 +3173,12 @@ int main(void) {
     fails += test_find_all_after_backshift();
     fails += test_delete_at_bshift_cap_boundary();
     fails += test_delete_tail_find_head();
+
+    // New tests (71-76): coverage gaps — unsert, bare iter spill path, spill remove
+    fails += test_unsert_basic();
+    fails += test_unsert_with_hash_spill();
+    fails += test_inc_with_hash_normal_hash();
+    fails += test_spill_remove_all_reinsert();
 
     printf("\n");
     if (fails == 0) {

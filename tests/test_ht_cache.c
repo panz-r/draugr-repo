@@ -663,177 +663,148 @@ static void test_pointer_stability(void) {
 
 /* ── Remove from LRU positions ────────────────────────────────── */
 
-static void test_remove_lru_head(void) {
-    ht_cache_t *c = create_test_cache(16);
+/* ── Remove and promote at LRU positions (each fresh cache) ───────── */
+static void test_lru_remove_and_promote_positions(void) {
+    /* ── remove_head: remove MRU → no eviction needed ── */
+    {
+        ht_cache_t *c = create_test_cache(16);
+        for (int i = 0; i < 5; i++) {
+            test_entry_t e = {.key = i, .value = i * 10};
+            ht_cache_put(c, &e, sizeof(e));
+        }
+        assert(ht_cache_size(c) == 5);
 
-    for (int i = 0; i < 5; i++) {
-        test_entry_t e = {.key = i, .value = i * 10};
+        int k4 = 4;
+        assert(ht_cache_remove(c, &k4, sizeof(k4)) == true);
+        assert(ht_cache_size(c) == 4);
+
+        test_entry_t e = {.key = 99, .value = 990};
+        void *p = ht_cache_put(c, &e, sizeof(e));
+        assert(p != NULL);
+        assert(ht_cache_size(c) == 5);
+
+        ht_cache_destroy(c);
+    }
+
+    /* ── remove_tail_then_evict: remove LRU, evict removes next LRU ── */
+    {
+        ht_cache_t *c = create_test_cache(16);
+        for (int i = 0; i < 5; i++) {
+            test_entry_t e = {.key = i, .value = i * 10};
+            ht_cache_put(c, &e, sizeof(e));
+        }
+        assert(ht_cache_size(c) == 5);
+
+        int k0 = 0;
+        assert(ht_cache_remove(c, &k0, sizeof(k0)) == true);
+        assert(ht_cache_size(c) == 4);
+
+        assert(ht_cache_evict(c) == true);
+        assert(ht_cache_size(c) == 3);
+
+        int k1 = 1;
+        assert(ht_cache_get(c, &k1, sizeof(k1)) == NULL);
+
+        int k2 = 2;
+        assert(ht_cache_get(c, &k2, sizeof(k2)) != NULL);
+
+        ht_cache_destroy(c);
+    }
+
+    /* ── remove_middle_then_evict: remove from middle, then evict LRU ── */
+    {
+        ht_cache_t *c = create_test_cache(16);
+        for (int i = 0; i < 5; i++) {
+            test_entry_t e = {.key = i, .value = i * 10};
+            ht_cache_put(c, &e, sizeof(e));
+        }
+        assert(ht_cache_size(c) == 5);
+
+        int km = 3;
+        assert(ht_cache_remove(c, &km, sizeof(km)) == true);
+        assert(ht_cache_size(c) == 4);
+        assert(ht_cache_get(c, &km, sizeof(km)) == NULL);
+
+        int k2 = 2;
+        assert(ht_cache_get(c, &k2, sizeof(k2)) != NULL);
+
+        assert(ht_cache_evict(c) == true);
+        assert(ht_cache_size(c) == 3);
+
+        ht_cache_destroy(c);
+    }
+
+    /* ── promote_head_noop: promote MRU → no eviction change ── */
+    {
+        ht_cache_t *c = create_test_cache(4);
+        test_entry_t entries[5];
+        for (int i = 0; i < 4; i++) {
+            entries[i].key = i;
+            entries[i].value = i * 10;
+            ht_cache_put(c, &entries[i], sizeof(test_entry_t));
+        }
+
+        int k3 = 3;
+        test_entry_t *found = ht_cache_get(c, &k3, sizeof(k3));
+        ht_cache_promote(c, found);
+
+        test_entry_t e = {.key = 99, .value = 990};
         ht_cache_put(c, &e, sizeof(e));
+        int k0 = 0;
+        assert(ht_cache_get(c, &k0, sizeof(k0)) == NULL);
+        assert(ht_cache_get(c, &k3, sizeof(k3)) != NULL);
+        ht_cache_destroy(c);
     }
-    assert(ht_cache_size(c) == 5);
 
-    /* Remove MRU (key=4, last inserted) */
-    int k4 = 4;
-    assert(ht_cache_remove(c, &k4, sizeof(k4)) == true);
-    assert(ht_cache_size(c) == 4);
+    /* ── promote_tail: promote LRU → evicts different entry ── */
+    {
+        ht_cache_t *c = create_test_cache(4);
+        test_entry_t entries[5];
+        for (int i = 0; i < 4; i++) {
+            entries[i].key = i;
+            entries[i].value = i * 10;
+            ht_cache_put(c, &entries[i], sizeof(test_entry_t));
+        }
 
-    /* Insert new → should NOT need eviction */
-    test_entry_t e = {.key = 99, .value = 990};
-    void *p = ht_cache_put(c, &e, sizeof(e));
-    assert(p != NULL);
-    assert(ht_cache_size(c) == 5);
+        int k0 = 0;
+        test_entry_t *found = ht_cache_get(c, &k0, sizeof(k0));
+        assert(found != NULL);
 
-    ht_cache_destroy(c);
-    printf("  PASS remove_lru_head\n");
-}
-
-static void test_remove_lru_tail(void) {
-    ht_cache_t *c = create_test_cache(16);
-
-    for (int i = 0; i < 5; i++) {
-        test_entry_t e = {.key = i, .value = i * 10};
+        test_entry_t e = {.key = 99, .value = 990};
         ht_cache_put(c, &e, sizeof(e));
+        int k1 = 1;
+        assert(ht_cache_get(c, &k1, sizeof(k1)) == NULL);
+        assert(ht_cache_get(c, &k0, sizeof(k0)) != NULL);
+        ht_cache_destroy(c);
     }
 
-    /* Remove LRU (key=0, first inserted) */
-    int k0 = 0;
-    assert(ht_cache_remove(c, &k0, sizeof(k0)) == true);
-    assert(ht_cache_size(c) == 4);
+    /* ── promote_middle: promote middle → evicts tail ── */
+    {
+        ht_cache_t *c = create_test_cache(4);
+        test_entry_t entries[5];
+        for (int i = 0; i < 4; i++) {
+            entries[i].key = i;
+            entries[i].value = i * 10;
+            ht_cache_put(c, &entries[i], sizeof(test_entry_t));
+        }
 
-    /* Evict should now remove key=1 (next LRU) */
-    assert(ht_cache_evict(c) == true);
-    assert(ht_cache_size(c) == 3);
-    int k1 = 1;
-    assert(ht_cache_get(c, &k1, sizeof(k1)) == NULL);
+        int k1 = 1;
+        test_entry_t *found = ht_cache_get(c, &k1, sizeof(k1));
+        assert(found != NULL);
 
-    /* key=2 still present */
-    int k2 = 2;
-    assert(ht_cache_get(c, &k2, sizeof(k2)) != NULL);
-
-    ht_cache_destroy(c);
-    printf("  PASS remove_lru_tail\n");
-}
-
-static void test_remove_lru_middle(void) {
-    ht_cache_t *c = create_test_cache(16);
-
-    for (int i = 0; i < 5; i++) {
-        test_entry_t e = {.key = i, .value = i * 10};
+        test_entry_t e = {.key = 99, .value = 990};
         ht_cache_put(c, &e, sizeof(e));
+        int k0 = 0;
+        assert(ht_cache_get(c, &k0, sizeof(k0)) == NULL);
+        assert(ht_cache_get(c, &k1, sizeof(k1)) != NULL);
+
+        int k2 = 2, k3 = 3;
+        assert(ht_cache_get(c, &k2, sizeof(k2)) != NULL);
+        assert(ht_cache_get(c, &k3, sizeof(k3)) != NULL);
+        ht_cache_destroy(c);
     }
-    /* LRU order (tail→head): 0, 1, 2, 3, 4 */
 
-    /* Remove from middle */
-    int k2 = 2;
-    assert(ht_cache_remove(c, &k2, sizeof(k2)) == true);
-    assert(ht_cache_size(c) == 4);
-
-    /* Verify key=2 is gone */
-    assert(ht_cache_get(c, &k2, sizeof(k2)) == NULL);
-
-    /* Verify eviction order preserved: LRU should be key=0 */
-    assert(ht_cache_evict(c) == true);
-    int k0 = 0;
-    assert(ht_cache_get(c, &k0, sizeof(k0)) == NULL);
-
-    /* Remaining: 1, 3, 4 */
-    int k1 = 1, k3 = 3, k4 = 4;
-    assert(ht_cache_get(c, &k1, sizeof(k1)) != NULL);
-    assert(ht_cache_get(c, &k3, sizeof(k3)) != NULL);
-    assert(ht_cache_get(c, &k4, sizeof(k4)) != NULL);
-
-    ht_cache_destroy(c);
-    printf("  PASS remove_lru_middle\n");
-}
-
-/* ── Promote at LRU positions ─────────────────────────────────── */
-
-static void test_promote_head_noop(void) {
-    ht_cache_t *c = create_test_cache(4);
-
-    test_entry_t entries[5];
-    for (int i = 0; i < 4; i++) {
-        entries[i].key = i;
-        entries[i].value = i * 10;
-        ht_cache_put(c, &entries[i], sizeof(test_entry_t));
-    }
-    /* MRU=key=3 */
-
-    /* Promote MRU → no-op */
-    int k3 = 3;
-    test_entry_t *found = ht_cache_get(c, &k3, sizeof(k3));
-    ht_cache_promote(c, found);
-
-    /* Insert one more → should evict key=0 (LRU unchanged) */
-    test_entry_t e = {.key = 99, .value = 990};
-    ht_cache_put(c, &e, sizeof(e));
-    int k0 = 0;
-    assert(ht_cache_get(c, &k0, sizeof(k0)) == NULL);
-    assert(ht_cache_get(c, &k3, sizeof(k3)) != NULL);
-
-    ht_cache_destroy(c);
-    printf("  PASS promote_head_noop\n");
-}
-
-static void test_promote_tail(void) {
-    ht_cache_t *c = create_test_cache(4);
-
-    test_entry_t entries[5];
-    for (int i = 0; i < 4; i++) {
-        entries[i].key = i;
-        entries[i].value = i * 10;
-        ht_cache_put(c, &entries[i], sizeof(test_entry_t));
-    }
-    /* LRU order (tail→head): 0, 1, 2, 3 */
-
-    /* Promote tail (key=0) to MRU */
-    int k0 = 0;
-    test_entry_t *found = ht_cache_get(c, &k0, sizeof(k0));
-    assert(found != NULL);
-    /* get auto-promotes */
-
-    /* Insert → evicts key=1 (new LRU) */
-    test_entry_t e = {.key = 99, .value = 990};
-    ht_cache_put(c, &e, sizeof(e));
-    int k1 = 1;
-    assert(ht_cache_get(c, &k1, sizeof(k1)) == NULL);
-    assert(ht_cache_get(c, &k0, sizeof(k0)) != NULL);
-
-    ht_cache_destroy(c);
-    printf("  PASS promote_tail\n");
-}
-
-static void test_promote_middle(void) {
-    ht_cache_t *c = create_test_cache(4);
-
-    test_entry_t entries[5];
-    for (int i = 0; i < 4; i++) {
-        entries[i].key = i;
-        entries[i].value = i * 10;
-        ht_cache_put(c, &entries[i], sizeof(test_entry_t));
-    }
-    /* LRU order (tail→head): 0, 1, 2, 3 */
-
-    /* Promote middle (key=1) */
-    int k1 = 1;
-    test_entry_t *found = ht_cache_get(c, &k1, sizeof(k1));
-    assert(found != NULL);
-
-    /* LRU order now (tail→head): 0, 2, 3, 1 */
-
-    /* Insert → evicts key=0 */
-    test_entry_t e = {.key = 99, .value = 990};
-    ht_cache_put(c, &e, sizeof(e));
-    int k0 = 0;
-    assert(ht_cache_get(c, &k0, sizeof(k0)) == NULL);
-    assert(ht_cache_get(c, &k1, sizeof(k1)) != NULL);
-
-    int k2 = 2, k3 = 3;
-    assert(ht_cache_get(c, &k2, sizeof(k2)) != NULL);
-    assert(ht_cache_get(c, &k3, sizeof(k3)) != NULL);
-
-    ht_cache_destroy(c);
-    printf("  PASS promote_middle\n");
+    printf("  PASS lru_remove_and_promote_positions\n");
 }
 
 /* ── Drain and refill ─────────────────────────────────────────── */
@@ -4946,12 +4917,11 @@ static void test_iter_slot_order(void) {
     }
 
     /* Collect keys in iteration order */
-    int iter_keys[4];
     int count = 0;
     ht_cache_iter_t it = ht_cache_iter_begin(c);
     void *entry;
     while (ht_cache_iter_next(c, &it, &entry)) {
-        iter_keys[count++] = ((test_entry_t *)entry)->key;
+        count++;
     }
     assert(count == 4);
 
@@ -5896,7 +5866,8 @@ static void test_capacity3_evict_cycle(void) {
 
         /* Access the MRU entry to promote it */
         int mru_key = 2 + round;
-        test_entry_t *mru = ht_cache_get(c, &mru_key, sizeof(mru_key));
+        (void)mru_key; /* suppress unused warning */
+        ht_cache_get(c, &mru_key, sizeof(mru_key));
 
         /* Put a new entry */
         test_entry_t e = {.key = 100 + round, .value = round};
@@ -7054,6 +7025,186 @@ static void test_evict_mixed_collision(void) {
  *  Round 8: Final uncovered sequences (A,B,D,F,J,N,O,Q)
  *  ──────────────────────────────────────────────────────────────── */
 
+/* ══════════════════════════════════════════════════════════════════
+ * Coverage gaps: ht_cache_find edge cases + promote oob + bare spill
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── ht_cache_find: scan_fn returns true for all → empty result ─── */
+static void test_find_empty_result_all_visited(void) {
+    ht_cache_config_t cfg = {
+        .capacity   = 16,
+        .entry_size = sizeof(test_entry_t),
+        .hash_fn    = collision_hash_fn,
+        .eq_fn      = collision_eq_fn,
+    };
+    ht_cache_t *c = ht_cache_create(&cfg);
+    assert(c != NULL);
+
+    for (int i = 0; i < 5; i++) {
+        test_entry_t e = {.key = i, .value = i * 10};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+
+    simple_scan_ctx_t ctx = {.target_key = 999, .result = NULL};
+    void *found = ht_cache_find(c, 42, simple_scan_fn, &ctx);
+    assert(found == NULL);
+    assert(ctx.result == NULL);
+
+    ht_cache_destroy(c);
+    printf("  PASS find_empty_result_all_visited\n");
+}
+
+/* ── ht_cache_find: scan_fn with NULL user_ctx ─── */
+static int g_scan_count;
+
+static bool scan_count_cb(void *entry, void *ctx) {
+    (void)entry;
+    (void)ctx;
+    g_scan_count++;
+    return true;
+}
+
+static void test_find_null_scan_ctx(void) {
+    ht_cache_config_t cfg = {
+        .capacity   = 16,
+        .entry_size = sizeof(test_entry_t),
+        .hash_fn    = collision_hash_fn,
+        .eq_fn      = collision_eq_fn,
+    };
+    ht_cache_t *c = ht_cache_create(&cfg);
+    assert(c != NULL);
+
+    for (int i = 0; i < 4; i++) {
+        test_entry_t e = {.key = i, .value = i * 10};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+
+    g_scan_count = 0;
+    void *found = ht_cache_find(c, 42, scan_count_cb, NULL);
+    assert(found == NULL);
+    assert(g_scan_count == 4);
+
+    ht_cache_destroy(c);
+    printf("  PASS find_null_scan_ctx\n");
+}
+
+/* ── ht_cache_find: scan stops at 3rd callback (early stop) ─── */
+static bool stop_at_3_cb(void *entry, void *ctx) {
+    (void)entry;
+    int *stop_count = (int *)ctx;
+    (*stop_count)++;
+    return *stop_count < 3;
+}
+
+static void test_find_multiple_matches_early_stop(void) {
+    ht_cache_config_t cfg = {
+        .capacity   = 32,
+        .entry_size = sizeof(test_entry_t),
+        .hash_fn    = collision_hash_fn,
+        .eq_fn      = collision_eq_fn,
+    };
+    ht_cache_t *c = ht_cache_create(&cfg);
+    assert(c != NULL);
+
+    for (int i = 0; i < 8; i++) {
+        test_entry_t e = {.key = i, .value = i * 100};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+
+    int stop_count = 0;
+    void *found = ht_cache_find(c, 42, stop_at_3_cb, &stop_count);
+    assert(found != NULL);
+    assert(stop_count == 3);
+
+    test_entry_t *e = found;
+    assert(e->key >= 0 && e->key < 8);
+    assert(e->value == e->key * 100);
+
+    ht_cache_destroy(c);
+    printf("  PASS find_multiple_matches_early_stop\n");
+}
+
+/* ── ht_cache_find: no match after full scan (scan returns true for all) ─── */
+static bool never_stop_cb(void *entry, void *ctx) {
+    (void)entry; (void)ctx;
+    return true;
+}
+
+static void test_find_no_match_after_full_scan(void) {
+    ht_cache_config_t cfg = {
+        .capacity   = 16,
+        .entry_size = sizeof(test_entry_t),
+        .hash_fn    = collision_hash_fn,
+        .eq_fn      = collision_eq_fn,
+    };
+    ht_cache_t *c = ht_cache_create(&cfg);
+    assert(c != NULL);
+
+    for (int i = 0; i < 4; i++) {
+        test_entry_t e = {.key = i, .value = i * 10};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+
+    void *found = ht_cache_find(c, 42, never_stop_cb, NULL);
+    assert(found == NULL);
+
+    ht_cache_destroy(c);
+    printf("  PASS find_no_match_after_full_scan\n");
+}
+
+/* ── ht_cache_promote: out-of-bounds pointer handled gracefully ─── */
+static void test_promote_out_of_bounds(void) {
+    ht_cache_t *c = create_test_cache(8);
+    assert(c != NULL);
+
+    test_entry_t e1 = {.key = 1, .value = 10};
+    ht_cache_put(c, &e1, sizeof(e1));
+
+    ht_cache_promote(c, NULL);
+
+    test_entry_t e2 = {.key = 2, .value = 20};
+    ht_cache_put(c, &e2, sizeof(e2));
+    int k2 = 2;
+    test_entry_t *found = ht_cache_get(c, &k2, sizeof(k2));
+    assert(found != NULL && found->value == 20);
+
+    int k1 = 1;
+    found = ht_cache_get(c, &k1, sizeof(k1));
+    assert(found != NULL && found->value == 10);
+
+    ht_cache_destroy(c);
+    printf("  PASS promote_out_of_bounds\n");
+}
+
+/* ── ht_cache_find: hash with no entries ─── */
+static void test_find_hash_no_entries(void) {
+    ht_cache_config_t cfg = {
+        .capacity   = 16,
+        .entry_size = sizeof(test_entry_t),
+        .hash_fn    = collision_hash_fn,
+        .eq_fn      = collision_eq_fn,
+    };
+    ht_cache_t *c = ht_cache_create(&cfg);
+    assert(c != NULL);
+
+    for (int i = 0; i < 4; i++) {
+        test_entry_t e = {.key = i, .value = i * 10};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+
+    simple_scan_ctx_t ctx = {.target_key = 999, .result = NULL};
+    void *found = ht_cache_find(c, 0, simple_scan_fn, &ctx);
+    assert(found == NULL);
+
+    ctx.target_key = 3;
+    found = ht_cache_find(c, 42, simple_scan_fn, &ctx);
+    assert(found != NULL);
+    assert(((test_entry_t *)found)->key == 3);
+
+    ht_cache_destroy(c);
+    printf("  PASS find_hash_no_entries\n");
+}
+
 /* R8-A. find-only lifecycle: put → find → promote → find → modify → find → remove → find (no get) */
 static void test_find_only_lifecycle(void) {
     ht_cache_config_t cfg = {
@@ -7723,7 +7874,9 @@ static void test_data_isolation_across_entries(void) {
     test_entry_t eA = {.key = 10, .value = 100};
     test_entry_t eB = {.key = 20, .value = 200};
     void *pA = ht_cache_put(c, &eA, sizeof(eA));
+    (void)pA; /* suppress unused warning */
     void *pB = ht_cache_put(c, &eB, sizeof(eB));
+    (void)pB; /* suppress unused warning */
 
     /* Get B, modify B */
     int kB = 20;
@@ -7889,6 +8042,7 @@ static void test_double_find_promote_then_evict(void) {
 
     /* Find key=1 → NULL */
     pick_nth_ctx_t pc = {.target_index = 0, .current_index = 0};
+    (void)pc; /* suppress unused warning */
     /* Can't use pick_nth to find specific key, use get instead */
     assert(ht_cache_get(c, &k1, sizeof(k1)) == NULL);
 
@@ -8389,12 +8543,7 @@ int main(void) {
     test_duplicate_keys();
     test_in_place_mutation();
     test_pointer_stability();
-    test_remove_lru_head();
-    test_remove_lru_tail();
-    test_remove_lru_middle();
-    test_promote_head_noop();
-    test_promote_tail();
-    test_promote_middle();
+    test_lru_remove_and_promote_positions();
     test_evict_all();
     test_remove_all_then_refill();
     test_remove_reinsert();
@@ -8589,6 +8738,28 @@ int main(void) {
     test_spill_lane_find_cycle();
     test_drain_then_find_get_iter();
     test_evict_mixed_collision();
+
+    /* ══════════════════════════════════════════════════════════════════
+     * Coverage gaps: ht_cache_find edge cases + promote oob + bare spill
+     * ══════════════════════════════════════════════════════════════════ */
+
+    /* ── ht_cache_find: scan_fn returns true for all → empty result ─── */
+    test_find_empty_result_all_visited();
+
+    /* ── ht_cache_find: scan_fn with NULL user_ctx ─── */
+    test_find_null_scan_ctx();
+
+    /* ── ht_cache_find: scan stops at 3rd callback (early stop) ─── */
+    test_find_multiple_matches_early_stop();
+
+    /* ── ht_cache_find: no match after full scan (scan returns true for all) ─── */
+    test_find_no_match_after_full_scan();
+
+    /* ── ht_cache_promote: out-of-bounds pointer handled gracefully ─── */
+    test_promote_out_of_bounds();
+
+    /* ── ht_cache_find: hash with no entries ─── */
+    test_find_hash_no_entries();
 
     /* Edge cases round 8: final uncovered sequences */
     test_find_only_lifecycle();

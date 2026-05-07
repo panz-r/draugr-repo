@@ -23,121 +23,15 @@
  * falls in this range go to a small "spill lane" instead of the main table.
  */
 
-#include "draugr/ht.h"
+#include "draugr/ht_internal.h"
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 // ============================================================================
-// Entry Type (high-level only)
-// ============================================================================
-
-typedef struct {
-    uint16_t key_len;
-    uint16_t hash_hi;      // upper 16 bits of full 64-bit hash
-    uint32_t val_len;
-    uint32_t arena_offset;
-} ht_entry_t;  // 12 bytes
-
-// ============================================================================
-// Sentinels & Pack/Unpack
-// ============================================================================
-
-#define HASH_EMPTY     0ULL
-#define HASH_TOMB      1ULL
-#define HASH_MASK      0x0000FFFFFFFFFFFFULL
-#define VAL_NONE       UINT32_MAX
-
-static inline uint64_t hpd_hash(uint64_t hpd) {
-    return hpd & HASH_MASK;
-}
-
-static inline uint16_t hpd_pd(uint64_t hpd) {
-    return (uint16_t)(hpd >> 48);
-}
-
-static inline bool hpd_empty(uint64_t hpd) {
-    return hpd_hash(hpd) == HASH_EMPTY;
-}
-
-static inline bool hpd_tomb(uint64_t hpd) {
-    return hpd_hash(hpd) == HASH_TOMB;
-}
-
-static inline bool hpd_available(uint64_t hpd) {
-    return hpd_hash(hpd) <= HASH_TOMB;
-}
-
-static inline bool hpd_live(uint64_t hpd) {
-    return hpd_hash(hpd) >= 2;
-}
-
-static inline uint64_t hpd_pack(uint64_t hash, uint16_t probe_dist) {
-    return ((uint64_t)probe_dist << 48) | (hash & HASH_MASK);
-}
-
-// ============================================================================
-// Bare Table Structure
-// ============================================================================
-
-struct ht_bare {
-    // Main table (SoA probe arrays)
-    uint64_t   *hash_pd;
-    uint32_t   *vals;
-    size_t      capacity;
-    size_t      size;
-    size_t      tombstone_cnt;
-
-    // Spill lane
-    uint64_t   *spill_hash_pd;
-    uint32_t   *spill_vals;
-    size_t      spill_cap;
-    size_t      spill_len;
-
-    // Config
-    double      max_load_factor;
-    double      min_load_factor;
-    double      tomb_threshold;
-    size_t      zombie_window;
-
-    // Zombie rebuild state
-    size_t      zombie_cursor;
-
-    bool        resizing;
-};
-
-// ============================================================================
-// High-Level Table Structure
-// ============================================================================
-
-struct ht_table {
-    ht_bare_t   bare;             // Embedded bare table
-
-    // Entry storage
-    ht_entry_t *entries;
-    size_t      entry_count;
-    size_t      entry_cap;
-
-    // Arena (key+value bytes)
-    uint8_t    *arena;
-    size_t      arena_size;
-    size_t      arena_cap;
-
-    // Functions
-    ht_hash_fn  hash_fn;
-    ht_eq_fn    eq_fn;
-    void       *user_ctx;
-};
-
-// ============================================================================
 // Constants
 // ============================================================================
-
-#define C_P_DEFAULT 3.0
-#define C_B_DEFAULT 3.0
-#define SPILL_INITIAL 8
-#define BSHIFT_CAP 16
 
 static const ht_config_t default_cfg = {
     .initial_capacity = 64,
@@ -156,7 +50,7 @@ static const ht_config_t default_cfg = {
 // Utility
 // ============================================================================
 
-static size_t next_pow2(size_t n) {
+size_t next_pow2(size_t n) {
     size_t r = 1;
     while (r < n) r <<= 1;
     return r;
@@ -166,7 +60,7 @@ static size_t next_pow2(size_t n) {
 // Bare Internal: Compute X
 // ============================================================================
 
-static double bare_compute_x(const ht_bare_t *t) {
+double bare_compute_x(const ht_bare_t *t) {
     double lf = (double)t->size / (double)t->capacity;
     if (lf >= 1.0) return (double)t->capacity;
     if (lf < 0.01) return 1.0;
@@ -177,7 +71,7 @@ static double bare_compute_x(const ht_bare_t *t) {
 // Bare Internal: Spill Lane
 // ============================================================================
 
-static bool bare_spill_grow(ht_bare_t *t) {
+bool bare_spill_grow(ht_bare_t *t) {
     size_t new_cap = t->spill_cap ? t->spill_cap * 2 : SPILL_INITIAL;
 
     uint64_t *new_hpd = realloc(t->spill_hash_pd, new_cap * sizeof(uint64_t));
@@ -198,7 +92,7 @@ static bool bare_spill_grow(ht_bare_t *t) {
     return true;
 }
 
-static bool bare_spill_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
+bool bare_spill_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
     if (t->spill_len >= t->spill_cap) {
         if (!bare_spill_grow(t)) return false;
     }
@@ -209,7 +103,7 @@ static bool bare_spill_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
     return true;
 }
 
-static bool bare_spill_find(const ht_bare_t *t, uint64_t h48, uint32_t *out_val) {
+bool bare_spill_find(const ht_bare_t *t, uint64_t h48, uint32_t *out_val) {
     for (size_t i = 0; i < t->spill_len; i++) {
         if (hpd_hash(t->spill_hash_pd[i]) == h48) {
             if (out_val) *out_val = t->spill_vals[i];
@@ -219,8 +113,8 @@ static bool bare_spill_find(const ht_bare_t *t, uint64_t h48, uint32_t *out_val)
     return false;
 }
 
-static void bare_spill_find_all(const ht_bare_t *t, uint64_t h48,
-                                ht_bare_callback cb, void *user_ctx) {
+void bare_spill_find_all(const ht_bare_t *t, uint64_t h48,
+                         ht_bare_callback cb, void *user_ctx) {
     for (size_t i = 0; i < t->spill_len; i++) {
         if (hpd_hash(t->spill_hash_pd[i]) == h48) {
             if (!cb(t->spill_vals[i], user_ctx))
@@ -229,7 +123,7 @@ static void bare_spill_find_all(const ht_bare_t *t, uint64_t h48,
     }
 }
 
-static size_t bare_spill_remove(ht_bare_t *t, uint64_t h48) {
+size_t bare_spill_remove(ht_bare_t *t, uint64_t h48) {
     size_t removed = 0;
     for (size_t i = 0; i < t->spill_len; ) {
         if (hpd_hash(t->spill_hash_pd[i]) == h48) {
@@ -249,7 +143,7 @@ static size_t bare_spill_remove(ht_bare_t *t, uint64_t h48) {
     return removed;
 }
 
-static bool bare_spill_remove_val(ht_bare_t *t, uint64_t h48, uint32_t val) {
+bool bare_spill_remove_val(ht_bare_t *t, uint64_t h48, uint32_t val) {
     for (size_t i = 0; i < t->spill_len; i++) {
         if (hpd_hash(t->spill_hash_pd[i]) == h48 && t->spill_vals[i] == val) {
             memmove(&t->spill_hash_pd[i], &t->spill_hash_pd[i + 1],
@@ -270,9 +164,7 @@ static bool bare_spill_remove_val(ht_bare_t *t, uint64_t h48, uint32_t val) {
 // Bare Internal: Robin-Hood Insert (always-add)
 // ============================================================================
 
-static bool bare_resize_table(ht_bare_t *t);
-
-static bool bare_rh_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
+bool bare_rh_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
     size_t cap_mask = t->capacity - 1;
     size_t ideal = h48 & cap_mask;
 
@@ -337,7 +229,7 @@ static bool bare_rh_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
 // Bare Internal: Delete Compact / Backward Shift
 // ============================================================================
 
-static bool bare_verify_ideal_safe(const ht_bare_t *t, size_t idx, size_t len) {
+bool bare_verify_ideal_safe(const ht_bare_t *t, size_t idx, size_t len) {
     size_t cap_mask = t->capacity - 1;
     size_t write_offset = 0;
     for (size_t i = 0; i < len; i++) {
@@ -353,7 +245,7 @@ static bool bare_verify_ideal_safe(const ht_bare_t *t, size_t idx, size_t len) {
     return true;
 }
 
-static void bare_commit_backward_shift(ht_bare_t *t, size_t idx, size_t len) {
+void bare_commit_backward_shift(ht_bare_t *t, size_t idx, size_t len) {
     size_t cap_mask = t->capacity - 1;
     size_t write_offset = 0;
     for (size_t i = 0; i < len; i++) {
@@ -375,7 +267,7 @@ static void bare_commit_backward_shift(ht_bare_t *t, size_t idx, size_t len) {
     t->tombstone_cnt--;
 }
 
-static void bare_delete_compact(ht_bare_t *t, size_t idx) {
+void bare_delete_compact(ht_bare_t *t, size_t idx) {
     size_t cap_mask = t->capacity - 1;
 
     size_t chain_len = 0;
@@ -408,7 +300,7 @@ static void bare_delete_compact(ht_bare_t *t, size_t idx) {
 // Bare Internal: Zombie Step
 // ============================================================================
 
-static void bare_zombie_step(ht_bare_t *t) {
+void bare_zombie_step(ht_bare_t *t) {
     if (t->zombie_window == 0) return;
 
     double x = bare_compute_x(t);
@@ -441,7 +333,7 @@ static void bare_zombie_step(ht_bare_t *t) {
 // Bare Internal: Prophylactic Tombstones & Reinsert
 // ============================================================================
 
-static void bare_place_prophylactic_tombstones(ht_bare_t *t) {
+void bare_place_prophylactic_tombstones(ht_bare_t *t) {
     double x = bare_compute_x(t);
     size_t spacing = (size_t)(x * C_P_DEFAULT);
     if (spacing < 4) spacing = 4;
@@ -455,7 +347,7 @@ static void bare_place_prophylactic_tombstones(ht_bare_t *t) {
     }
 }
 
-static void bare_reinsert_main(ht_bare_t *t,
+void bare_reinsert_main(ht_bare_t *t,
                                const uint64_t *old_hash_pd,
                                const uint32_t *old_vals,
                                size_t old_cap) {
@@ -466,7 +358,7 @@ static void bare_reinsert_main(ht_bare_t *t,
     }
 }
 
-static void bare_reinsert_spill(ht_bare_t *t,
+void bare_reinsert_spill(ht_bare_t *t,
                                 const uint64_t *old_spill_hash_pd,
                                 const uint32_t *old_spill_vals,
                                 size_t old_spill_len) {
@@ -735,7 +627,7 @@ bool ht_bare_remove_val(ht_bare_t *t, uint64_t hash, uint32_t val) {
 // Bare Public API: Resize / Compact
 // ============================================================================
 
-static bool bare_resize_table(ht_bare_t *t) {
+bool bare_resize_table(ht_bare_t *t) {
     return ht_bare_resize(t, t->capacity * 2);
 }
 
@@ -1048,7 +940,7 @@ void ht_bare_dump(const ht_bare_t *t, uint64_t hash, size_t count) {
 // High-Level Internal: Arena Management
 // ============================================================================
 
-static bool grow_arena(ht_table_t *t, size_t needed) {
+bool grow_arena(ht_table_t *t, size_t needed) {
     if (t->arena_size + needed <= t->arena_cap) return true;
     size_t new_cap = t->arena_cap ? t->arena_cap * 2 : 1024;
     while (new_cap < t->arena_size + needed) new_cap *= 2;
@@ -1060,7 +952,7 @@ static bool grow_arena(ht_table_t *t, size_t needed) {
     return true;
 }
 
-static void *arena_alloc(ht_table_t *t, size_t n) {
+void *arena_alloc(ht_table_t *t, size_t n) {
     if (!grow_arena(t, n)) return NULL;
     void *p = t->arena + t->arena_size;
     t->arena_size += n;
