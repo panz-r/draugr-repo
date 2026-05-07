@@ -109,7 +109,7 @@ bool ht_upsert_with_hash(ht_table_t *t, uint64_t hash,
                          const void *key, size_t key_len,
                          const void *value, size_t value_len);
 
-// ht_unsert: insert only if exact k,v pair doesn't exist.
+// ht_unsert (unique-insert): insert only if exact k,v pair doesn't exist.
 // Returns true if new entry, false if duplicate.
 bool ht_unsert(ht_table_t *t, const void *key, size_t key_len,
                const void *value, size_t value_len);
@@ -211,7 +211,7 @@ void ht_bare_dump(const ht_bare_t *t, uint64_t hash, size_t count);
 
 // Returns NULL if invariants hold, or a static error string.
 // Invariants checked:
-//   1. probe_dist == (pos - ideal) % capacity for every live entry
+//   1. probe_dist == ((pos - ideal + capacity) % capacity) for every live entry
 //   2. probe_dists are non-decreasing within clusters (Robin-Hood invariant)
 //   3. size matches actual count of live entries
 //   4. tombstone_cnt matches actual count of tombstones

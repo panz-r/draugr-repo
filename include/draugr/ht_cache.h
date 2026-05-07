@@ -32,7 +32,7 @@ void        ht_cache_destroy(ht_cache_t *c);
 void        ht_cache_clear(ht_cache_t *c);
 
 /* Put: always-insert. Evicts LRU if full.
- * hash_fn is called on entry_data to compute hash.
+ * hash_fn is called on entry_data (which must contain key data) to compute hash.
  * Returns pointer to stored entry, NULL on OOM. */
 void *ht_cache_put(ht_cache_t *c, const void *entry_data, size_t entry_size);
 
