@@ -51,6 +51,8 @@ static const ht_config_t default_cfg = {
 // ============================================================================
 
 size_t next_pow2(size_t n) {
+    if (n == 0) return 1;
+    if ((n & (n - 1)) == 0) return n;
     size_t r = 1;
     while (r < n) r <<= 1;
     return r;

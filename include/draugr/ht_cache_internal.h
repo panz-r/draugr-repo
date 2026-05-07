@@ -59,21 +59,6 @@ size_t cache_next_pow2(size_t n);
 void   lru_add_head(ht_cache_t *c, uint32_t idx);
 void   lru_remove(ht_cache_t *c, uint32_t idx);
 void   lru_promote(ht_cache_t *c, uint32_t idx);
-void   lru_clear(ht_cache_t *c);
-
-uint32_t cache_alloc_slot(ht_cache_t *c);
-void     cache_free_slot(ht_cache_t *c, uint32_t idx);
-
-uint64_t cache_compute_hash(ht_cache_t *c, const void *key, size_t key_len);
-uint32_t cache_find_slot(ht_cache_t *c, uint64_t hash, const void *key, size_t key_len);
-uint32_t cache_find_slot_in_buckets(ht_cache_t *c, uint64_t hash, const void *key, size_t key_len);
-
-bool cache_add_to_buckets(ht_cache_t *c, uint64_t hash, uint32_t slot);
-bool cache_remove_from_buckets(ht_cache_t *c, uint64_t hash, uint32_t slot);
-void cache_clear_buckets(ht_cache_t *c);
-
-bool cache_buckets_grow(ht_cache_t *c);
-void cache_buckets_shrink(ht_cache_t *c);
 
 #ifdef __cplusplus
 }

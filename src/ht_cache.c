@@ -3,6 +3,8 @@
 #include <string.h>
 
 size_t cache_next_pow2(size_t n) {
+    if (n == 0) return 1;
+    if ((n & (n - 1)) == 0) return n;
     size_t r = 1;
     while (r < n) r <<= 1;
     return r;
@@ -104,7 +106,6 @@ typedef struct {
     ht_cache_t    *cache;
     const void    *key;
     size_t         key_len;
-    uint64_t       hash;
     uint32_t       matched_idx;
 } remove_scan_ctx_t;
 
@@ -290,7 +291,6 @@ bool ht_cache_remove(ht_cache_t *c, const void *key, size_t key_len) {
         .cache = c,
         .key = key,
         .key_len = key_len,
-        .hash = hash,
         .matched_idx = NONE,
     };
     ht_bare_find_all(c->bare, hash, remove_scan_cb, &ctx);
