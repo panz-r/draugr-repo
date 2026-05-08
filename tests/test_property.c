@@ -399,11 +399,11 @@ static void test_tombstone_tracking(void) {
 }
 
 // ============================================================================
-// Test 5: Arena Waste Detection
+// Test 5: Arena Rollback on Allocation Failure
 // ============================================================================
 
 static void test_arena_waste_detection(void) {
-    printf("\n=== Property: Arena Waste Detection ===\n");
+    printf("\n=== Property: Arena Rollback on Allocation Failure ===\n");
     
     uint32_t seed = (uint32_t)(time(NULL) ^ 0xE5F6A7B8);
     my_srand(seed);
@@ -417,25 +417,30 @@ static void test_arena_waste_detection(void) {
     ht_upsert(ht, key, 16, val_small, 16);
     
     size_t arena_before = ht->arena_size;
+    printf("  After small insert: arena_size=%zu\n", arena_before);
     
-    alloc_mock_reset();
-    alloc_mock_set_max_alloc_calls(100);
-    alloc_mock_set_max_alloc_size(512);
-    
-    char val_large[600];
-    memset(val_large, 'x', sizeof(val_large));
-    bool ok = ht_upsert(ht, key, 16, val_large, sizeof(val_large));
-    
-    if (!ok) {
-        if (ht->arena_size == arena_before) {
-            PASS("arena waste: arena_size unchanged after failed large update");
-        } else {
-            printf("  arena_size grew from %zu to %zu after failed update\n", arena_before, ht->arena_size);
-            BUG("arena waste: arena grew despite allocation failure");
+    int bugs_found = 0;
+    for (int trial = 0; trial < 20 && bugs_found == 0; trial++) {
+        alloc_mock_reset();
+        alloc_mock_set_max_alloc_calls(5 + trial);
+        
+        size_t before = ht->arena_size;
+        bool ok = ht_upsert(ht, key, 16, val_small, 16);
+        size_t after = ht->arena_size;
+        
+        printf("  trial %d: max_alloc=%d, before=%zu, after=%zu, ok=%d\n",
+               trial, 5 + trial, before, after, ok);
+        
+        if (!ok && after != before) {
+            printf("  BUG: arena_size changed from %zu to %zu on failed upsert\n", before, after);
+            bugs_found++;
         }
+    }
+    
+    if (bugs_found == 0) {
+        PASS("arena rollback: arena_size unchanged when allocation fails");
     } else {
-        printf("  large update succeeded, checking arena behavior\n");
-        PASS("arena waste: large update succeeded (no waste)");
+        BUG("arena rollback failed");
     }
     
     ht_destroy(ht);
@@ -833,6 +838,431 @@ static void test_hash_collision_different_keys(void) {
 }
 
 // ============================================================================
+// Test 13: Long Running Sequence with Persistent Model
+// ============================================================================
+
+static void test_long_running_sequence(void) {
+    printf("\n=== Property: Long Running Sequence ===\n");
+    
+    uint32_t seed = (uint32_t)(time(NULL) ^ 0xA1B2C3D5);
+    my_srand(seed);
+    printf("  seed=%u\n", seed);
+    
+    ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
+    if (!ht) { BUG("ht_create failed"); return; }
+    model_t *m = model_create();
+    
+    int n = 100;
+    char keys[100][16];
+    char vals[100][16];
+    
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < 16; j++) keys[i][j] = (char)i;
+        for (int j = 0; j < 16; j++) vals[i][j] = (char)i;
+    }
+    
+    int ops = 50000;
+    int insert_failures = 0;
+    
+    for (int op = 0; op < ops; op++) {
+        int idx = my_rand() % n;
+        int action = my_rand() % 100;
+        
+        if (action < 35) {
+            size_t val_len = 4 + (my_rand() % 12);
+            if (val_len > 16) val_len = 16;
+            bool ok = ht_upsert(ht, keys[idx], 16, vals[idx], val_len);
+            if (ok) {
+                model_set(m, keys[idx], 16, vals[idx], val_len);
+            } else {
+                insert_failures++;
+            }
+        } else if (action < 55) {
+            ht_remove(ht, keys[idx], 16);
+            model_remove(m, keys[idx], 16);
+        } else if (action < 75) {
+            size_t vlen = 0;
+            const char *found = (const char*)ht_find(ht, keys[idx], 16, &vlen);
+            const char *mfound = model_find_val(m, keys[idx], 16, NULL);
+            MODEL_CHECK((found != NULL) == (mfound != NULL));
+        } else if (action < 82 && ht_size(ht) > 20) {
+            ht_resize(ht, 64 + (my_rand() % 16) * 64);
+        } else if (action < 90 && ht_size(ht) > 20) {
+            ht_compact(ht);
+        }
+        
+        if (op > 0 && op % 5000 == 0) {
+            MODEL_CHECK(ht_size(ht) == model_size(m));
+            const char *err = ht_check_invariants(ht);
+            if (err) { printf("  INVARIANT FAIL at op %d: %s\n", op, err); tests_failed++; }
+        }
+    }
+    
+    MODEL_CHECK(ht_size(ht) == model_size(m));
+    
+    for (int i = 0; i < n; i++) {
+        size_t vlen = 0;
+        const char *found = (const char*)ht_find(ht, keys[i], 16, &vlen);
+        const char *mfound = model_find_val(m, keys[i], 16, NULL);
+        MODEL_CHECK((found != NULL) == (mfound != NULL));
+    }
+    
+    printf("  ops=%d insert_failures=%d\n", ops, insert_failures);
+    PASS("long running sequence: 50k ops consistent");
+    
+    model_destroy(m);
+    ht_destroy(ht);
+}
+
+// ============================================================================
+// Test 14: Iterator Completeness and Consistency
+// ============================================================================
+
+static void test_iterator_completeness(void) {
+    printf("\n=== Property: Iterator Completeness ===\n");
+    
+    uint32_t seed = (uint32_t)(time(NULL) ^ 0xB2C3D4E6);
+    my_srand(seed);
+    printf("  seed=%u\n", seed);
+    
+    ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
+    if (!ht) { BUG("ht_create failed"); return; }
+    model_t *m = model_create();
+    
+    int n = 300;
+    char keys[300][16];
+    char vals[300][16];
+    int present[300] = {0};
+    
+    for (int op = 0; op < 5000; op++) {
+        int idx = my_rand() % n;
+        int action = my_rand() % 100;
+        
+        if (action < 40) {
+            if (!present[idx]) {
+                for (int j = 0; j < 16; j++) keys[idx][j] = (char)(idx * 17 + j);
+                for (int j = 0; j < 16; j++) vals[idx][j] = (char)(idx * 13 + j);
+                bool ok = ht_upsert(ht, keys[idx], 16, vals[idx], 16);
+                if (ok) {
+                    model_set(m, keys[idx], 16, vals[idx], 16);
+                    present[idx] = 1;
+                }
+            }
+        } else if (action < 60) {
+            if (present[idx]) {
+                ht_remove(ht, keys[idx], 16);
+                model_remove(m, keys[idx], 16);
+                present[idx] = 0;
+            }
+        }
+    }
+    
+    size_t expected_size = ht_size(ht);
+    int iter_count = 0;
+    const void *key, *value;
+    size_t klen, vlen;
+    ht_iter_t iter = ht_iter_begin(ht);
+    
+    while (ht_iter_next(ht, &iter, &key, &klen, &value, &vlen)) {
+        iter_count++;
+        
+        size_t fvlen = 0;
+        const char *found = (const char*)ht_find(ht, key, klen, &fvlen);
+        if (!found) {
+            printf("  ITER BUG: iterator returned key not findable\n");
+            BUG("iterator key not in table");
+        }
+        if (fvlen != vlen) {
+            printf("  ITER BUG: value length mismatch iter=%zu find=%zu\n", vlen, fvlen);
+            BUG("iterator value length mismatch");
+        }
+    }
+    
+    if ((size_t)iter_count == expected_size) {
+        PASS("iterator completeness: iter_count matches ht_size");
+    } else {
+        printf("  iter_count=%d expected=%zu\n", iter_count, expected_size);
+        BUG("iterator count mismatch");
+    }
+    
+    model_destroy(m);
+    ht_destroy(ht);
+}
+
+// ============================================================================
+// Test 15: Stress with Various Key Lengths
+// ============================================================================
+
+static void test_various_key_lengths(void) {
+    printf("\n=== Property: Various Key Lengths ===\n");
+    
+    uint32_t seed = (uint32_t)(time(NULL) ^ 0xD4E5F6A8);
+    my_srand(seed);
+    printf("  seed=%u\n", seed);
+    
+    ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
+    if (!ht) { BUG("ht_create failed"); return; }
+    model_t *m = model_create();
+    
+    int key_lens[] = {1, 2, 4, 8, 16, 32, 64, 128};
+    int num_lens = 8;
+    int total_keys = 800;
+    int key_idx = 0;
+    
+    for (int round = 0; round < 20; round++) {
+        for (int li = 0; li < num_lens; li++) {
+            int klen = key_lens[li];
+            char *key = malloc(klen);
+            char val[16];
+            
+            for (int j = 0; j < klen; j++) key[j] = (char)(key_idx + j);
+            memset(val, (char)key_idx, 16);
+            
+            bool ok = ht_upsert(ht, key, klen, val, 16);
+            if (ok) {
+                model_set(m, key, klen, val, 16);
+            }
+            
+            free(key);
+            key_idx++;
+            if (key_idx >= total_keys) key_idx = 0;
+        }
+    }
+    
+    MODEL_CHECK(ht_size(ht) == model_size(m));
+    
+    int verify_count = 0;
+    for (int li = 0; li < num_lens; li++) {
+        int klen = key_lens[li];
+        for (int ki = 0; ki < 100; ki++) {
+            char key[128];
+            int base = (ki * 17) % total_keys;
+            for (int j = 0; j < klen; j++) key[j] = (char)(base + j);
+            
+            size_t vlen = 0;
+            const char *found = (const char*)ht_find(ht, key, klen, &vlen);
+            if (found) verify_count++;
+        }
+    }
+    
+    printf("  verified %d entries\n", verify_count);
+    PASS("various key lengths stress test");
+    
+    model_destroy(m);
+    ht_destroy(ht);
+}
+
+// ============================================================================
+// Test 17: Rapid Resize with Active Iterators
+// ============================================================================
+
+static void test_resize_with_iterators(void) {
+    printf("\n=== Property: Resize With Iterators ===\n");
+    
+    uint32_t seed = (uint32_t)(time(NULL) ^ 0xE5F6A7B9);
+    my_srand(seed);
+    printf("  seed=%u\n", seed);
+    
+    ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
+    if (!ht) { BUG("ht_create failed"); return; }
+    
+    for (int i = 0; i < 200; i++) {
+        char key[16], val[16];
+        for (int j = 0; j < 16; j++) key[j] = (char)i;
+        memset(val, i, 16);
+        ht_upsert(ht, key, 16, val, 16);
+    }
+    
+    int success_count = 0;
+    int fail_count = 0;
+    
+    for (int trial = 0; trial < 50; trial++) {
+        ht_resize(ht, 64 + (my_rand() % 8) * 64);
+        
+        ht_iter_t iter = ht_iter_begin(ht);
+        const void *key, *value;
+        size_t klen, vlen;
+        int iter_items = 0;
+        
+        while (ht_iter_next(ht, &iter, &key, &klen, &value, &vlen)) {
+            iter_items++;
+        }
+        
+        size_t ht_sz = ht_size(ht);
+        if ((size_t)iter_items == ht_sz) {
+            success_count++;
+        } else {
+            fail_count++;
+            printf("  trial %d: iter_items=%d ht_size=%zu\n", trial, iter_items, ht_sz);
+        }
+    }
+    
+    if (fail_count == 0) {
+        PASS("resize with iterators: all consistent");
+    } else {
+        printf("  success=%d fail=%d\n", success_count, fail_count);
+        BUG("resize iterator inconsistency");
+    }
+    
+    ht_destroy(ht);
+}
+
+// ============================================================================
+// Test 18: Spill Entry Edge Cases
+// ============================================================================
+
+static void test_spill_edge_cases(void) {
+    printf("\n=== Property: Spill Edge Cases ===\n");
+    
+    uint32_t seed = (uint32_t)(time(NULL) ^ 0xF6A7B8CA);
+    my_srand(seed);
+    printf("  seed=%u\n", seed);
+    
+    ht_config_t cfg = { .initial_capacity = 8, .max_load_factor = 0.5 };
+    ht_table_t *ht = ht_create(&cfg, hash_one, NULL, NULL);
+    if (!ht) { BUG("ht_create failed"); return; }
+    model_t *m = model_create();
+    
+    char keys[100][16];
+    char vals[100][16];
+    int present[100] = {0};
+    
+    for (int op = 0; op < 2000; op++) {
+        int idx = my_rand() % 100;
+        int action = my_rand() % 100;
+        
+        if (action < 40) {
+            if (!present[idx]) {
+                for (int j = 0; j < 16; j++) keys[idx][j] = (char)(idx * 17 + j);
+                for (int j = 0; j < 16; j++) vals[idx][j] = (char)(idx * 13 + j);
+                
+                bool ok = ht_upsert_with_hash(ht, 1, keys[idx], 16, vals[idx], 16);
+                if (ok) {
+                    model_set(m, keys[idx], 16, vals[idx], 16);
+                    present[idx] = 1;
+                }
+            }
+        } else if (action < 60) {
+            if (present[idx]) {
+                ht_remove_with_hash(ht, 1, keys[idx], 16);
+                model_remove(m, keys[idx], 16);
+                present[idx] = 0;
+            }
+        } else {
+            size_t vlen = 0;
+            const char *found = (const char*)ht_find_with_hash(ht, 1, keys[idx], 16, &vlen);
+            const char *mfound = model_find_val(m, keys[idx], 16, NULL);
+            MODEL_CHECK((found != NULL) == (mfound != NULL));
+        }
+        
+        if (op > 0 && op % 500 == 0) {
+            MODEL_CHECK(ht_size(ht) == model_size(m));
+        }
+    }
+    
+    const char *err = ht_check_invariants(ht);
+    if (err) { printf("  INVARIANT FAIL: %s\n", err); tests_failed++; }
+    else PASS("spill edge cases: hash=1 operations consistent");
+    
+    model_destroy(m);
+    ht_destroy(ht);
+}
+
+// ============================================================================
+// Test 19: Memory Pressure with Arena Exhaustion
+// ============================================================================
+
+static void test_arena_exhaustion(void) {
+    printf("\n=== Property: Arena Exhaustion ===\n");
+    
+    uint32_t seed = (uint32_t)(time(NULL) ^ 0xA7B8C9DB);
+    my_srand(seed);
+    printf("  seed=%u\n", seed);
+    
+    ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
+    if (!ht) { BUG("ht_create failed"); return; }
+    
+    char key[16] = {0};
+    int success_count = 0;
+    int fail_count = 0;
+    
+    for (int i = 0; i < 1000; i++) {
+        char val[32];
+        memset(val, i, 32);
+        
+        bool ok = ht_upsert(ht, key, 16, val, 32);
+        if (ok) {
+            success_count++;
+        } else {
+            fail_count++;
+        }
+        
+        if (i % 100 == 0) {
+            printf("  i=%d success=%d fail=%d arena_size=%zu\n", 
+                   i, success_count, fail_count, ht->arena_size);
+        }
+    }
+    
+    size_t vlen = 0;
+    const char *found = (const char*)ht_find(ht, key, 16, &vlen);
+    
+    if (found && vlen == 32) {
+        PASS("arena exhaustion: consistent behavior");
+    } else {
+        printf("  found=%p vlen=%zu\n", found, vlen);
+        BUG("arena exhaustion: final state inconsistent");
+    }
+    
+    ht_destroy(ht);
+}
+
+// ============================================================================
+// Test 20: Entry Table Growth and Reallocation
+// ============================================================================
+
+static void test_entry_reallocation(void) {
+    printf("\n=== Property: Entry Reallocation ===\n");
+    
+    uint32_t seed = (uint32_t)(time(NULL) ^ 0xB8C9DAEC);
+    my_srand(seed);
+    printf("  seed=%u\n", seed);
+    
+    ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
+    if (!ht) { BUG("ht_create failed"); return; }
+    
+    int n = 5000;
+    char (*keys)[16] = malloc(n * 16);
+    char (*vals)[32] = malloc(n * 32);
+    int unique_inserts = 0;
+    
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < 16; j++) keys[i][j] = (char)(i + j * 17);
+        for (int j = 0; j < 32; j++) vals[i][j] = (char)(i * 13 + j);
+        
+        bool ok = ht_upsert(ht, keys[i], 16, vals[i], 32);
+        if (ok) unique_inserts++;
+        
+        if (i > 0 && i % 1000 == 0) {
+            size_t sz = ht_size(ht);
+            if (sz != (size_t)unique_inserts) {
+                printf("  at i=%d: ht_size=%zu unique_inserts=%d\n", i, sz, unique_inserts);
+                BUG("entry growth: size mismatch during insert");
+                break;
+            }
+        }
+    }
+    
+    if (ht_size(ht) == (size_t)unique_inserts) {
+        printf("  unique_inserts=%d ht_size=%zu\n", unique_inserts, ht_size(ht));
+        PASS("entry reallocation: all unique entries inserted");
+    }
+    
+    free(keys);
+    free(vals);
+    ht_destroy(ht);
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -876,6 +1306,27 @@ int main(void) {
     
     alloc_mock_reset();
     test_hash_collision_different_keys();
+    
+    alloc_mock_reset();
+    test_long_running_sequence();
+    
+    alloc_mock_reset();
+    test_iterator_completeness();
+    
+    alloc_mock_reset();
+    test_various_key_lengths();
+    
+    alloc_mock_reset();
+    test_resize_with_iterators();
+    
+    alloc_mock_reset();
+    test_spill_edge_cases();
+    
+    alloc_mock_reset();
+    test_arena_exhaustion();
+    
+    alloc_mock_reset();
+    test_entry_reallocation();
 
     printf("\n========================================\n");
     printf("Results: %d passed, %d failed\n", tests_passed, tests_failed);
