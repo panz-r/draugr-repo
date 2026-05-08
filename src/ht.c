@@ -54,7 +54,10 @@ size_t next_pow2(size_t n) {
     if (n == 0) return 1;
     if ((n & (n - 1)) == 0) return n;
     size_t r = 1;
-    while (r < n) r <<= 1;
+    while (r < n) {
+        if (r > SIZE_MAX / 2) { r = SIZE_MAX; break; }
+        r <<= 1;
+    }
     return r;
 }
 
@@ -81,7 +84,7 @@ bool bare_spill_grow(ht_bare_t *t) {
 
     uint32_t *new_vals = realloc(t->spill_vals, new_cap * sizeof(uint32_t));
     if (!new_vals) {
-        t->spill_hash_pd = new_hpd;
+        free(new_hpd);
         return false;
     }
 
@@ -943,10 +946,17 @@ void ht_bare_dump(const ht_bare_t *t, uint64_t hash, size_t count) {
 // ============================================================================
 
 bool grow_arena(ht_table_t *t, size_t needed) {
+    if (t->arena_size > SIZE_MAX - needed) return false;
     if (t->arena_size + needed <= t->arena_cap) return true;
     size_t new_cap = t->arena_cap ? t->arena_cap * 2 : 1024;
-    while (new_cap < t->arena_size + needed) new_cap *= 2;
-    if (new_cap > UINT32_MAX) return false;
+    while (new_cap < t->arena_size + needed) {
+        if (new_cap > SIZE_MAX / 2) {
+            new_cap = SIZE_MAX;
+            break;
+        }
+        new_cap *= 2;
+    }
+    if (new_cap > SIZE_MAX) return false;
     uint8_t *p = realloc(t->arena, new_cap);
     if (!p) return false;
     t->arena = p;
@@ -1898,10 +1908,15 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
         const char *tag = hpd_empty(hpd) ? "EMPTY" : hpd_tomb(hpd) ? "TOMB" : "LIVE";
         if (hpd_live(hpd)) {
             uint32_t eidx = b->vals[idx];
-            const ht_entry_t *e = &t->entries[eidx];
-            printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s] klen=%3u vlen=%3u off=%5" PRIu32 "\n",
-                   idx, hpd_hash(hpd), hpd_pd(hpd), tag,
-                   e->key_len, e->val_len, e->arena_offset);
+            if (eidx == VAL_NONE) {
+                printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s] eidx=VAL_NONE\n",
+                       idx, hpd_hash(hpd), hpd_pd(hpd), tag);
+            } else {
+                const ht_entry_t *e = &t->entries[eidx];
+                printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s] klen=%3u vlen=%3u off=%5" PRIu32 "\n",
+                       idx, hpd_hash(hpd), hpd_pd(hpd), tag,
+                       e->key_len, e->val_len, e->arena_offset);
+            }
         } else {
             printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s]\n",
                    idx, hpd_hash(hpd), hpd_pd(hpd), tag);
