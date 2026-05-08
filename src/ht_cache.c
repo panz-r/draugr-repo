@@ -156,7 +156,9 @@ ht_cache_t *ht_cache_create(const ht_cache_config_t *cfg) {
     c->free_top = cap;
 
     /* Bare table at ~2× capacity for tombstone headroom */
-    size_t bare_cap = next_pow2(cap * 2);
+    size_t bare_cap;
+    if (cap > SIZE_MAX / 2) bare_cap = SIZE_MAX;
+    else bare_cap = next_pow2(cap * 2);
     if (bare_cap < 64) bare_cap = 64;
 
     ht_config_t bare_cfg = {
@@ -288,7 +290,7 @@ bool ht_cache_remove(ht_cache_t *c, const void *key, size_t key_len) {
 
     if (ctx.matched_idx == NONE) return false;
 
-    ht_bare_remove_val(c->bare, hash, ctx.matched_idx);
+    if (!ht_bare_remove_val(c->bare, hash, ctx.matched_idx)) return false;
     lru_remove(c, ctx.matched_idx);
     c->live[ctx.matched_idx] = 0;
     c->free_stack[c->free_top++] = ctx.matched_idx;
@@ -302,7 +304,7 @@ bool ht_cache_evict(ht_cache_t *c) {
     uint32_t tail = c->lru_tail;
     if (tail == NONE) return false;
 
-    ht_bare_remove_val(c->bare, c->hashes[tail], tail);
+    if (!ht_bare_remove_val(c->bare, c->hashes[tail], tail)) return false;
     lru_remove(c, tail);
     c->live[tail] = 0;
     c->free_stack[c->free_top++] = tail;
