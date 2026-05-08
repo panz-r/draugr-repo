@@ -54,8 +54,6 @@ struct ht_cache {
 // Cache Internal Functions
 // ============================================================================
 
-size_t cache_next_pow2(size_t n);
-
 void   lru_add_head(ht_cache_t *c, uint32_t idx);
 void   lru_remove(ht_cache_t *c, uint32_t idx);
 void   lru_promote(ht_cache_t *c, uint32_t idx);

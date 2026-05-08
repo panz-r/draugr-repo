@@ -47,21 +47,6 @@ static const ht_config_t default_cfg = {
 #define INS_UNIQUE  2
 
 // ============================================================================
-// Utility
-// ============================================================================
-
-size_t next_pow2(size_t n) {
-    if (n == 0) return 1;
-    if ((n & (n - 1)) == 0) return n;
-    size_t r = 1;
-    while (r < n) {
-        if (r > SIZE_MAX / 2) { r = SIZE_MAX; break; }
-        r <<= 1;
-    }
-    return r;
-}
-
-// ============================================================================
 // Bare Internal: Compute X
 // ============================================================================
 
@@ -1298,8 +1283,10 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
 
     // Phase 2: Insert new entry
     ht_bare_t *b = &t->bare;
-    if (!b->resizing && (double)(b->size + 1) / (double)b->capacity > b->max_load_factor)
-        ht_resize(t, b->capacity * 2);
+    if (!b->resizing && (double)(b->size + 1) / (double)b->capacity > b->max_load_factor) {
+        if (!ht_resize(t, b->capacity * 2))
+            return false;
+    }
 
     double total = (double)b->size + (double)b->tombstone_cnt;
     if (total > 0 && (double)b->tombstone_cnt / total > b->tomb_threshold) {
@@ -1933,9 +1920,14 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
         for (size_t i = 0; i < b->spill_len; i++) {
             uint64_t shpd = b->spill_hash_pd[i];
             uint32_t eidx = b->spill_vals[i];
-            const ht_entry_t *e = &t->entries[eidx];
-            printf("  spill[%zu]: hash=0x%08" PRIx64 " klen=%3u vlen=%3u off=%5" PRIu32 "\n",
-                   i, hpd_hash(shpd), e->key_len, e->val_len, e->arena_offset);
+            if (eidx == VAL_NONE) {
+                printf("  spill[%zu]: hash=0x%08" PRIx64 " eidx=VAL_NONE\n",
+                       i, hpd_hash(shpd));
+            } else {
+                const ht_entry_t *e = &t->entries[eidx];
+                printf("  spill[%zu]: hash=0x%08" PRIx64 " klen=%3u vlen=%3u off=%5" PRIu32 "\n",
+                       i, hpd_hash(shpd), e->key_len, e->val_len, e->arena_offset);
+            }
         }
     }
 }

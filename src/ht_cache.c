@@ -2,14 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-size_t cache_next_pow2(size_t n) {
-    if (n == 0) return 1;
-    if ((n & (n - 1)) == 0) return n;
-    size_t r = 1;
-    while (r < n) r <<= 1;
-    return r;
-}
-
 /* LRU helpers */
 void lru_add_head(ht_cache_t *c, uint32_t idx) {
     c->lru_prev[idx] = NONE;
@@ -164,7 +156,7 @@ ht_cache_t *ht_cache_create(const ht_cache_config_t *cfg) {
     c->free_top = cap;
 
     /* Bare table at ~2× capacity for tombstone headroom */
-    size_t bare_cap = cache_next_pow2(cap * 2);
+    size_t bare_cap = next_pow2(cap * 2);
     if (bare_cap < 64) bare_cap = 64;
 
     ht_config_t bare_cfg = {

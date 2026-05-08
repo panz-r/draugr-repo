@@ -8,8 +8,7 @@
  *   bare_compute_x, bare_verify_ideal_safe, bare_commit_backward_shift
  *
  * Tests Priority 2 (PARTIAL coverage):
- *   bare_delete_compact, bare_place_prophylactic_tombstones,
- *   cache_next_pow2, lru_add_head, lru_remove,
+ *   next_pow2, lru_add_head, lru_remove,
  *   grow_arena, bare_reinsert_spill
  */
 
@@ -53,26 +52,26 @@ static uint64_t zero_hash_fn(const void *key, size_t len, void *ctx) {
 }
 
 // ============================================================================
-// cache_next_pow2 tests
+// next_pow2 tests
 // ============================================================================
 
-static void test_cache_next_pow2(void) {
-    printf("Test: cache_next_pow2 boundary cases...\n");
-    assert(cache_next_pow2(0) == 1);
-    assert(cache_next_pow2(1) == 1);
-    assert(cache_next_pow2(2) == 2);
-    assert(cache_next_pow2(3) == 4);
-    assert(cache_next_pow2(4) == 4);
-    assert(cache_next_pow2(5) == 8);
-    assert(cache_next_pow2(7) == 8);
-    assert(cache_next_pow2(8) == 8);
-    assert(cache_next_pow2(9) == 16);
-    assert(cache_next_pow2(1023) == 1024);
-    assert(cache_next_pow2(1024) == 1024);
-    assert(cache_next_pow2(1025) == 2048);
-    assert(cache_next_pow2(2047) == 2048);
-    assert(cache_next_pow2(2048) == 2048);
-    assert(cache_next_pow2(2049) == 4096);
+static void test_next_pow2(void) {
+    printf("Test: next_pow2 boundary cases...\n");
+    assert(next_pow2(0) == 1);
+    assert(next_pow2(1) == 1);
+    assert(next_pow2(2) == 2);
+    assert(next_pow2(3) == 4);
+    assert(next_pow2(4) == 4);
+    assert(next_pow2(5) == 8);
+    assert(next_pow2(7) == 8);
+    assert(next_pow2(8) == 8);
+    assert(next_pow2(9) == 16);
+    assert(next_pow2(1023) == 1024);
+    assert(next_pow2(1024) == 1024);
+    assert(next_pow2(1025) == 2048);
+    assert(next_pow2(2047) == 2048);
+    assert(next_pow2(2048) == 2048);
+    assert(next_pow2(2049) == 4096);
     printf("  PASS\n");
 }
 
@@ -695,7 +694,7 @@ static void test_bare_spill_find_all(void) {
 int main(void) {
     printf("=== Internal API Tests ===\n\n");
 
-    test_cache_next_pow2();
+    test_next_pow2();
     test_bare_compute_x();
     test_bare_spill_remove_val();
     test_bare_verify_ideal_safe();

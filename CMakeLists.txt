@@ -15,7 +15,7 @@ if(ENABLE_ASAN)
 endif()
 
 # Library definition
-add_library(draugr src/ht.c src/ht_cache.c)
+add_library(draugr src/ht.c src/ht_cache.c src/util.c)
 
 target_include_directories(draugr
     PUBLIC
