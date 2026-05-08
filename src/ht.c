@@ -1476,8 +1476,8 @@ int64_t ht_inc_with_hash(ht_table_t *t, uint64_t hash,
     } else {
         new_val = delta;
     }
-    bool inserted = ht_upsert_with_hash(t, hash, key, key_len, &new_val, sizeof(new_val));
-    if (!found && !inserted) {
+    ht_insert_result_t result = ht_upsert_with_hash(t, hash, key, key_len, &new_val, sizeof(new_val));
+    if (result == HT_INSERT_FAILED) {
         if (ok) *ok = false;
         return 0;
     }
