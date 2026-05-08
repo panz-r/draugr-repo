@@ -432,6 +432,7 @@ bool ht_bare_insert(ht_bare_t *t, uint64_t hash, uint32_t val) {
         return bare_spill_insert(t, h48, val);
 
     if (!t->resizing && (double)(t->size + 1) / (double)t->capacity > t->max_load_factor) {
+        if (t->capacity > SIZE_MAX / 2) return false;
         if (!ht_bare_resize(t, t->capacity * 2)) {
             return false;
         }
@@ -621,6 +622,7 @@ bool ht_bare_remove_val(ht_bare_t *t, uint64_t hash, uint32_t val) {
 // ============================================================================
 
 bool bare_resize_table(ht_bare_t *t) {
+    if (t->capacity > SIZE_MAX / 2) return false;
     return ht_bare_resize(t, t->capacity * 2);
 }
 
@@ -937,12 +939,15 @@ bool grow_arena(ht_table_t *t, size_t needed) {
     if (t->arena_size > SIZE_MAX - needed) return false;
     if (t->arena_size + needed <= t->arena_cap) return true;
     size_t new_cap = t->arena_cap ? t->arena_cap * 2 : 1024;
-    while (new_cap < t->arena_size + needed) {
-        if (new_cap > SIZE_MAX / 2) {
-            new_cap = SIZE_MAX;
-            break;
+    if (t->arena_cap > SIZE_MAX / 2) new_cap = SIZE_MAX;
+    else {
+        while (new_cap < t->arena_size + needed) {
+            if (new_cap > SIZE_MAX / 2) {
+                new_cap = SIZE_MAX;
+                break;
+            }
+            new_cap *= 2;
         }
-        new_cap *= 2;
     }
     if (new_cap > SIZE_MAX) return false;
     uint8_t *p = realloc(t->arena, new_cap);
@@ -971,7 +976,10 @@ static uint32_t alloc_entry(ht_table_t *t, uint16_t hash_hi,
     size_t arena_before = t->arena_size;
 
     if (t->entry_count >= t->entry_cap) {
-        size_t new_cap = t->entry_cap ? t->entry_cap * 2 : 64;
+        size_t new_cap;
+        if (t->entry_cap == 0) new_cap = 64;
+        else if (t->entry_cap > SIZE_MAX / 2) new_cap = SIZE_MAX;
+        else new_cap = t->entry_cap * 2;
         ht_entry_t *ne = realloc(t->entries, new_cap * sizeof(ht_entry_t));
         if (!ne) return VAL_NONE;
         t->entries = ne;
@@ -1284,7 +1292,7 @@ static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
     // Phase 2: Insert new entry
     ht_bare_t *b = &t->bare;
     if (!b->resizing && (double)(b->size + 1) / (double)b->capacity > b->max_load_factor) {
-        if (!ht_resize(t, b->capacity * 2))
+        if (b->capacity > SIZE_MAX / 2 || !ht_resize(t, b->capacity * 2))
             return HT_INSERT_FAILED;
     }
 
