@@ -1697,6 +1697,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
     t->arena_cap = old_arena_cap > 0 ? old_arena_cap : 1024;
 
     // Reinsert main table
+    bool reinsert_ok = true;
     for (size_t i = 0; i < old_cap; i++) {
         uint64_t hpd = old_hash_pd[i];
         if (!hpd_live(hpd)) continue;
@@ -1706,7 +1707,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
         const void *k = old_arena + e->arena_offset;
         const void *v = old_arena + e->arena_offset + e->key_len;
         uint32_t new_eidx = alloc_entry(t, e->hash_hi, k, e->key_len, v, e->val_len);
-        if (new_eidx == VAL_NONE) continue;
+        if (new_eidx == VAL_NONE) { reinsert_ok = false; continue; }
         uint64_t h48 = hpd_hash(hpd);
         if (h48 < 2)
             bare_spill_insert(b, h48, new_eidx);
@@ -1723,7 +1724,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
         const void *k = old_arena + e->arena_offset;
         const void *v = old_arena + e->arena_offset + e->key_len;
         uint32_t new_eidx = alloc_entry(t, e->hash_hi, k, e->key_len, v, e->val_len);
-        if (new_eidx == VAL_NONE) continue;
+        if (new_eidx == VAL_NONE) { reinsert_ok = false; continue; }
         bare_spill_insert(b, hpd_hash(old_spill_hash_pd[i]), new_eidx);
     }
 
@@ -1736,7 +1737,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
     free(old_spill_hash_pd);
     free(old_spill_vals);
     b->resizing = false;
-    return true;
+    return reinsert_ok;
 }
 
 bool ht_compact(ht_table_t *t) {
@@ -1816,6 +1817,7 @@ bool ht_compact(ht_table_t *t) {
     t->arena_cap = old_arena_cap > 0 ? old_arena_cap : 1024;
 
     // Reinsert main table
+    bool reinsert_ok = true;
     for (size_t i = 0; i < old_cap; i++) {
         uint64_t hpd = old_hash_pd[i];
         if (!hpd_live(hpd)) continue;
@@ -1825,7 +1827,7 @@ bool ht_compact(ht_table_t *t) {
         const void *k = old_arena + e->arena_offset;
         const void *v = old_arena + e->arena_offset + e->key_len;
         uint32_t new_eidx = alloc_entry(t, e->hash_hi, k, e->key_len, v, e->val_len);
-        if (new_eidx == VAL_NONE) continue;
+        if (new_eidx == VAL_NONE) { reinsert_ok = false; continue; }
         uint64_t h48 = hpd_hash(hpd);
         if (h48 < 2)
             bare_spill_insert(b, h48, new_eidx);
@@ -1842,7 +1844,7 @@ bool ht_compact(ht_table_t *t) {
         const void *k = old_arena + e->arena_offset;
         const void *v = old_arena + e->arena_offset + e->key_len;
         uint32_t new_eidx = alloc_entry(t, e->hash_hi, k, e->key_len, v, e->val_len);
-        if (new_eidx == VAL_NONE) continue;
+        if (new_eidx == VAL_NONE) { reinsert_ok = false; continue; }
         bare_spill_insert(b, hpd_hash(old_spill_hash_pd[i]), new_eidx);
     }
 
@@ -1854,7 +1856,7 @@ bool ht_compact(ht_table_t *t) {
     free(old_arena);
     free(old_spill_hash_pd);
     free(old_spill_vals);
-    return true;
+    return reinsert_ok;
 }
 
 // ============================================================================

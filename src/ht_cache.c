@@ -227,14 +227,13 @@ void *ht_cache_put(ht_cache_t *c, const void *entry_data, size_t entry_size) {
 
     uint64_t hash = c->hash_fn(entry_data, entry_size, c->user_ctx);
     c->hashes[slot] = hash;
-    c->live[slot] = 1;
 
     if (!ht_bare_insert(c->bare, hash, slot)) {
-        c->live[slot] = 0;
         c->free_stack[c->free_top++] = slot;
         return NULL;
     }
 
+    c->live[slot] = 1;
     lru_add_head(c, slot);
     c->size++;
     return dst;
