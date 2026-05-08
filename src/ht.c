@@ -1246,11 +1246,11 @@ void ht_clear(ht_table_t *t) {
 // High-Level Public API: Insert / Upsert / Unsert
 // ============================================================================
 
-static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
-                                const void *key, size_t key_len,
-                                const void *value, size_t value_len,
-                                int mode) {
-    if (!t || !key) return false;
+static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
+                                              const void *key, size_t key_len,
+                                              const void *value, size_t value_len,
+                                              int mode) {
+    if (!t || !key) return HT_INSERT_FAILED;
     if (!value && value_len > 0) value_len = 0;
 
     uint64_t h48 = hash & HASH_MASK;
@@ -1267,10 +1267,10 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
 
         if (ctx.match_count > 0) {
             if (!update_entry_value(t, ctx.matches[0], key, key_len, value, value_len))
-                return false;
+                return HT_INSERT_FAILED;
             for (size_t i = 1; i < ctx.match_count; i++)
                 ht_bare_remove_val(&t->bare, hash, ctx.matches[i]);
-            return false;
+            return HT_INSERT_UPDATE;
         }
     } else if (mode == INS_UNIQUE) {
         struct hl_kv_scan_ctx ctx = {
@@ -1278,14 +1278,14 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
             .value = value, .value_len = value_len,
         };
         ht_bare_find_all(&t->bare, hash, hl_kv_scan_cb, &ctx);
-        if (ctx.kv_found) return false;
+        if (ctx.kv_found) return HT_INSERT_UPDATE;
     }
 
     // Phase 2: Insert new entry
     ht_bare_t *b = &t->bare;
     if (!b->resizing && (double)(b->size + 1) / (double)b->capacity > b->max_load_factor) {
         if (!ht_resize(t, b->capacity * 2))
-            return false;
+            return HT_INSERT_FAILED;
     }
 
     double total = (double)b->size + (double)b->tombstone_cnt;
@@ -1294,7 +1294,7 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
     }
 
     uint32_t eidx = alloc_entry(t, hash_hi, key, key_len, value, value_len);
-    if (eidx == VAL_NONE) return false;
+    if (eidx == VAL_NONE) return HT_INSERT_FAILED;
 
     bool result;
     if (h48 < 2)
@@ -1304,46 +1304,46 @@ static bool do_insert_with_hash(ht_table_t *t, uint64_t hash,
 
     if (result) bare_zombie_step(b);
 
-    return result;
+    return result ? HT_INSERT_OK : HT_INSERT_FAILED;
 }
 
-bool ht_insert_with_hash(ht_table_t *t, uint64_t hash,
-                         const void *key, size_t key_len,
-                         const void *value, size_t value_len) {
+ht_insert_result_t ht_insert_with_hash(ht_table_t *t, uint64_t hash,
+                                       const void *key, size_t key_len,
+                                       const void *value, size_t value_len) {
     return do_insert_with_hash(t, hash, key, key_len, value, value_len, INS_ALWAYS);
 }
 
-bool ht_insert(ht_table_t *t, const void *key, size_t key_len,
-               const void *value, size_t value_len) {
-    if (!t || !key) return false;
+ht_insert_result_t ht_insert(ht_table_t *t, const void *key, size_t key_len,
+                             const void *value, size_t value_len) {
+    if (!t || !key) return HT_INSERT_FAILED;
     if (!value && value_len > 0) value_len = 0;
     return ht_insert_with_hash(t, t->hash_fn(key, key_len, t->user_ctx),
                                key, key_len, value, value_len);
 }
 
-bool ht_upsert_with_hash(ht_table_t *t, uint64_t hash,
-                         const void *key, size_t key_len,
-                         const void *value, size_t value_len) {
+ht_insert_result_t ht_upsert_with_hash(ht_table_t *t, uint64_t hash,
+                                       const void *key, size_t key_len,
+                                       const void *value, size_t value_len) {
     return do_insert_with_hash(t, hash, key, key_len, value, value_len, INS_UPSERT);
 }
 
-bool ht_upsert(ht_table_t *t, const void *key, size_t key_len,
-               const void *value, size_t value_len) {
-    if (!t || !key) return false;
+ht_insert_result_t ht_upsert(ht_table_t *t, const void *key, size_t key_len,
+                             const void *value, size_t value_len) {
+    if (!t || !key) return HT_INSERT_FAILED;
     if (!value && value_len > 0) value_len = 0;
     return ht_upsert_with_hash(t, t->hash_fn(key, key_len, t->user_ctx),
                                key, key_len, value, value_len);
 }
 
-bool ht_unsert_with_hash(ht_table_t *t, uint64_t hash,
-                         const void *key, size_t key_len,
-                         const void *value, size_t value_len) {
+ht_insert_result_t ht_unsert_with_hash(ht_table_t *t, uint64_t hash,
+                                        const void *key, size_t key_len,
+                                        const void *value, size_t value_len) {
     return do_insert_with_hash(t, hash, key, key_len, value, value_len, INS_UNIQUE);
 }
 
-bool ht_unsert(ht_table_t *t, const void *key, size_t key_len,
-               const void *value, size_t value_len) {
-    if (!t || !key) return false;
+ht_insert_result_t ht_unsert(ht_table_t *t, const void *key, size_t key_len,
+                              const void *value, size_t value_len) {
+    if (!t || !key) return HT_INSERT_FAILED;
     if (!value && value_len > 0) value_len = 0;
     return ht_unsert_with_hash(t, t->hash_fn(key, key_len, t->user_ctx),
                                key, key_len, value, value_len);

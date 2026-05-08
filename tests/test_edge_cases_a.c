@@ -361,7 +361,7 @@ static int test_duplicate_keys(void) {
     assert(g_collect_count == 5);
 
     int new_val = 100;
-    assert(ht_upsert(t, "bob", 3, &new_val, sizeof(new_val)) == false);
+    assert(ht_upsert(t, "bob", 3, &new_val, sizeof(new_val)) == HT_INSERT_UPDATE);
     assert(*(const int *)ht_find(t, "bob", 3, NULL) == 100);
 
     g_collect_count = 0;
@@ -430,12 +430,12 @@ static int test_custom_eq(void) {
     assert(v != NULL && *v == 42);
 
     int val2 = 99;
-    assert(ht_upsert(t, "HELLO", 5, &val2, sizeof(val2)) == false);
+    assert(ht_upsert(t, "HELLO", 5, &val2, sizeof(val2)) == HT_INSERT_UPDATE);
     v = ht_find(t, "Hello", 5, NULL);
     assert(v != NULL && *v == 99);
 
     int val3 = 7;
-    assert(ht_upsert(t, "World", 5, &val3, sizeof(val3)) == true);
+    assert(ht_upsert(t, "World", 5, &val3, sizeof(val3)) == HT_INSERT_OK);
     v = ht_find(t, "world", 5, NULL);
     assert(v != NULL && *v == 7);
 
@@ -578,17 +578,17 @@ static int test_null_args(void) {
     ht_compact(NULL);
     ht_stats(NULL, NULL);
     assert(ht_resize(NULL, 64) == false);
-    assert(ht_upsert(NULL, "k", 1, "v", 1) == false);
+    assert(ht_upsert(NULL, "k", 1, "v", 1) == HT_INSERT_FAILED);
     assert(ht_find(NULL, "k", 1, NULL) == NULL);
     assert(ht_remove(NULL, "k", 1) == false);
-    assert(ht_upsert_with_hash(NULL, 42, "k", 1, "v", 1) == false);
+    assert(ht_upsert_with_hash(NULL, 42, "k", 1, "v", 1) == HT_INSERT_FAILED);
     assert(ht_find_with_hash(NULL, 42, "k", 1, NULL) == NULL);
     assert(ht_remove_with_hash(NULL, 42, "k", 1) == 0);
     ht_find_all(NULL, 42, collect_val_cb, NULL);
 
     // Create a valid table, then test NULL key
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
-    assert(ht_upsert(t, NULL, 1, "v", 1) == false);
+    assert(ht_upsert(t, NULL, 1, "v", 1) == HT_INSERT_FAILED);
     assert(ht_find(t, NULL, 1, NULL) == NULL);
     assert(ht_remove(t, NULL, 1) == false);
     ht_destroy(t);
@@ -913,7 +913,7 @@ static int test_empty_key(void) {
     assert(v != NULL && *v == 42);
 
     int val2 = 99;
-    assert(ht_upsert(t, "", 0, &val2, sizeof(val2)) == false);
+    assert(ht_upsert(t, "", 0, &val2, sizeof(val2)) == HT_INSERT_UPDATE);
     v = ht_find(t, "", 0, &out_len);
     assert(v != NULL && *v == 99);
 
@@ -1205,7 +1205,7 @@ static int test_update_preserves_others(void) {
 
     // Update k10
     int new_val = 9999;
-    assert(ht_upsert(t, "k10", 3, &new_val, sizeof(new_val)) == false);
+    assert(ht_upsert(t, "k10", 3, &new_val, sizeof(new_val)) == HT_INSERT_UPDATE);
 
     // All other entries still correct
     for (int i = 0; i < 20; i++) {

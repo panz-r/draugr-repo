@@ -299,7 +299,7 @@ static int test_value_size_change(void) {
 
     // Update with large value
     int64_t large = 0x123456789ABCDEF0LL;
-    assert(ht_upsert(t, "key", 3, &large, sizeof(large)) == false);
+    assert(ht_upsert(t, "key", 3, &large, sizeof(large)) == HT_INSERT_UPDATE);
 
     const int64_t *v2 = ht_find(t, "key", 3, &out_len);
     assert(v2 != NULL && *v2 == large && out_len == sizeof(int64_t));
@@ -906,7 +906,7 @@ static int test_many_updates_same_key(void) {
     // Insert and update same key 1000 times
     ht_upsert(t, "target", 6, &(int){0}, sizeof(int));
     for (int i = 1; i <= 1000; i++) {
-        assert(ht_upsert(t, "target", 6, &i, sizeof(i)) == false);
+        assert(ht_upsert(t, "target", 6, &i, sizeof(i)) == HT_INSERT_UPDATE);
     }
 
     const int *v = ht_find(t, "target", 6, NULL);

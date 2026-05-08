@@ -1621,7 +1621,7 @@ void test_update_value_shrink(void) {
 
     /* Overwrite with tiny value */
     int small = 42;
-    assert(ht_upsert(t, "k", 1, &small, sizeof(small)) == false);
+    assert(ht_upsert(t, "k", 1, &small, sizeof(small)) == HT_INSERT_UPDATE);
 
     size_t vl = 0;
     const int *v = ht_find(t, "k", 1, &vl);
@@ -1859,7 +1859,7 @@ void test_update_value_grow(void) {
     char big[500];
     memset(big, 'Q', sizeof(big));
     big[0] = 'A'; big[499] = 'Z';
-    assert(ht_upsert(t, "k", 1, big, sizeof(big)) == false);
+    assert(ht_upsert(t, "k", 1, big, sizeof(big)) == HT_INSERT_UPDATE);
 
     size_t vl = 0;
     const char *v = ht_find(t, "k", 1, &vl);
@@ -2223,9 +2223,9 @@ void test_double_insert_returns_false(void) {
     printf("Testing double insert returns false...\n");
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
 
-    assert(ht_upsert(t, "k", 1, "v1", 2) == true);
-    assert(ht_upsert(t, "k", 1, "v2", 2) == false);
-    assert(ht_upsert(t, "k", 1, "v3", 2) == false);
+    assert(ht_upsert(t, "k", 1, "v1", 2) == HT_INSERT_OK);
+    assert(ht_upsert(t, "k", 1, "v2", 2) == HT_INSERT_UPDATE);
+    assert(ht_upsert(t, "k", 1, "v3", 2) == HT_INSERT_UPDATE);
 
     size_t vl = 0;
     const char *v = ht_find(t, "k", 1, &vl);
@@ -2415,7 +2415,7 @@ void test_update_value_same_size(void) {
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
 
     assert(ht_upsert(t, "k", 1, "old", 3));
-    assert(ht_upsert(t, "k", 1, "new", 3) == false);
+    assert(ht_upsert(t, "k", 1, "new", 3) == HT_INSERT_UPDATE);
 
     size_t vl = 0;
     const char *v = ht_find(t, "k", 1, &vl);
@@ -3140,7 +3140,7 @@ void test_custom_eq_fn(void) {
 
     /* Update */
     int v2 = 99;
-    assert(ht_upsert(t, "eq5", 3, &v2, sizeof(int)) == false);
+    assert(ht_upsert(t, "eq5", 3, &v2, sizeof(int)) == HT_INSERT_UPDATE);
     assert(*(int *)ht_find(t, "eq5", 3, NULL) == 99);
 
     /* Remove */
@@ -3764,7 +3764,7 @@ void test_binary_key_lifecycle(void) {
 
     /* Update */
     int v2 = 99;
-    assert(ht_upsert(t, key, sizeof(key), &v2, sizeof(int)) == false);
+    assert(ht_upsert(t, key, sizeof(key), &v2, sizeof(int)) == HT_INSERT_UPDATE);
     v = ht_find(t, key, sizeof(key), NULL);
     assert(v != NULL && *v == 99);
 
@@ -3801,8 +3801,8 @@ void test_insert_with_hash_update(void) {
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
 
     int v1 = 10, v2 = 20;
-    assert(ht_upsert_with_hash(t, 42, "k", 1, &v1, sizeof(int)) == true);
-    assert(ht_upsert_with_hash(t, 42, "k", 1, &v2, sizeof(int)) == false);
+    assert(ht_upsert_with_hash(t, 42, "k", 1, &v1, sizeof(int)) == HT_INSERT_OK);
+    assert(ht_upsert_with_hash(t, 42, "k", 1, &v2, sizeof(int)) == HT_INSERT_UPDATE);
 
     INV_CHECK(t, "with_hash_update: after update");
 
@@ -4446,12 +4446,12 @@ static void test_key_len_overflow(void) {
     memset(big_key, 'X', big_len);
 
     int val = 1;
-    bool r = ht_upsert(t, big_key, big_len, &val, sizeof(val));
-    assert(r == false);
+    ht_insert_result_t r = ht_upsert(t, big_key, big_len, &val, sizeof(val));
+    assert(r == HT_INSERT_FAILED);
 
     /* Key of exactly 65535 should work */
     r = ht_upsert(t, big_key, 65535, &val, sizeof(val));
-    assert(r == true);
+    assert(r == HT_INSERT_OK);
 
     const int *found = ht_find(t, big_key, 65535, NULL);
     assert(found && *found == 1);

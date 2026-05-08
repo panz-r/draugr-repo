@@ -94,28 +94,37 @@ void ht_clear(ht_table_t *t);
 // Insertion & Updates
 // ============================================================================
 
+typedef enum {
+    HT_INSERT_FAILED = -1,
+    HT_INSERT_UPDATE =  0,
+    HT_INSERT_OK     =  1,
+} ht_insert_result_t;
+
 // ht_insert: always-add (multi-value). Same k,v can exist N times.
-bool ht_insert(ht_table_t *t, const void *key, size_t key_len,
-               const void *value, size_t value_len);
-bool ht_insert_with_hash(ht_table_t *t, uint64_t hash,
-                         const void *key, size_t key_len,
-                         const void *value, size_t value_len);
+// Returns HT_INSERT_FAILED on error, HT_INSERT_OK on success.
+ht_insert_result_t ht_insert(ht_table_t *t, const void *key, size_t key_len,
+                            const void *value, size_t value_len);
+ht_insert_result_t ht_insert_with_hash(ht_table_t *t, uint64_t hash,
+                                      const void *key, size_t key_len,
+                                      const void *value, size_t value_len);
 
 // ht_upsert: remove all for key, insert single value.
-// Returns true if new entry, false if replaced existing.
-bool ht_upsert(ht_table_t *t, const void *key, size_t key_len,
-               const void *value, size_t value_len);
-bool ht_upsert_with_hash(ht_table_t *t, uint64_t hash,
-                         const void *key, size_t key_len,
-                         const void *value, size_t value_len);
+// Returns HT_INSERT_FAILED on error, HT_INSERT_OK if new entry,
+// or HT_INSERT_UPDATE if replaced existing.
+ht_insert_result_t ht_upsert(ht_table_t *t, const void *key, size_t key_len,
+                             const void *value, size_t value_len);
+ht_insert_result_t ht_upsert_with_hash(ht_table_t *t, uint64_t hash,
+                                       const void *key, size_t key_len,
+                                       const void *value, size_t value_len);
 
 // ht_unsert (unique-insert): insert only if exact k,v pair doesn't exist.
-// Returns true if new entry, false if duplicate.
-bool ht_unsert(ht_table_t *t, const void *key, size_t key_len,
-               const void *value, size_t value_len);
-bool ht_unsert_with_hash(ht_table_t *t, uint64_t hash,
-                         const void *key, size_t key_len,
-                         const void *value, size_t value_len);
+// Returns HT_INSERT_FAILED on error, HT_INSERT_OK if new entry,
+// or HT_INSERT_UPDATE if duplicate key found (no insert).
+ht_insert_result_t ht_unsert(ht_table_t *t, const void *key, size_t key_len,
+                             const void *value, size_t value_len);
+ht_insert_result_t ht_unsert_with_hash(ht_table_t *t, uint64_t hash,
+                                       const void *key, size_t key_len,
+                                       const void *value, size_t value_len);
 
 int64_t ht_inc(ht_table_t *t, const void *key, size_t key_len, int64_t delta);
 int64_t ht_inc_with_hash(ht_table_t *t, uint64_t hash,
