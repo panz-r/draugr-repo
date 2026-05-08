@@ -178,7 +178,7 @@ bool ht_remove_kv_one_with_hash(ht_table_t *t, uint64_t hash,
 // ============================================================================
 
 bool ht_resize(ht_table_t *t, size_t new_capacity);
-void ht_compact(ht_table_t *t);
+bool ht_compact(ht_table_t *t);
 
 // ============================================================================
 // Iteration
