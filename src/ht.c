@@ -970,6 +970,8 @@ static uint32_t alloc_entry(ht_table_t *t, uint16_t hash_hi,
                             const void *value, size_t value_len) {
     if (key_len > UINT16_MAX) return VAL_NONE;
 
+    size_t arena_before = t->arena_size;
+
     if (t->entry_count >= t->entry_cap) {
         size_t new_cap = t->entry_cap ? t->entry_cap * 2 : 64;
         ht_entry_t *ne = realloc(t->entries, new_cap * sizeof(ht_entry_t));
@@ -979,7 +981,10 @@ static uint32_t alloc_entry(ht_table_t *t, uint16_t hash_hi,
     }
 
     void *data = arena_alloc(t, key_len + value_len);
-    if (!data) return VAL_NONE;
+    if (!data) {
+        t->arena_size = arena_before;
+        return VAL_NONE;
+    }
     memcpy(data, key, key_len);
     memcpy((uint8_t *)data + key_len, value, value_len);
 
@@ -999,8 +1004,12 @@ static bool update_entry_value(ht_table_t *t, uint32_t eidx,
         memcpy(t->arena + e->arena_offset + e->key_len, value, value_len);
         return true;
     }
+    size_t arena_before = t->arena_size;
     void *data = arena_alloc(t, key_len + value_len);
-    if (!data) return false;
+    if (!data) {
+        t->arena_size = arena_before;
+        return false;
+    }
     memcpy(data, key, key_len);
     memcpy((uint8_t *)data + key_len, value, value_len);
     e->val_len = (uint32_t)value_len;
