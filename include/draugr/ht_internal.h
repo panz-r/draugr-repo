@@ -100,7 +100,8 @@ struct ht_bare {
     size_t      size;
     size_t      tombstone_cnt;
 
-    // Spill lane
+// Spill lane (single contiguous allocation: [hash_pd][vals])
+    uint8_t    *spill_block;
     uint64_t   *spill_hash_pd;
     uint32_t   *spill_vals;
     size_t      spill_cap;

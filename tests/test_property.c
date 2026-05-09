@@ -1986,11 +1986,11 @@ static void test_prefix_keys(void) {
     
     for (int op = 0; op < 10000; op++) {
         int idx = splitmix64(&sm_state) % 200;
-        int action = splitmix64(&sm_state) & 0xFF;
-        
+        unsigned action = (unsigned)(splitmix64(&sm_state) % 100);
+
         if (action < 50) {
-            bool ok = ht_upsert(ht, keys[idx], 64, vals[idx], 32);
-            if (ok) model_set(m, keys[idx], 64, vals[idx], 32);
+            ht_insert_result_t result = ht_upsert(ht, keys[idx], 64, vals[idx], 32);
+            if (result != HT_INSERT_FAILED) model_set(m, keys[idx], 64, vals[idx], 32);
         } else if (action < 75) {
             size_t vlen = 0;
             const char *found = (const char*)ht_find(ht, keys[idx], 64, &vlen);

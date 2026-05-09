@@ -62,22 +62,33 @@ double bare_compute_x(const ht_bare_t *t) {
 // ============================================================================
 
 bool bare_spill_grow(ht_bare_t *t) {
-    size_t new_cap = t->spill_cap ? t->spill_cap * 2 : SPILL_INITIAL;
+    size_t old_cap = t->spill_cap;
+    size_t new_cap = old_cap ? old_cap * 2 : SPILL_INITIAL;
 
-    uint64_t *new_hpd = realloc(t->spill_hash_pd, new_cap * sizeof(uint64_t));
-    if (!new_hpd) return false;
+    size_t new_size = new_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    uint8_t *new_block = malloc(new_size);
+    if (!new_block) return false;
 
-    uint32_t *new_vals = realloc(t->spill_vals, new_cap * sizeof(uint32_t));
-    if (!new_vals) {
-        free(new_hpd);
-        return false;
+    if (old_cap > 0) {
+        uint64_t *old_hash_pd = (uint64_t*)t->spill_block;
+        uint32_t *old_vals = (uint32_t*)(t->spill_block + old_cap * sizeof(uint64_t));
+
+        memcpy(new_block, old_hash_pd, old_cap * sizeof(uint64_t));
+        memset(new_block + old_cap * sizeof(uint64_t), 0, (new_cap - old_cap) * sizeof(uint64_t));
+
+        uint32_t *new_vals = (uint32_t*)(new_block + new_cap * sizeof(uint64_t));
+        memcpy(new_vals, old_vals, old_cap * sizeof(uint32_t));
+        memset(new_vals + old_cap, 0xFF, (new_cap - old_cap) * sizeof(uint32_t));
+
+        free(t->spill_block);
+    } else {
+        memset(new_block, 0, new_cap * sizeof(uint64_t));
+        memset(new_block + new_cap * sizeof(uint64_t), 0xFF, new_cap * sizeof(uint32_t));
     }
 
-    memset(new_hpd + t->spill_cap, 0, (new_cap - t->spill_cap) * sizeof(uint64_t));
-    memset(new_vals + t->spill_cap, 0xFF, (new_cap - t->spill_cap) * sizeof(uint32_t));
-
-    t->spill_hash_pd = new_hpd;
-    t->spill_vals = new_vals;
+    t->spill_block = new_block;
+    t->spill_hash_pd = (uint64_t*)new_block;
+    t->spill_vals = (uint32_t*)(new_block + new_cap * sizeof(uint64_t));
     t->spill_cap = new_cap;
     return true;
 }
@@ -381,15 +392,13 @@ ht_bare_t *ht_bare_create(const ht_config_t *cfg) {
     memset(t->vals, 0xFF, t->capacity * sizeof(uint32_t));
 
     t->spill_cap = SPILL_INITIAL;
-    t->spill_hash_pd = calloc(t->spill_cap, sizeof(uint64_t));
-    if (!t->spill_hash_pd) { free(t->vals); free(t->hash_pd); free(t); return NULL; }
-
-    t->spill_vals = malloc(t->spill_cap * sizeof(uint32_t));
-    if (!t->spill_vals) {
-        free(t->spill_hash_pd); free(t->vals); free(t->hash_pd); free(t);
-        return NULL;
-    }
-    memset(t->spill_vals, 0xFF, t->spill_cap * sizeof(uint32_t));
+    size_t spill_size = t->spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    t->spill_block = malloc(spill_size);
+    if (!t->spill_block) { free(t->vals); free(t->hash_pd); free(t); return NULL; }
+    memset(t->spill_block, 0, t->spill_cap * sizeof(uint64_t));
+    memset(t->spill_block + t->spill_cap * sizeof(uint64_t), 0xFF, t->spill_cap * sizeof(uint32_t));
+    t->spill_hash_pd = (uint64_t*)t->spill_block;
+    t->spill_vals = (uint32_t*)(t->spill_block + t->spill_cap * sizeof(uint64_t));
 
     t->max_load_factor = (c.max_load_factor <= 0) ? 0.75 :
                          (c.max_load_factor > 0.97) ? 0.97 : c.max_load_factor;
@@ -402,8 +411,7 @@ ht_bare_t *ht_bare_create(const ht_config_t *cfg) {
 
 void ht_bare_destroy(ht_bare_t *t) {
     if (!t) return;
-    free(t->spill_hash_pd);
-    free(t->spill_vals);
+    free(t->spill_block);
     free(t->hash_pd);
     free(t->vals);
     free(t);
@@ -412,7 +420,8 @@ void ht_bare_destroy(ht_bare_t *t) {
 void ht_bare_clear(ht_bare_t *t) {
     if (!t) return;
     memset(t->hash_pd, 0, t->capacity * sizeof(uint64_t));
-    memset(t->spill_hash_pd, 0, t->spill_cap * sizeof(uint64_t));
+    memset(t->spill_block, 0, t->spill_cap * sizeof(uint64_t));
+    memset(t->spill_block + t->spill_cap * sizeof(uint64_t), 0xFF, t->spill_cap * sizeof(uint32_t));
     t->size = 0;
     t->tombstone_cnt = 0;
     t->spill_len = 0;
@@ -646,6 +655,7 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
 
     uint64_t *old_spill_hash_pd = t->spill_hash_pd;
     uint32_t *old_spill_vals = t->spill_vals;
+    uint8_t *old_spill_block = t->spill_block;
     size_t old_spill_len = t->spill_len;
 
     // Allocate new main table
@@ -662,20 +672,17 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
 
     // Allocate new spill lane
     size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    uint64_t *new_spill_hash_pd = calloc(new_spill_cap, sizeof(uint64_t));
-    if (!new_spill_hash_pd) {
+    size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    uint8_t *new_spill_block = malloc(new_spill_size);
+    if (!new_spill_block) {
         free(new_vals); free(new_hash_pd);
         t->resizing = false;
         return false;
     }
-
-    uint32_t *new_spill_vals = malloc(new_spill_cap * sizeof(uint32_t));
-    if (!new_spill_vals) {
-        free(new_spill_hash_pd); free(new_vals); free(new_hash_pd);
-        t->resizing = false;
-        return false;
-    }
-    memset(new_spill_vals, 0xFF, new_spill_cap * sizeof(uint32_t));
+    memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
+    memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
+    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
+    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
 
     // Swap to new state
     t->hash_pd = new_hash_pd;
@@ -683,6 +690,7 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
     t->capacity = new_capacity;
     t->size = 0;
     t->tombstone_cnt = 0;
+    t->spill_block = new_spill_block;
     t->spill_hash_pd = new_spill_hash_pd;
     t->spill_vals = new_spill_vals;
     t->spill_cap = new_spill_cap;
@@ -695,8 +703,7 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
 
     free(old_hash_pd);
     free(old_vals);
-    free(old_spill_hash_pd);
-    free(old_spill_vals);
+    free(old_spill_block);
     t->resizing = false;
     return true;
 }
@@ -710,6 +717,7 @@ void ht_bare_compact(ht_bare_t *t) {
 
     uint64_t *old_spill_hash_pd = t->spill_hash_pd;
     uint32_t *old_spill_vals = t->spill_vals;
+    uint8_t *old_spill_block = t->spill_block;
     size_t old_spill_len = t->spill_len;
 
     uint64_t *new_hash_pd = calloc(old_cap, sizeof(uint64_t));
@@ -723,23 +731,22 @@ void ht_bare_compact(ht_bare_t *t) {
     memset(new_vals, 0xFF, old_cap * sizeof(uint32_t));
 
     size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    uint64_t *new_spill_hash_pd = calloc(new_spill_cap, sizeof(uint64_t));
-    if (!new_spill_hash_pd) {
+    size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    uint8_t *new_spill_block = malloc(new_spill_size);
+    if (!new_spill_block) {
         free(new_vals); free(new_hash_pd);
         return;
     }
-
-    uint32_t *new_spill_vals = malloc(new_spill_cap * sizeof(uint32_t));
-    if (!new_spill_vals) {
-        free(new_spill_hash_pd); free(new_vals); free(new_hash_pd);
-        return;
-    }
-    memset(new_spill_vals, 0xFF, new_spill_cap * sizeof(uint32_t));
+    memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
+    memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
+    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
+    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
 
     t->hash_pd = new_hash_pd;
     t->vals = new_vals;
     t->size = 0;
     t->tombstone_cnt = 0;
+    t->spill_block = new_spill_block;
     t->spill_hash_pd = new_spill_hash_pd;
     t->spill_vals = new_spill_vals;
     t->spill_cap = new_spill_cap;
@@ -752,8 +759,7 @@ void ht_bare_compact(ht_bare_t *t) {
 
     free(old_hash_pd);
     free(old_vals);
-    free(old_spill_hash_pd);
-    free(old_spill_vals);
+    free(old_spill_block);
 }
 
 // ============================================================================
@@ -1192,15 +1198,13 @@ ht_table_t *ht_create(const ht_config_t *cfg,
     memset(b->vals, 0xFF, b->capacity * sizeof(uint32_t));
 
     b->spill_cap = SPILL_INITIAL;
-    b->spill_hash_pd = calloc(b->spill_cap, sizeof(uint64_t));
-    if (!b->spill_hash_pd) { free(b->vals); free(b->hash_pd); free(t); return NULL; }
-
-    b->spill_vals = malloc(b->spill_cap * sizeof(uint32_t));
-    if (!b->spill_vals) {
-        free(b->spill_hash_pd); free(b->vals); free(b->hash_pd); free(t);
-        return NULL;
-    }
-    memset(b->spill_vals, 0xFF, b->spill_cap * sizeof(uint32_t));
+    size_t spill_size = b->spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    b->spill_block = malloc(spill_size);
+    if (!b->spill_block) { free(b->vals); free(b->hash_pd); free(t); return NULL; }
+    memset(b->spill_block, 0, b->spill_cap * sizeof(uint64_t));
+    memset(b->spill_block + b->spill_cap * sizeof(uint64_t), 0xFF, b->spill_cap * sizeof(uint32_t));
+    b->spill_hash_pd = (uint64_t*)b->spill_block;
+    b->spill_vals = (uint32_t*)(b->spill_block + b->spill_cap * sizeof(uint64_t));
 
     b->max_load_factor = (c.max_load_factor <= 0) ? 0.75 :
                          (c.max_load_factor > 0.97) ? 0.97 : c.max_load_factor;
@@ -1211,7 +1215,7 @@ ht_table_t *ht_create(const ht_config_t *cfg,
     t->entries = calloc(64, sizeof(ht_entry_t));
     t->entry_cap = 64;
     if (!t->entries) {
-        free(b->spill_vals); free(b->spill_hash_pd);
+        free(b->spill_block);
         free(b->vals); free(b->hash_pd); free(t);
         return NULL;
     }
@@ -1219,7 +1223,7 @@ ht_table_t *ht_create(const ht_config_t *cfg,
     t->arena = malloc(1024);
     t->arena_cap = 1024;
     if (!t->arena) {
-        free(t->entries); free(b->spill_vals); free(b->spill_hash_pd);
+        free(t->entries); free(b->spill_block);
         free(b->vals); free(b->hash_pd); free(t);
         return NULL;
     }
@@ -1234,8 +1238,7 @@ ht_table_t *ht_create(const ht_config_t *cfg,
 void ht_destroy(ht_table_t *t) {
     if (!t) return;
     ht_bare_t *b = &t->bare;
-    free(b->spill_hash_pd);
-    free(b->spill_vals);
+    free(b->spill_block);
     free(b->hash_pd);
     free(b->vals);
     free(t->entries);
@@ -1623,6 +1626,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
 
     uint64_t *old_spill_hash_pd = b->spill_hash_pd;
     uint32_t *old_spill_vals = b->spill_vals;
+    uint8_t *old_spill_block = b->spill_block;
     size_t old_spill_len = b->spill_len;
 
     // Allocate new main table
@@ -1656,21 +1660,17 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
 
     // Allocate new spill lane
     size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    uint64_t *new_spill_hash_pd = calloc(new_spill_cap, sizeof(uint64_t));
-    if (!new_spill_hash_pd) {
+    size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    uint8_t *new_spill_block = malloc(new_spill_size);
+    if (!new_spill_block) {
         free(new_arena); free(new_entries); free(new_vals); free(new_hash_pd);
         b->resizing = false;
         return false;
     }
-
-    uint32_t *new_spill_vals = malloc(new_spill_cap * sizeof(uint32_t));
-    if (!new_spill_vals) {
-        free(new_spill_hash_pd); free(new_arena); free(new_entries);
-        free(new_vals); free(new_hash_pd);
-        b->resizing = false;
-        return false;
-    }
-    memset(new_spill_vals, 0xFF, new_spill_cap * sizeof(uint32_t));
+    memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
+    memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
+    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
+    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
 
     // Swap to new state
     b->hash_pd = new_hash_pd;
@@ -1678,6 +1678,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
     b->capacity = new_capacity;
     b->size = 0;
     b->tombstone_cnt = 0;
+    b->spill_block = new_spill_block;
     b->spill_hash_pd = new_spill_hash_pd;
     b->spill_vals = new_spill_vals;
     b->spill_cap = new_spill_cap;
@@ -1729,8 +1730,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
     free(old_vals);
     free(old_entries);
     free(old_arena);
-    free(old_spill_hash_pd);
-    free(old_spill_vals);
+    free(old_spill_block);
     b->resizing = false;
     return reinsert_ok;
 }
@@ -1750,6 +1750,7 @@ bool ht_compact(ht_table_t *t) {
 
     uint64_t *old_spill_hash_pd = b->spill_hash_pd;
     uint32_t *old_spill_vals = b->spill_vals;
+    uint8_t *old_spill_block = b->spill_block;
     size_t old_spill_len = b->spill_len;
 
     // Allocate new main table (same capacity)
@@ -1780,25 +1781,23 @@ bool ht_compact(ht_table_t *t) {
 
     // Allocate new spill lane
     size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    uint64_t *new_spill_hash_pd = calloc(new_spill_cap, sizeof(uint64_t));
-    if (!new_spill_hash_pd) {
+    size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    uint8_t *new_spill_block = malloc(new_spill_size);
+    if (!new_spill_block) {
         free(new_arena); free(new_entries); free(new_vals); free(new_hash_pd);
         return false;
     }
-
-    uint32_t *new_spill_vals = malloc(new_spill_cap * sizeof(uint32_t));
-    if (!new_spill_vals) {
-        free(new_spill_hash_pd); free(new_arena); free(new_entries);
-        free(new_vals); free(new_hash_pd);
-        return false;
-    }
-    memset(new_spill_vals, 0xFF, new_spill_cap * sizeof(uint32_t));
+    memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
+    memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
+    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
+    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
 
     // Swap to new state
     b->hash_pd = new_hash_pd;
     b->vals = new_vals;
     b->size = 0;
     b->tombstone_cnt = 0;
+    b->spill_block = new_spill_block;
     b->spill_hash_pd = new_spill_hash_pd;
     b->spill_vals = new_spill_vals;
     b->spill_cap = new_spill_cap;
@@ -1849,8 +1848,7 @@ bool ht_compact(ht_table_t *t) {
     free(old_vals);
     free(old_entries);
     free(old_arena);
-    free(old_spill_hash_pd);
-    free(old_spill_vals);
+    free(old_spill_block);
     return reinsert_ok;
 }
 
