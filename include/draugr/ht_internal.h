@@ -30,9 +30,13 @@ extern "C" {
 // Sentinels & Pack/Unpack
 // ============================================================================
 
+// Hash values with lower 48 bits 0 or 1 are reserved:
+//   0 → unoccupied (HASH_EMPTY)
+//   1 → tombstone (HASH_TOMB)
+//   ≥2 → live entry
 #define HASH_EMPTY     0ULL
 #define HASH_TOMB      1ULL
-#define HASH_MASK      0x0000FFFFFFFFFFFFULL
+#define HASH_MASK      0x0000FFFFFFFFFFFFULL  // Lower 48 bits of 64-bit hash
 #define VAL_NONE       UINT32_MAX
 
 static inline uint64_t hpd_hash(uint64_t hpd) {
