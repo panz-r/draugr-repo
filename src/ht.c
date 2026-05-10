@@ -998,7 +998,9 @@ static uint32_t alloc_entry(ht_table_t *t, uint16_t hash_hi,
         return VAL_NONE;
     }
     memcpy(data, key, key_len);
-    memcpy((uint8_t *)data + key_len, value, value_len);
+    if (value_len > 0) {
+        memcpy((uint8_t *)data + key_len, value, value_len);
+    }
 
     uint32_t eidx = (uint32_t)t->entry_count++;
     t->entries[eidx].key_len = (uint16_t)key_len;
@@ -1457,7 +1459,8 @@ int64_t ht_inc(ht_table_t *t, const void *key, size_t key_len, int64_t delta) {
 
     int64_t new_val;
     if (found && val_len == sizeof(int64_t)) {
-        new_val = *(const int64_t *)found + delta;
+        memcpy(&new_val, found, sizeof(new_val));
+        new_val += delta;
     } else {
         new_val = delta;
     }
@@ -1475,7 +1478,8 @@ int64_t ht_inc_with_hash(ht_table_t *t, uint64_t hash,
 
     int64_t new_val;
     if (found && val_len == sizeof(int64_t)) {
-        new_val = *(const int64_t *)found + delta;
+        memcpy(&new_val, found, sizeof(new_val));
+        new_val += delta;
     } else {
         new_val = delta;
     }
@@ -1653,7 +1657,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
     // Allocate new arena
     uint8_t *new_arena = malloc(old_arena_cap > 0 ? old_arena_cap : 1024);
     if (!new_arena) {
-        free(new_entries); free(new_vals); free(new_hash_pd);
+        free(new_entries); free(new_vals); free(new_hash_pd); free(old_spill_block);
         b->resizing = false;
         return false;
     }

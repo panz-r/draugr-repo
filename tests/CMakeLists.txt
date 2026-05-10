@@ -2,6 +2,10 @@ add_executable(test_ht test_ht.c)
 target_link_libraries(test_ht draugr)
 add_test(NAME ht_unit_tests COMMAND test_ht)
 
+add_executable(test_public_api test_public_api.c)
+target_link_libraries(test_public_api draugr)
+add_test(NAME ht_public_api_tests COMMAND test_public_api)
+
 add_executable(test_stress test_stress.c)
 target_link_libraries(test_stress draugr)
 add_test(NAME ht_stress_tests COMMAND test_stress)
