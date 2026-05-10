@@ -1299,6 +1299,12 @@ static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
     if (!b->resizing && (double)(b->size + 1) / (double)b->capacity > b->max_load_factor) {
         if (b->capacity > SIZE_MAX / 2 || !ht_resize(t, b->capacity * 2))
             return HT_INSERT_FAILED;
+        if (b->size == 0) {
+            b->resizing = false;
+            b->size = 0;
+            b->tombstone_cnt = 0;
+            return HT_INSERT_FAILED;
+        }
     }
 
     double total = (double)b->size + (double)b->tombstone_cnt;
