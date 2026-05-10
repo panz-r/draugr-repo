@@ -315,7 +315,7 @@ static void test_insert_then_oom_preserves_state(void) {
     assert(size_before == 5);
 
     alloc_mock_set_max_alloc_size(1000000);
-    char fail_key[8] = {0xFF};
+    uint8_t fail_key[8] = {0xFF};
     char fail_val[100000];
     memset(fail_val, 'x', sizeof(fail_val));
     bool ok = ht_upsert(ht, fail_key, sizeof(fail_key), fail_val, sizeof(fail_val));
@@ -883,8 +883,8 @@ static void test_do_insert_hash_oom_after_alloc(void) {
     size_t arena_size_before = ht->arena_size;
 
     alloc_mock_set_max_alloc_calls(3);
-    char k[8] = {200};
-    char v[8] = {200};
+    uint8_t k[8] = {200};
+    uint8_t v[8] = {200};
     bool ok = ht_upsert(ht, k, sizeof(k), v, sizeof(v));
     if (!ok) {
         if (ht->entry_count != entry_count_before || ht->arena_size != arena_size_before) {
