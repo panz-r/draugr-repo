@@ -37,8 +37,13 @@ static void *entry_at(const ht_cache_t *c, uint32_t idx) {
 
 /* Get index from entry pointer */
 static uint32_t entry_index(const ht_cache_t *c, const void *entry) {
-    size_t offset = (size_t)((const uint8_t *)entry - c->entries);
-    return (uint32_t)(offset / c->entry_size);
+    const uint8_t *p = (const uint8_t *)entry;
+    const uint8_t *end = c->entries + c->capacity * c->entry_size;
+    if (p < c->entries || p >= end) return NONE;
+    size_t offset = p - c->entries;
+    size_t idx = offset / c->entry_size;
+    if (idx >= c->capacity) return NONE;
+    return (uint32_t)idx;
 }
 
 /* Internal scan context for ht_cache_get */
@@ -223,6 +228,7 @@ void *ht_cache_put(ht_cache_t *c, const void *entry_data, size_t entry_size) {
     c->hashes[slot] = hash;
 
     if (!ht_bare_insert(c->bare, hash, slot)) {
+        c->hashes[slot] = 0;
         c->free_stack[c->free_top++] = slot;
         return NULL;
     }
@@ -254,6 +260,7 @@ void *ht_cache_get(ht_cache_t *c, const void *key, size_t key_len) {
 void *ht_cache_find(ht_cache_t *c, uint64_t hash,
                     ht_cache_scan_fn scan_fn, void *scan_ctx) {
     if (!c || !scan_fn) return NULL;
+    (void)scan_ctx;
 
     find_scan_ctx_t ctx = {
         .cache = c,
@@ -290,7 +297,11 @@ bool ht_cache_remove(ht_cache_t *c, const void *key, size_t key_len) {
 
     if (ctx.matched_idx == NONE) return false;
 
-    if (!ht_bare_remove_val(c->bare, hash, ctx.matched_idx)) return false;
+    c->live[ctx.matched_idx] = 0;
+    if (!ht_bare_remove_val(c->bare, hash, ctx.matched_idx)) {
+        c->live[ctx.matched_idx] = 1;
+        return false;
+    }
     lru_remove(c, ctx.matched_idx);
     c->live[ctx.matched_idx] = 0;
     c->free_stack[c->free_top++] = ctx.matched_idx;
