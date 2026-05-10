@@ -55,6 +55,13 @@ target_link_options(test_property PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wrap
 target_link_libraries(test_property m)
 add_test(NAME ht_property_tests COMMAND test_property)
 
+add_executable(test_property_b test_property_b.c)
+target_sources(test_property_b PRIVATE ../src/ht.c ../src/ht_cache.c ../src/util.c)
+target_include_directories(test_property_b PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_options(test_property_b PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wrap,realloc,--wrap,free)
+target_link_libraries(test_property_b m)
+add_test(NAME ht_property_tests_b COMMAND test_property_b)
+
 add_executable(test_next_pow2 test_next_pow2.c ../src/util.c)
 target_include_directories(test_next_pow2 PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME next_pow2_tests COMMAND test_next_pow2)
