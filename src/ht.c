@@ -1657,7 +1657,7 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
     // Allocate new arena
     uint8_t *new_arena = malloc(old_arena_cap > 0 ? old_arena_cap : 1024);
     if (!new_arena) {
-        free(new_entries); free(new_vals); free(new_hash_pd); free(old_spill_block);
+        free(new_entries); free(new_vals); free(new_hash_pd);
         b->resizing = false;
         return false;
     }
