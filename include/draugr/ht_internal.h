@@ -183,9 +183,6 @@ void    bare_reinsert_spill(ht_bare_t *t,
 // Arena Helpers
 // ============================================================================
 
-void   *arena_alloc(ht_table_t *t, size_t size);
-bool    grow_arena(ht_table_t *t, size_t needed);
-
 #ifdef __cplusplus
 }
 #endif

@@ -941,7 +941,7 @@ void ht_bare_dump(const ht_bare_t *t, uint64_t hash, size_t count) {
 // High-Level Internal: Arena Management
 // ============================================================================
 
-bool grow_arena(ht_table_t *t, size_t needed) {
+static bool grow_arena(ht_table_t *t, size_t needed) {
     if (t->arena_size > SIZE_MAX - needed) return false;
     if (t->arena_size + needed <= t->arena_cap) return true;
     size_t new_cap = t->arena_cap ? t->arena_cap * 2 : 1024;
@@ -963,7 +963,7 @@ bool grow_arena(ht_table_t *t, size_t needed) {
     return true;
 }
 
-void *arena_alloc(ht_table_t *t, size_t n) {
+static void *arena_alloc(ht_table_t *t, size_t n) {
     if (!grow_arena(t, n)) return NULL;
     void *p = t->arena + t->arena_size;
     t->arena_size += n;
