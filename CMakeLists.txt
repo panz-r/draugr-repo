@@ -23,6 +23,10 @@ target_include_directories(draugr
         $<INSTALL_INTERFACE:include>
 )
 
+option(BUILD_TESTS "Build tests" ON)
+
 # Testing
-enable_testing()
-add_subdirectory(tests)
+if(BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
