@@ -115,6 +115,8 @@ static struct arena_slab *slab_create(int size_class, uint8_t freq) {
     return slab;
 }
 
+static _Thread_local uint32_t slab_color;
+
 static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
     uint64_t *bitmap = slab->bitmap;
 
@@ -126,7 +128,10 @@ static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
         uint64_t bits = atomic_load_explicit(&bitmap[word],
                                              memory_order_relaxed);
         if (ARENA_LIKELY(bits != UINT64_MAX)) {
-            int bit = __builtin_ctzll(~bits);
+            uint64_t free_bits = ~bits;
+            uint32_t c = slab_color++ & 63;
+            uint64_t rotated = (free_bits >> c) | (free_bits << (64 - c));
+            int bit = (__builtin_ctzll(rotated) + c) & 63;
             uint64_t mask = ~(1ULL << bit);
             if (atomic_compare_exchange_strong_explicit(
                     &bitmap[word], &bits, mask,
