@@ -90,7 +90,7 @@ struct arena_tcache {
 #define ARENA_COLD_SEGS_PER_CLASS 4
 
 struct arena_seg_hdr {
-	_Atomic uint64_t control;
+	_Atomic uint64_t control;      /* bits 0-47: reserved, bits 48-63: used slot count */
 	_Atomic uint64_t free_bitmap[2];
 	_Atomic unsigned int epoch;
 	uint8_t freq;
