@@ -100,12 +100,14 @@ static void wbuf_flush(struct arena *a, int freq, int sc) {
 
 	if (wbuf->sealed) return;
 
+	wbuf->sealed = true;
+
 	uint32_t count = (uint32_t)atomic_fetch_and_explicit(&wbuf->count, 0,
 		memory_order_acq_rel);
-	if (count == 0) return;
+	if (count == 0) { wbuf->sealed = false; return; }
 
 	uint8_t *ring = a->arenas[freq][sc].u.hot.ring_base;
-	if (!ring) return;
+	if (!ring) { wbuf->sealed = false; return; }
 
 	size_t ring_cap = a->arenas[freq][sc].u.hot.ring_cap;
 	size_t ring_pos = atomic_load_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
@@ -118,7 +120,6 @@ static void wbuf_flush(struct arena *a, int freq, int sc) {
 		entry_sz = (entry_sz + 15) & ~(size_t)15;
 
 		if (ring_pos + entry_sz > ring_cap) {
-			wbuf->sealed = true;
 			atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
 				ring_pos, memory_order_release);
 			a->wbuf_flushes++;
@@ -140,6 +141,8 @@ static void wbuf_flush(struct arena *a, int freq, int sc) {
 	atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
 		ring_pos, memory_order_release);
 	a->wbuf_flushes++;
+
+	wbuf->sealed = false;
 }
 
 static void wbuf_reset(struct arena_write_buffer *wbuf) {
