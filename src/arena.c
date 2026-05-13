@@ -22,7 +22,7 @@
 #include <unistd.h>
 #include <pthread.h>
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) && defined(__AVX2__)
 #include <immintrin.h>
 #elif defined(__aarch64__) || defined(_M_ARM64)
 #include <arm_neon.h>
@@ -57,7 +57,7 @@ static size_t slab_data_offset(void) {
 }
 
 static int bitmap_find_nonfull_word(const uint64_t *bitmap) {
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) && defined(__AVX2__)
     __m256i all_ones = _mm256_set1_epi64x((long long)UINT64_MAX);
     __m256i chunk = _mm256_loadu_si256((const __m256i *)bitmap);
     __m256i cmp = _mm256_cmpeq_epi64(chunk, all_ones);
