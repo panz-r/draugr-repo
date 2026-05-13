@@ -120,6 +120,32 @@ static _Thread_local uint32_t slab_color;
 static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
     uint64_t *bitmap = slab->bitmap;
 
+    uint32_t top = atomic_load_explicit(&slab->free_top, memory_order_acquire);
+    while (top > 0) {
+        if (atomic_compare_exchange_weak_explicit(&slab->free_top, &top, top - 1,
+                                                   memory_order_acq_rel,
+                                                   memory_order_acquire)) {
+            uint32_t slot = slab->free_stack[top - 1];
+            int word = slot / 64;
+            int bit = slot % 64;
+            uint64_t bits = atomic_load_explicit(&bitmap[word],
+                                                 memory_order_relaxed);
+            uint64_t mask = 1ULL << bit;
+            if ((bits & mask) &&
+                atomic_compare_exchange_strong_explicit(
+                    &bitmap[word], &bits, bits & ~mask,
+                    memory_order_acq_rel, memory_order_relaxed)) {
+                atomic_fetch_add_explicit(&slab->used_count, 1,
+                                          memory_order_relaxed);
+                size_t off = slab_data_offset();
+                void *ptr = (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
+                __builtin_prefetch(ptr, 1, 3);
+                return ptr;
+            }
+            continue;
+        }
+    }
+
     int start = bitmap_find_nonfull_word(bitmap);
     if (start < 0) return NULL;
 
@@ -175,6 +201,12 @@ static bool slab_free_slot(struct arena_slab *slab, void *ptr) {
     atomic_store_explicit(&slab->bitmap[word], bits | set_mask,
                           memory_order_release);
     atomic_fetch_sub_explicit(&slab->used_count, 1, memory_order_relaxed);
+
+    uint32_t idx = atomic_fetch_add_explicit(&slab->free_top, 1,
+                                             memory_order_release);
+    if (idx < ARENA_SLAB_SLOTS)
+        slab->free_stack[idx] = slot;
+
     return true;
 }
 
@@ -929,6 +961,7 @@ void arena_clear(struct arena *a) {
                                               UINT64_MAX, memory_order_relaxed);
                     }
                     atomic_store(&set->slabs[i]->used_count, 0);
+                    atomic_store(&set->slabs[i]->free_top, 0);
                 }
             }
             atomic_store(&set->free_slots, atomic_load(&set->total_slots));

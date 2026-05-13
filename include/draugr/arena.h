@@ -43,6 +43,8 @@ enum arena_freq {
 struct arena_slab {
     uint64_t bitmap[4];
     _Atomic unsigned int used_count;
+    _Atomic uint32_t free_top;
+    uint32_t free_stack[ARENA_SLAB_SLOTS];
     uint8_t size_class;
     uint8_t freq;
     uint16_t node_id;
