@@ -184,6 +184,13 @@ struct arena {
 };
 
 /* ─── Public API ──────────────────────────────────────────────── */
+
+/*
+ * Thread safety: arena_create, arena_alloc, arena_free, and arena_destroy
+ * are individually safe for concurrent access. arena_clear and arena_compact
+ * require external synchronization — no concurrent alloc/free may be in
+ * progress when these are called.
+ */
 struct arena *arena_create(size_t initial_capacity);
 void arena_destroy(struct arena *a);
 

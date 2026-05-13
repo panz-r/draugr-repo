@@ -186,64 +186,67 @@ bool bare_spill_remove_val(ht_bare_t *t, uint64_t h48, uint32_t val) {
 // ============================================================================
 
 bool bare_rh_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
-    size_t cap_mask = t->capacity - 1;
-    size_t ideal = h48 & cap_mask;
+ size_t cap_mask = t->capacity - 1;
+ size_t ideal = h48 & cap_mask;
 
-    uint32_t cur_val = val;
-    size_t idx = ideal;
-    uint16_t dist = 0;
+ uint32_t cur_val = val;
+ size_t idx = ideal;
+ uint16_t dist = 0;
 
-    while (1) {
-        uint64_t slot_hpd = t->hash_pd[idx];
+ while (1) {
+ uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (hpd_available(slot_hpd)) {
-            if (hpd_tomb(slot_hpd)) {
-                bool blocked = false;
-                for (size_t k = 1; k <= BSHIFT_CAP; k++) {
-                    size_t chk = (idx + k) & cap_mask;
-                    uint64_t chk_hpd = t->hash_pd[chk];
-                    if (hpd_empty(chk_hpd)) break;
-                    if (hpd_tomb(chk_hpd)) continue;
-                    if (hpd_pd(chk_hpd) > dist + (uint16_t)k) {
-                        blocked = true;
-                        break;
-                    }
-                }
-                if (blocked) {
-                    idx = (idx + 1) & cap_mask;
-                    dist++;
-                    continue;
-                }
-                t->tombstone_cnt--;
-            }
-            t->hash_pd[idx] = hpd_pack(h48, dist);
-            t->vals[idx] = cur_val;
-            t->size++;
-            return true;
-        }
+ if (hpd_available(slot_hpd)) {
+ if (hpd_tomb(slot_hpd)) {
+ bool blocked = false;
+ for (size_t k = 1; k <= BSHIFT_CAP; k++) {
+ size_t chk = (idx + k) & cap_mask;
+ uint64_t chk_hpd = t->hash_pd[chk];
+ if (hpd_empty(chk_hpd)) break;
+ if (hpd_tomb(chk_hpd)) continue;
+ if (hpd_pd(chk_hpd) > dist + (uint16_t)k) {
+ blocked = true;
+ break;
+ }
+ }
+ if (blocked) {
+ idx = (idx + 1) & cap_mask;
+ dist++;
+ continue;
+ }
+ t->tombstone_cnt--;
+ }
+ t->hash_pd[idx] = hpd_pack(h48, dist);
+ t->vals[idx] = cur_val;
+ t->size++;
+ return true;
+ }
 
-        if (hpd_pd(slot_hpd) < dist) {
-            uint32_t old_val = t->vals[idx];
+ if (hpd_pd(slot_hpd) < dist) {
+ uint32_t old_val = t->vals[idx];
 
-            t->hash_pd[idx] = hpd_pack(h48, dist);
-            t->vals[idx] = cur_val;
+ t->hash_pd[idx] = hpd_pack(h48, dist);
+ t->vals[idx] = cur_val;
 
-            h48 = hpd_hash(slot_hpd);
-            dist = hpd_pd(slot_hpd) + 1;
-            cur_val = old_val;
+ h48 = hpd_hash(slot_hpd);
+ dist = hpd_pd(slot_hpd) + 1;
+ cur_val = old_val;
 
-            idx = (idx + 1) & cap_mask;
-            continue;
-        }
+ idx = (idx + 1) & cap_mask;
+ continue;
+ }
 
-        idx = (idx + 1) & cap_mask;
-        dist++;
+ idx = (idx + 1) & cap_mask;
+ dist++;
 
-        if (dist > t->capacity) {
-            if (!bare_resize_table(t)) return false;
-            return bare_rh_insert(t, h48, cur_val);
-        }
-    }
+ if (dist > t->capacity) {
+ if (!bare_resize_table(t)) return false;
+ cap_mask = t->capacity - 1;
+ ideal = h48 & cap_mask;
+ idx = ideal;
+ dist = 0;
+ }
+ }
 }
 
 // ============================================================================

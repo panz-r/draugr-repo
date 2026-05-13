@@ -736,36 +736,45 @@ struct arena *arena_create(size_t initial_capacity) {
         }
     }
 
-    for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
-        a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf = wbuf_create(ARENA_FREQ_HOT, sc);
-        a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap = 64 * 1024;
-        a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base = mmap(NULL,
-            a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        atomic_store(&a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_pos, 0);
-    }
+ for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf = wbuf_create(ARENA_FREQ_HOT, sc);
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap = 64 * 1024;
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base = mmap(NULL,
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap,
+ PROT_READ | PROT_WRITE,
+ MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+ atomic_store(&a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_pos, 0);
+ if (!a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf ||
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base == MAP_FAILED) {
+ if (a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base != MAP_FAILED)
+ munmap(a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base,
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap);
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base = NULL;
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap = 0;
+ free(a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf);
+ a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf = NULL;
+ goto fail;
+ }
+ }
 
-    for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
-        a->arenas[ARENA_FREQ_WARM][sc].u.slabs = calloc(1, sizeof(struct arena_slab_set));
-        if (a->arenas[ARENA_FREQ_WARM][sc].u.slabs) {
-            atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->slab_count, 0);
-            atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->total_slots, 0);
-            atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->free_slots, 0);
-        }
-    }
+ for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
+ a->arenas[ARENA_FREQ_WARM][sc].u.slabs = calloc(1, sizeof(struct arena_slab_set));
+ if (!a->arenas[ARENA_FREQ_WARM][sc].u.slabs) goto fail;
+ atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->slab_count, 0);
+ atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->total_slots, 0);
+ atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->free_slots, 0);
+ }
 
-    for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
-        a->arenas[ARENA_FREQ_COLD][sc].u.segs = calloc(ARENA_COLD_SEGS_PER_CLASS,
-                                                        sizeof(struct arena_segment *));
-        if (a->arenas[ARENA_FREQ_COLD][sc].u.segs) {
-            for (int i = 0; i < ARENA_COLD_SEGS_PER_CLASS; i++) {
-                a->arenas[ARENA_FREQ_COLD][sc].u.segs[i] = seg_create(
-                    ARENA_FREQ_COLD, (uint8_t)sc, (uint8_t)a->numa_node);
-            }
-        }
-        a->arenas[ARENA_FREQ_COLD][sc].count = ARENA_COLD_SEGS_PER_CLASS;
-    }
+ for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
+ a->arenas[ARENA_FREQ_COLD][sc].u.segs = calloc(ARENA_COLD_SEGS_PER_CLASS,
+ sizeof(struct arena_segment *));
+ if (!a->arenas[ARENA_FREQ_COLD][sc].u.segs) goto fail;
+ for (int i = 0; i < ARENA_COLD_SEGS_PER_CLASS; i++) {
+ a->arenas[ARENA_FREQ_COLD][sc].u.segs[i] = seg_create(
+ ARENA_FREQ_COLD, (uint8_t)sc, (uint8_t)a->numa_node);
+ }
+ a->arenas[ARENA_FREQ_COLD][sc].count = ARENA_COLD_SEGS_PER_CLASS;
+ }
 
     a->epoch_ctl.global_epoch = 0;
     a->epoch_ctl.evacuating = 0;
@@ -784,6 +793,10 @@ struct arena *arena_create(size_t initial_capacity) {
     a->tuner.sample_count = 0;
 
     return a;
+
+fail:
+ arena_destroy(a);
+ return NULL;
 }
 
 void arena_destroy(struct arena *a) {

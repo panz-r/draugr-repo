@@ -11,6 +11,9 @@ extern "C" {
 
 typedef struct ht_cache ht_cache_t;
 
+/* Thread safety: ht_cache_t is NOT thread-safe. All operations require
+ * external synchronization if accessed from multiple threads. */
+
 typedef uint64_t (*ht_cache_hash_fn)(const void *key, size_t key_len, void *ctx);
 typedef bool     (*ht_cache_eq_fn)(const void *key, size_t key_len,
                                    const void *entry, size_t entry_size, void *ctx);
