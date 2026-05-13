@@ -18,6 +18,7 @@
  */
 
 #include "draugr/ht.h"
+#include "draugr/alloc.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -86,41 +87,47 @@ static inline uint64_t hpd_pack(uint64_t hash, uint16_t probe_dist) {
 // ============================================================================
 
 typedef struct {
-    uint16_t key_len;
-    uint16_t hash_hi;      // upper 16 bits of full 64-bit hash
-    uint32_t val_len;
-    uint32_t arena_offset;
+	uint16_t key_len;
+	uint16_t hash_hi;
+	uint32_t val_len;
+	uint8_t *kv_ptr;
 } ht_entry_t;
+
+static inline const void *ht_entry_key(const ht_entry_t *e) {
+	return e->kv_ptr;
+}
+
+static inline const void *ht_entry_val(const ht_entry_t *e) {
+	return e->kv_ptr + e->key_len;
+}
 
 // ============================================================================
 // Bare Table Structure
 // ============================================================================
 
 struct ht_bare {
-    // Main table (SoA probe arrays)
-    uint64_t   *hash_pd;
-    uint32_t   *vals;
-    size_t      capacity;
-    size_t      size;
-    size_t      tombstone_cnt;
+    uint64_t *hash_pd;
+    uint32_t *vals;
+    uint8_t *main_block;
+    size_t capacity;
+    size_t size;
+    size_t tombstone_cnt;
 
-// Spill lane (single contiguous allocation: [hash_pd][vals])
-    uint8_t    *spill_block;
-    uint64_t   *spill_hash_pd;
-    uint32_t   *spill_vals;
-    size_t      spill_cap;
-    size_t      spill_len;
+    uint8_t *spill_block;
+    uint64_t *spill_hash_pd;
+    uint32_t *spill_vals;
+    size_t spill_cap;
+    size_t spill_len;
+    bool spill_in_block;
 
-    // Config
-    double      max_load_factor;
-    double      min_load_factor;
-    double      tomb_threshold;
-    size_t      zombie_window;
+    double max_load_factor;
+    double min_load_factor;
+    double tomb_threshold;
+    size_t zombie_window;
 
-    // Zombie rebuild state
-    size_t      zombie_cursor;
+    size_t zombie_cursor;
 
-    bool        resizing;
+    bool resizing;
 };
 
 // ============================================================================
@@ -128,22 +135,19 @@ struct ht_bare {
 // ============================================================================
 
 struct ht_table {
-    ht_bare_t   bare;             // Embedded bare table
+    ht_bare_t bare;
 
-    // Entry storage
     ht_entry_t *entries;
-    size_t      entry_count;
-    size_t      entry_cap;
+    uint8_t *table_block;
+    size_t entry_count;
+    size_t entry_cap;
+    bool entries_in_block;
 
-    // Arena (key+value bytes)
-    uint8_t    *arena;
-    size_t      arena_size;
-    size_t      arena_cap;
+    struct arena *allocator;
 
-    // Functions
-    ht_hash_fn  hash_fn;
-    ht_eq_fn    eq_fn;
-    void       *user_ctx;
+    ht_hash_fn hash_fn;
+    ht_eq_fn eq_fn;
+    void *user_ctx;
 };
 
 // ============================================================================

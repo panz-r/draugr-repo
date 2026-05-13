@@ -125,73 +125,83 @@ static bool remove_scan_cb(uint32_t val, void *ctx) {
 }
 
 ht_cache_t *ht_cache_create(const ht_cache_config_t *cfg) {
-    if (!cfg || cfg->capacity == 0 || cfg->entry_size == 0 || !cfg->hash_fn)
-        return NULL;
+ if (!cfg || cfg->capacity == 0 || cfg->entry_size == 0 || !cfg->hash_fn)
+  return NULL;
 
-    ht_cache_t *c = calloc(1, sizeof(*c));
-    if (!c) return NULL;
+ ht_cache_t *c = calloc(1, sizeof(*c));
+ if (!c) return NULL;
 
-    c->capacity   = cfg->capacity;
-    c->entry_size = cfg->entry_size;
-    c->hash_fn    = cfg->hash_fn;
-    c->eq_fn      = cfg->eq_fn;
-    c->user_ctx   = cfg->user_ctx;
-    c->lru_head   = NONE;
-    c->lru_tail   = NONE;
+ c->capacity = cfg->capacity;
+ c->entry_size = cfg->entry_size;
+ c->hash_fn = cfg->hash_fn;
+ c->eq_fn = cfg->eq_fn;
+ c->user_ctx = cfg->user_ctx;
+ c->lru_head = NONE;
+ c->lru_tail = NONE;
 
-    size_t cap = cfg->capacity;
-    c->entries    = calloc(cap, cfg->entry_size);
-    c->hashes     = calloc(cap, sizeof(uint64_t));
-    c->live       = calloc(cap, 1);
-    c->lru_prev   = malloc(cap * sizeof(uint32_t));
-    c->lru_next   = malloc(cap * sizeof(uint32_t));
-    c->free_stack = malloc(cap * sizeof(uint32_t));
+ size_t cap = cfg->capacity;
+ size_t entries_sz = cap * cfg->entry_size;
+ size_t hashes_sz = cap * sizeof(uint64_t);
+ size_t live_sz = cap;
+ size_t lru_prev_sz = cap * sizeof(uint32_t);
+ size_t lru_next_sz = cap * sizeof(uint32_t);
+ size_t free_stack_sz = cap * sizeof(uint32_t);
 
-    if (!c->entries || !c->hashes || !c->live ||
-        !c->lru_prev || !c->lru_next || !c->free_stack) {
-        ht_cache_destroy(c);
-        return NULL;
-    }
+ size_t off = 0;
+ size_t off_entries = off; off += entries_sz;
+ off = (off + 7) & ~(size_t)7;
+ size_t off_hashes = off; off += hashes_sz;
+ off = (off + 7) & ~(size_t)7;
+ size_t off_live = off; off += live_sz;
+ off = (off + 3) & ~(size_t)3;
+ size_t off_lru_prev = off; off += lru_prev_sz;
+ off = (off + 3) & ~(size_t)3;
+ size_t off_lru_next = off; off += lru_next_sz;
+ off = (off + 3) & ~(size_t)3;
+ size_t off_free_stack = off; off += free_stack_sz;
+ size_t block_sz = off;
 
-    for (size_t i = 0; i < cap; i++) {
-        c->lru_prev[i] = NONE;
-        c->lru_next[i] = NONE;
-        c->free_stack[i] = (uint32_t)(cap - 1 - i);
-    }
-    c->free_top = cap;
+ c->cache_block = calloc(1, block_sz);
+ if (!c->cache_block) { ht_cache_destroy(c); return NULL; }
 
-    /* Bare table at ~2× capacity for tombstone headroom */
-    size_t bare_cap;
-    if (cap > SIZE_MAX / 2) bare_cap = SIZE_MAX;
-    else bare_cap = next_pow2(cap * 2);
-    if (bare_cap < 64) bare_cap = 64;
+ c->entries    = c->cache_block + off_entries;
+ c->hashes     = (uint64_t *)(c->cache_block + off_hashes);
+ c->live       = c->cache_block + off_live;
+ c->lru_prev   = (uint32_t *)(c->cache_block + off_lru_prev);
+ c->lru_next   = (uint32_t *)(c->cache_block + off_lru_next);
+ c->free_stack = (uint32_t *)(c->cache_block + off_free_stack);
 
-    ht_config_t bare_cfg = {
-        .initial_capacity = bare_cap,
-        .max_load_factor  = 0.75,
-        .min_load_factor  = 0,
-        .tomb_threshold   = 0.30,
-        .zombie_window    = 16,
-    };
-    c->bare = ht_bare_create(&bare_cfg);
-    if (!c->bare) {
-        ht_cache_destroy(c);
-        return NULL;
-    }
+ for (size_t i = 0; i < cap; i++) {
+  c->lru_prev[i] = NONE;
+  c->lru_next[i] = NONE;
+  c->free_stack[i] = (uint32_t)(cap - 1 - i);
+ }
+ c->free_top = cap;
 
-    return c;
+ /* Bare table at ~2x capacity for tombstone headroom */
+ size_t bare_cap;
+ if (cap > SIZE_MAX / 2) bare_cap = SIZE_MAX;
+ else bare_cap = next_pow2(cap * 2);
+ if (bare_cap < 64) bare_cap = 64;
+
+ ht_config_t bare_cfg = {
+  .initial_capacity = bare_cap,
+  .max_load_factor = 0.75,
+  .min_load_factor = 0,
+  .tomb_threshold = 0.30,
+  .zombie_window = 16,
+ };
+ c->bare = ht_bare_create(&bare_cfg);
+ if (!c->bare) { ht_cache_destroy(c); return NULL; }
+
+ return c;
 }
 
 void ht_cache_destroy(ht_cache_t *c) {
-    if (!c) return;
-    ht_bare_destroy(c->bare);
-    free(c->entries);
-    free(c->hashes);
-    free(c->live);
-    free(c->lru_prev);
-    free(c->lru_next);
-    free(c->free_stack);
-    free(c);
+ if (!c) return;
+ ht_bare_destroy(c->bare);
+ free(c->cache_block);
+ free(c);
 }
 
 void ht_cache_clear(ht_cache_t *c) {

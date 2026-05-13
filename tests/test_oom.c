@@ -750,25 +750,25 @@ static void test_arena_waste_on_failed_update(void) {
     bool ok = ht_upsert(ht, k, sizeof(k), v, sizeof(v));
     assert(ok);
 
-    printf("    after small upsert: arena_size=%zu, arena_cap=%zu\n", ht->arena_size, ht->arena_cap);
+    size_t entry_count_before = ht->entry_count;
 
     alloc_mock_set_max_alloc_size(1024);
     char v_large[1400];
     memset(v_large, 'x', sizeof(v_large));
 
     ok = ht_upsert(ht, k, sizeof(k), v_large, sizeof(v_large));
-    printf("    after large upsert (ok=%d): arena_size=%zu, arena_cap=%zu, fail_count=%d\n",
-           ok, ht->arena_size, ht->arena_cap, alloc_mock_get_fail_count());
+    printf(" after large upsert (ok=%d): entry_count=%zu, fail_count=%d\n",
+           ok, ht->entry_count, alloc_mock_get_fail_count());
 
     if (ok) {
-        printf("  arena waste: update succeeded without OOM\n");
+        printf(" arena waste: update succeeded without OOM\n");
     } else if (alloc_mock_get_fail_count() == 0) {
-        printf("  arena waste: realloc bypasses mock (known limitation)\n");
-    } else if (ht->arena_size > 24 + sizeof(v)) {
-        printf("  arena_waste: BUG - arena grew from %zu to %zu despite allocation failure\n",
-               24UL, ht->arena_size);
+        printf(" arena waste: malloc bypasses mock (known limitation)\n");
+    } else if (ht->entry_count != entry_count_before) {
+        printf(" arena_waste: BUG - entry_count changed from %zu to %zu despite allocation failure\n",
+               entry_count_before, ht->entry_count);
     } else {
-        printf("  arena waste: PASS (arena_size stayed at %zu)\n", ht->arena_size);
+        printf(" arena waste: PASS (entry_count stayed at %zu)\n", ht->entry_count);
     }
     ht_destroy(ht);
 }
@@ -880,21 +880,20 @@ static void test_do_insert_hash_oom_after_alloc(void) {
     }
 
     size_t entry_count_before = ht->entry_count;
-    size_t arena_size_before = ht->arena_size;
 
     alloc_mock_set_max_alloc_calls(3);
     uint8_t k[8] = {200};
     uint8_t v[8] = {200};
     bool ok = ht_upsert(ht, k, sizeof(k), v, sizeof(v));
     if (!ok) {
-        if (ht->entry_count != entry_count_before || ht->arena_size != arena_size_before) {
-            printf("  do_insert_partial BUG: entry_count or arena_size drifted\n");
+        if (ht->entry_count != entry_count_before) {
+            printf(" do_insert_partial BUG: entry_count drifted\n");
         } else {
             verify_table_state(ht);
-            printf("  do_insert_with_hash OOM after alloc: PASS\n");
+            printf(" do_insert_with_hash OOM after alloc: PASS\n");
         }
     } else {
-        printf("  do_insert: succeeded (need lower limit)\n");
+        printf(" do_insert: succeeded (need lower limit)\n");
     }
     ht_destroy(ht);
 }

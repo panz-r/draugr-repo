@@ -372,13 +372,10 @@ static void test_lru_remove(void) {
 // ============================================================================
 
 static void test_grow_arena(void) {
-    printf("Test: grow_arena doubling...\n");
+    printf("Test: many entries with individual mallocs...\n");
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
     assert(t != NULL);
 
-    size_t initial_cap = t->arena_cap;
-
-    // Insert many entries to force arena growth
     for (int i = 0; i < 100; i++) {
         char key[32]; snprintf(key, sizeof(key), "key%d", i);
         char value[128];
@@ -386,10 +383,6 @@ static void test_grow_arena(void) {
         ht_upsert(t, key, strlen(key), value, sizeof(value));
     }
 
-    // Arena should have grown
-    assert(t->arena_cap > initial_cap);
-
-    // Verify all entries still accessible
     for (int i = 0; i < 100; i++) {
         char key[32]; snprintf(key, sizeof(key), "key%d", i);
         const char *v = ht_find(t, key, strlen(key), NULL);
@@ -397,8 +390,9 @@ static void test_grow_arena(void) {
     }
 
     ht_destroy(t);
-    printf("  PASS\n");
+    printf(" PASS\n");
 }
+
 
 // ============================================================================
 // bare_reinsert_spill test
@@ -514,17 +508,13 @@ static void test_bare_spill_grow_insert(void) {
 // ============================================================================
 
 static void test_grow_arena_comprehensive(void) {
-    printf("Test: grow_arena comprehensive...\n");
+    printf("Test: large values with individual mallocs...\n");
     ht_config_t cfg = { .initial_capacity = 4 };
     ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
     assert(t != NULL);
 
-    // Initial arena capacity is small
-    size_t initial_cap = t->arena_cap;
-
-    // Insert increasingly large values to force arena growth
     for (int i = 0; i < 10; i++) {
-        size_t val_size = 100 * (i + 1); /* 100, 200, 300, ... 1000 bytes */
+        size_t val_size = 100 * (i + 1);
         char *val = malloc(val_size);
         memset(val, 'V', val_size);
 
@@ -536,13 +526,8 @@ static void test_grow_arena_comprehensive(void) {
         free(val);
     }
 
-    // Arena should have grown beyond initial
-    assert(t->arena_cap > initial_cap);
-
-    // Verify all values still readable
     for (int i = 0; i < 10; i++) {
-        char key[16];
-        snprintf(key, sizeof(key), "key%d", i);
+        char key[16]; snprintf(key, sizeof(key), "key%d", i);
         size_t val_size = 100 * (i + 1);
         size_t out_len = 0;
         const char *found = ht_find(t, key, strlen(key), &out_len);
@@ -551,8 +536,9 @@ static void test_grow_arena_comprehensive(void) {
     }
 
     ht_destroy(t);
-    printf("  PASS\n");
+    printf(" PASS\n");
 }
+
 
 // ============================================================================
 // lru_evict test — via ht_cache_evict wrapper

@@ -431,32 +431,32 @@ static void test_arena_waste_detection(void) {
     char key[16] = {0};
     char val_small[16] = {0};
     ht_upsert(ht, key, 16, val_small, 16);
-    
-    size_t arena_before = ht->arena_size;
-    printf("  After small insert: arena_size=%zu\n", arena_before);
-    
+
+    size_t entry_count_before = ht->entry_count;
+    printf(" After small insert: entry_count=%zu\n", entry_count_before);
+
     int bugs_found = 0;
     for (int trial = 0; trial < 20 && bugs_found == 0; trial++) {
         alloc_mock_reset();
         alloc_mock_set_max_alloc_calls(5 + trial);
-        
-        size_t before = ht->arena_size;
+
+        size_t before = ht->entry_count;
         bool ok = ht_upsert(ht, key, 16, val_small, 16);
-        size_t after = ht->arena_size;
-        
-        printf("  trial %d: max_alloc=%d, before=%zu, after=%zu, ok=%d\n",
+        size_t after = ht->entry_count;
+
+        printf(" trial %d: max_alloc=%d, before=%zu, after=%zu, ok=%d\n",
                trial, 5 + trial, before, after, ok);
-        
+
         if (!ok && after != before) {
-            printf("  BUG: arena_size changed from %zu to %zu on failed upsert\n", before, after);
+            printf(" BUG: entry_count changed from %zu to %zu on failed upsert\n", before, after);
             bugs_found++;
         }
     }
     
     if (bugs_found == 0) {
-        PASS("arena rollback: arena_size unchanged when allocation fails");
+        PASS("arena rollback: entry_count unchanged when allocation fails");
     } else {
-        BUG("arena rollback failed");
+        BUG("arena rollback: entry_count changed on failed alloc");
     }
     
     ht_destroy(ht);
@@ -1291,8 +1291,8 @@ static void test_arena_exhaustion(void) {
         }
         
         if (i % 100 == 0) {
-            printf("  i=%d success=%d fail=%d arena_size=%zu\n", 
-                   i, success_count, fail_count, ht->arena_size);
+            printf(" i=%d success=%d fail=%d entry_count=%zu\n",
+                    i, success_count, fail_count, ht->entry_count);
         }
     }
     
@@ -1635,66 +1635,77 @@ static void test_null_value_handling(void) {
 // ============================================================================
 
 static void test_correlated_key_patterns(void) {
-    printf("\n=== Property: Correlated Key Locality ===\n");
-    
-    uint64_t sm_state = (uint64_t)(time(NULL) ^ 0xFEEDF00DULL);
-    uint32_t seed = (uint32_t)(splitmix64(&sm_state) >> 32);
-    my_srand(seed);
-    printf("  seed=%u\n", seed);
-    
-    ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
-    if (!ht) { BUG("ht_create failed"); return; }
-    model_t *m = model_create();
-    
-    int n = 100;
-    char keys[100][32];
-    char vals[100][32];
-    
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < 32; j++) {
-            keys[i][j] = (char)(i ^ j ^ (splitmix64(&sm_state) & 0xFF));
-            vals[i][j] = (char)(i * 7 ^ j ^ (splitmix64(&sm_state) & 0xFF));
+  printf("\n=== Property: Correlated Key Locality ===\n");
+
+  uint64_t sm_state = (uint64_t)(time(NULL) ^ 0xFEEDF00DULL);
+  uint32_t seed = (uint32_t)(splitmix64(&sm_state) >> 32);
+  my_srand(seed);
+  printf(" seed=%u\n", seed);
+
+  ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
+  if (!ht) { BUG("ht_create failed"); return; }
+  model_t *m = model_create();
+
+  int n = 100;
+  char keys[100][32];
+  char vals[100][32];
+
+  for (int i = 0; i < n; i++) {
+    for (int j = 0; j < 32; j++) {
+      keys[i][j] = (char)(i ^ j ^ (splitmix64(&sm_state) & 0xFF));
+      vals[i][j] = (char)(i * 7 ^ j ^ (splitmix64(&sm_state) & 0xFF));
+    }
+  }
+
+  for (int i = 0; i < n; i++) {
+    ht_upsert(ht, keys[i], 32, vals[i], 32);
+    model_set(m, keys[i], 32, vals[i], 32);
+  }
+
+  for (int epoch = 0; epoch < 50; epoch++) {
+    for (int pass = 0; pass < 10; pass++) {
+      int base = (splitmix64(&sm_state) % n);
+      for (int offset = 0; offset < 20; offset++) {
+        int idx = (base + offset) % n;
+        int action = splitmix64(&sm_state) & 0xFF;
+
+        if (action < 70) {
+          size_t vlen = 0;
+          const char *found = (const char*)ht_find(ht, keys[idx], 32, &vlen);
+          const char *mfound = model_find_val(m, keys[idx], 32, NULL);
+          if ((found != NULL) != (mfound != NULL)) {
+            printf(" MODEL FAIL at epoch %d pass %d idx %d: found=%p mfound=%p\n",
+                   epoch, pass, idx, (void*)found, (void*)mfound);
+            tests_failed++;
+            goto cleanup;
+          }
+        } else if (action < 85) {
+          char newval[32];
+          for (int j = 0; j < 32; j++) newval[j] = (char)(splitmix64(&sm_state) & 0xFF);
+          bool ok = ht_upsert(ht, keys[idx], 32, newval, 32);
+          if (ok) model_set(m, keys[idx], 32, newval, 32);
+        } else {
+          ht_remove(ht, keys[idx], 32);
+          model_remove(m, keys[idx], 32);
         }
+      }
     }
-    
-    for (int i = 0; i < n; i++) {
-        ht_upsert(ht, keys[i], 32, vals[i], 32);
-        model_set(m, keys[i], 32, vals[i], 32);
+
+    if (ht_size(ht) != model_size(m)) {
+      printf(" MODEL FAIL at epoch %d: ht_size=%zu model_size=%zu\n",
+             epoch, ht_size(ht), model_size(m));
+      tests_failed++;
+      goto cleanup;
     }
-    
-    for (int epoch = 0; epoch < 50; epoch++) {
-        for (int pass = 0; pass < 10; pass++) {
-            int base = (splitmix64(&sm_state) % n);
-            for (int offset = 0; offset < 20; offset++) {
-                int idx = (base + offset) % n;
-                int action = splitmix64(&sm_state) & 0xFF;
-                
-                if (action < 70) {
-                    size_t vlen = 0;
-                    const char *found = (const char*)ht_find(ht, keys[idx], 32, &vlen);
-                    const char *mfound = model_find_val(m, keys[idx], 32, NULL);
-                    MODEL_CHECK((found != NULL) == (mfound != NULL));
-                } else if (action < 85) {
-                    char newval[32];
-                    for (int j = 0; j < 32; j++) newval[j] = (char)(splitmix64(&sm_state) & 0xFF);
-                    bool ok = ht_upsert(ht, keys[idx], 32, newval, 32);
-                    if (ok) model_set(m, keys[idx], 32, newval, 32);
-                } else {
-                    ht_remove(ht, keys[idx], 32);
-                    model_remove(m, keys[idx], 32);
-                }
-            }
-        }
-        
-        MODEL_CHECK(ht_size(ht) == model_size(m));
-        const char *err = ht_check_invariants(ht);
-        if (err) { printf("  INVARIANT FAIL at epoch %d: %s\n", epoch, err); tests_failed++; }
-    }
-    
-    PASS("correlated key locality: working set patterns");
-    
-    model_destroy(m);
-    ht_destroy(ht);
+    const char *err = ht_check_invariants(ht);
+    if (err) { printf(" INVARIANT FAIL at epoch %d: %s\n", epoch, err); tests_failed++; goto cleanup; }
+  }
+
+  PASS("correlated key locality: working set patterns");
+
+ cleanup:
+ model_destroy(m);
+ ht_destroy(ht);
 }
 
 // ============================================================================

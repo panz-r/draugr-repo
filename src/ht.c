@@ -41,10 +41,28 @@ static const ht_config_t default_cfg = {
     .zombie_window = 16,
 };
 
-// Insert modes (internal)
-#define INS_UPSERT  0
-#define INS_ALWAYS  1
-#define INS_UNIQUE  2
+#define INS_UPSERT 0
+#define INS_ALWAYS 1
+#define INS_UNIQUE 2
+
+static size_t bare_main_block_size(size_t capacity) {
+    return capacity * sizeof(uint64_t) + capacity * sizeof(uint32_t);
+}
+
+static void bare_main_block_init(ht_bare_t *b, uint8_t *block, size_t capacity) {
+    b->main_block = block;
+    b->hash_pd = (uint64_t *)block;
+    b->vals = (uint32_t *)(block + capacity * sizeof(uint64_t));
+    b->capacity = capacity;
+}
+
+static uint8_t *bare_alloc_main_block(size_t capacity) {
+    size_t sz = bare_main_block_size(capacity);
+    uint8_t *block = calloc(1, sz);
+    if (!block) return NULL;
+    memset(block + capacity * sizeof(uint64_t), 0xFF, capacity * sizeof(uint32_t));
+    return block;
+}
 
 // ============================================================================
 // Bare Internal: Compute X
@@ -69,28 +87,30 @@ bool bare_spill_grow(ht_bare_t *t) {
     uint8_t *new_block = malloc(new_size);
     if (!new_block) return false;
 
-    if (old_cap > 0) {
-        uint64_t *old_hash_pd = (uint64_t*)t->spill_block;
-        uint32_t *old_vals = (uint32_t*)(t->spill_block + old_cap * sizeof(uint64_t));
+  if (old_cap > 0) {
+    uint64_t *old_hash_pd = (uint64_t*)t->spill_block;
+    uint32_t *old_vals = (uint32_t*)(t->spill_block + old_cap * sizeof(uint64_t));
 
-        memcpy(new_block, old_hash_pd, old_cap * sizeof(uint64_t));
-        memset(new_block + old_cap * sizeof(uint64_t), 0, (new_cap - old_cap) * sizeof(uint64_t));
+    memcpy(new_block, old_hash_pd, old_cap * sizeof(uint64_t));
+    memset(new_block + old_cap * sizeof(uint64_t), 0, (new_cap - old_cap) * sizeof(uint64_t));
 
-        uint32_t *new_vals = (uint32_t*)(new_block + new_cap * sizeof(uint64_t));
-        memcpy(new_vals, old_vals, old_cap * sizeof(uint32_t));
-        memset(new_vals + old_cap, 0xFF, (new_cap - old_cap) * sizeof(uint32_t));
+    uint32_t *new_vals = (uint32_t*)(new_block + new_cap * sizeof(uint64_t));
+    memcpy(new_vals, old_vals, old_cap * sizeof(uint32_t));
+    memset(new_vals + old_cap, 0xFF, (new_cap - old_cap) * sizeof(uint32_t));
 
-        free(t->spill_block);
-    } else {
+    if (!t->spill_in_block)
+      free(t->spill_block);
+  } else {
         memset(new_block, 0, new_cap * sizeof(uint64_t));
         memset(new_block + new_cap * sizeof(uint64_t), 0xFF, new_cap * sizeof(uint32_t));
     }
 
-    t->spill_block = new_block;
-    t->spill_hash_pd = (uint64_t*)new_block;
-    t->spill_vals = (uint32_t*)(new_block + new_cap * sizeof(uint64_t));
-    t->spill_cap = new_cap;
-    return true;
+  t->spill_block = new_block;
+  t->spill_hash_pd = (uint64_t*)new_block;
+  t->spill_vals = (uint32_t*)(new_block + new_cap * sizeof(uint64_t));
+  t->spill_cap = new_cap;
+  t->spill_in_block = false;
+  return true;
 }
 
 bool bare_spill_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
@@ -382,26 +402,23 @@ ht_bare_t *ht_bare_create(const ht_config_t *cfg) {
     if (cfg) c = *cfg;
     if (c.initial_capacity < 4) c.initial_capacity = 4;
 
-    t->capacity = next_pow2(c.initial_capacity);
+    size_t cap = next_pow2(c.initial_capacity);
+    uint8_t *main_block = bare_alloc_main_block(cap);
+    if (!main_block) { free(t); return NULL; }
+    bare_main_block_init(t, main_block, cap);
 
-    t->hash_pd = calloc(t->capacity, sizeof(uint64_t));
-    if (!t->hash_pd) { free(t); return NULL; }
-
-    t->vals = malloc(t->capacity * sizeof(uint32_t));
-    if (!t->vals) { free(t->hash_pd); free(t); return NULL; }
-    memset(t->vals, 0xFF, t->capacity * sizeof(uint32_t));
-
-    t->spill_cap = SPILL_INITIAL;
-    size_t spill_size = t->spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
-    t->spill_block = malloc(spill_size);
-    if (!t->spill_block) { free(t->vals); free(t->hash_pd); free(t); return NULL; }
-    memset(t->spill_block, 0, t->spill_cap * sizeof(uint64_t));
-    memset(t->spill_block + t->spill_cap * sizeof(uint64_t), 0xFF, t->spill_cap * sizeof(uint32_t));
-    t->spill_hash_pd = (uint64_t*)t->spill_block;
-    t->spill_vals = (uint32_t*)(t->spill_block + t->spill_cap * sizeof(uint64_t));
+  t->spill_cap = SPILL_INITIAL;
+  size_t spill_size = t->spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+  t->spill_block = malloc(spill_size);
+  if (!t->spill_block) { free(t->main_block); free(t); return NULL; }
+  memset(t->spill_block, 0, t->spill_cap * sizeof(uint64_t));
+  memset(t->spill_block + t->spill_cap * sizeof(uint64_t), 0xFF, t->spill_cap * sizeof(uint32_t));
+  t->spill_hash_pd = (uint64_t*)t->spill_block;
+  t->spill_vals = (uint32_t*)(t->spill_block + t->spill_cap * sizeof(uint64_t));
+  t->spill_in_block = false;
 
     t->max_load_factor = (c.max_load_factor <= 0) ? 0.75 :
-                         (c.max_load_factor > 0.97) ? 0.97 : c.max_load_factor;
+        (c.max_load_factor > 0.97) ? 0.97 : c.max_load_factor;
     t->min_load_factor = (c.min_load_factor >= 0) ? c.min_load_factor : 0.20;
     t->tomb_threshold = (c.tomb_threshold > 0) ? c.tomb_threshold : 0.20;
     t->zombie_window = c.zombie_window;
@@ -411,15 +428,16 @@ ht_bare_t *ht_bare_create(const ht_config_t *cfg) {
 
 void ht_bare_destroy(ht_bare_t *t) {
     if (!t) return;
-    free(t->spill_block);
-    free(t->hash_pd);
-    free(t->vals);
+    if (!t->spill_in_block)
+        free(t->spill_block);
+    free(t->main_block);
     free(t);
 }
 
 void ht_bare_clear(ht_bare_t *t) {
     if (!t) return;
     memset(t->hash_pd, 0, t->capacity * sizeof(uint64_t));
+    memset(t->vals, 0xFF, t->capacity * sizeof(uint32_t));
     memset(t->spill_block, 0, t->spill_cap * sizeof(uint64_t));
     memset(t->spill_block + t->spill_cap * sizeof(uint64_t), 0xFF, t->spill_cap * sizeof(uint32_t));
     t->size = 0;
@@ -648,117 +666,101 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
         return true;
     }
 
-    // Save old state
-    uint64_t *old_hash_pd = t->hash_pd;
-    uint32_t *old_vals = t->vals;
-    size_t old_cap = t->capacity;
+  uint8_t *old_main_block = t->main_block;
+  uint64_t *old_hash_pd = t->hash_pd;
+  uint32_t *old_vals = t->vals;
+  size_t old_cap = t->capacity;
+  bool old_spill_in_block = t->spill_in_block;
 
-    uint64_t *old_spill_hash_pd = t->spill_hash_pd;
-    uint32_t *old_spill_vals = t->spill_vals;
-    uint8_t *old_spill_block = t->spill_block;
-    size_t old_spill_len = t->spill_len;
+  uint64_t *old_spill_hash_pd = t->spill_hash_pd;
+  uint32_t *old_spill_vals = t->spill_vals;
+  uint8_t *old_spill_block = t->spill_block;
+  size_t old_spill_len = t->spill_len;
 
-    // Allocate new main table
-    uint64_t *new_hash_pd = calloc(new_capacity, sizeof(uint64_t));
-    if (!new_hash_pd) { t->resizing = false; return false; }
+  uint8_t *new_main_block = bare_alloc_main_block(new_capacity);
+  if (!new_main_block) { t->resizing = false; return false; }
 
-    uint32_t *new_vals = malloc(new_capacity * sizeof(uint32_t));
-    if (!new_vals) {
-        free(new_hash_pd);
-        t->resizing = false;
-        return false;
-    }
-    memset(new_vals, 0xFF, new_capacity * sizeof(uint32_t));
-
-    // Allocate new spill lane
-    size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
-    uint8_t *new_spill_block = malloc(new_spill_size);
-    if (!new_spill_block) {
-        free(new_vals); free(new_hash_pd);
-        t->resizing = false;
-        return false;
-    }
-    memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
-    memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
-    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
-    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
-
-    // Swap to new state
-    t->hash_pd = new_hash_pd;
-    t->vals = new_vals;
-    t->capacity = new_capacity;
-    t->size = 0;
-    t->tombstone_cnt = 0;
-    t->spill_block = new_spill_block;
-    t->spill_hash_pd = new_spill_hash_pd;
-    t->spill_vals = new_spill_vals;
-    t->spill_cap = new_spill_cap;
-    t->spill_len = 0;
-    t->zombie_cursor = 0;
-
-    bare_reinsert_main(t, old_hash_pd, old_vals, old_cap);
-    bare_reinsert_spill(t, old_spill_hash_pd, old_spill_vals, old_spill_len);
-    bare_place_prophylactic_tombstones(t);
-
-    free(old_hash_pd);
-    free(old_vals);
-    free(old_spill_block);
+  size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
+  size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+  uint8_t *new_spill_block = malloc(new_spill_size);
+  if (!new_spill_block) {
+    free(new_main_block);
     t->resizing = false;
-    return true;
+    return false;
+  }
+  memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
+  memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
+  uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
+  uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
+
+  bare_main_block_init(t, new_main_block, new_capacity);
+  t->size = 0;
+  t->tombstone_cnt = 0;
+  t->spill_block = new_spill_block;
+  t->spill_hash_pd = new_spill_hash_pd;
+  t->spill_vals = new_spill_vals;
+  t->spill_cap = new_spill_cap;
+  t->spill_len = 0;
+  t->spill_in_block = false;
+  t->zombie_cursor = 0;
+
+  bare_reinsert_main(t, old_hash_pd, old_vals, old_cap);
+  bare_reinsert_spill(t, old_spill_hash_pd, old_spill_vals, old_spill_len);
+  bare_place_prophylactic_tombstones(t);
+
+  free(old_main_block);
+  if (!old_spill_in_block)
+    free(old_spill_block);
+  t->resizing = false;
+  return true;
 }
 
 void ht_bare_compact(ht_bare_t *t) {
-    if (!t) return;
+  if (!t) return;
 
-    uint64_t *old_hash_pd = t->hash_pd;
-    uint32_t *old_vals = t->vals;
-    size_t old_cap = t->capacity;
+  uint8_t *old_main_block = t->main_block;
+  uint64_t *old_hash_pd = t->hash_pd;
+  uint32_t *old_vals = t->vals;
+  size_t old_cap = t->capacity;
+  bool old_spill_in_block = t->spill_in_block;
 
-    uint64_t *old_spill_hash_pd = t->spill_hash_pd;
-    uint32_t *old_spill_vals = t->spill_vals;
-    uint8_t *old_spill_block = t->spill_block;
-    size_t old_spill_len = t->spill_len;
+  uint64_t *old_spill_hash_pd = t->spill_hash_pd;
+  uint32_t *old_spill_vals = t->spill_vals;
+  uint8_t *old_spill_block = t->spill_block;
+  size_t old_spill_len = t->spill_len;
 
-    uint64_t *new_hash_pd = calloc(old_cap, sizeof(uint64_t));
-    if (!new_hash_pd) return;
+  uint8_t *new_main_block = bare_alloc_main_block(old_cap);
+  if (!new_main_block) return;
 
-    uint32_t *new_vals = malloc(old_cap * sizeof(uint32_t));
-    if (!new_vals) {
-        free(new_hash_pd);
-        return;
-    }
-    memset(new_vals, 0xFF, old_cap * sizeof(uint32_t));
+  size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
+  size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+  uint8_t *new_spill_block = malloc(new_spill_size);
+  if (!new_spill_block) {
+    free(new_main_block);
+    return;
+  }
+  memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
+  memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
+  uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
+  uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
 
-    size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
-    uint8_t *new_spill_block = malloc(new_spill_size);
-    if (!new_spill_block) {
-        free(new_vals); free(new_hash_pd);
-        return;
-    }
-    memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
-    memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
-    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
-    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
+  bare_main_block_init(t, new_main_block, old_cap);
+  t->size = 0;
+  t->tombstone_cnt = 0;
+  t->spill_block = new_spill_block;
+  t->spill_hash_pd = new_spill_hash_pd;
+  t->spill_vals = new_spill_vals;
+  t->spill_cap = new_spill_cap;
+  t->spill_len = 0;
+  t->spill_in_block = false;
+  t->zombie_cursor = 0;
 
-    t->hash_pd = new_hash_pd;
-    t->vals = new_vals;
-    t->size = 0;
-    t->tombstone_cnt = 0;
-    t->spill_block = new_spill_block;
-    t->spill_hash_pd = new_spill_hash_pd;
-    t->spill_vals = new_spill_vals;
-    t->spill_cap = new_spill_cap;
-    t->spill_len = 0;
-    t->zombie_cursor = 0;
+  bare_reinsert_main(t, old_hash_pd, old_vals, old_cap);
+  bare_reinsert_spill(t, old_spill_hash_pd, old_spill_vals, old_spill_len);
+  bare_place_prophylactic_tombstones(t);
 
-    bare_reinsert_main(t, old_hash_pd, old_vals, old_cap);
-    bare_reinsert_spill(t, old_spill_hash_pd, old_spill_vals, old_spill_len);
-    bare_place_prophylactic_tombstones(t);
-
-    free(old_hash_pd);
-    free(old_vals);
+  free(old_main_block);
+  if (!old_spill_in_block)
     free(old_spill_block);
 }
 
@@ -938,36 +940,17 @@ void ht_bare_dump(const ht_bare_t *t, uint64_t hash, size_t count) {
 }
 
 // ============================================================================
-// High-Level Internal: Arena Management
+// High-Level Internal: Arena / KV Allocation
 // ============================================================================
 
-static bool grow_arena(ht_table_t *t, size_t needed) {
-    if (t->arena_size > SIZE_MAX - needed) return false;
-    if (t->arena_size + needed <= t->arena_cap) return true;
-    size_t new_cap = t->arena_cap ? t->arena_cap * 2 : 1024;
-    if (t->arena_cap > SIZE_MAX / 2) new_cap = SIZE_MAX;
-    else {
-        while (new_cap < t->arena_size + needed) {
-            if (new_cap > SIZE_MAX / 2) {
-                new_cap = SIZE_MAX;
-                break;
-            }
-            new_cap *= 2;
-        }
+static void *kv_alloc(ht_table_t *t, size_t n) {
+#ifndef DRAUGR_USE_MALLOC
+    if (t->allocator) {
+        return arena_alloc(t->allocator, n);
     }
-    if (new_cap > SIZE_MAX) return false;
-    uint8_t *p = realloc(t->arena, new_cap);
-    if (!p) return false;
-    t->arena = p;
-    t->arena_cap = new_cap;
-    return true;
-}
-
-static void *arena_alloc(ht_table_t *t, size_t n) {
-    if (!grow_arena(t, n)) return NULL;
-    void *p = t->arena + t->arena_size;
-    t->arena_size += n;
-    return p;
+#endif
+    (void)t;
+    return malloc(n);
 }
 
 // ============================================================================
@@ -975,28 +958,33 @@ static void *arena_alloc(ht_table_t *t, size_t n) {
 // ============================================================================
 
 static uint32_t alloc_entry(ht_table_t *t, uint16_t hash_hi,
-                            const void *key, size_t key_len,
-                            const void *value, size_t value_len) {
+    const void *key, size_t key_len,
+    const void *value, size_t value_len) {
     if (key_len > UINT16_MAX) return VAL_NONE;
-
-    size_t arena_before = t->arena_size;
 
     if (t->entry_count >= t->entry_cap) {
         size_t new_cap;
         if (t->entry_cap == 0) new_cap = 64;
         else if (t->entry_cap > SIZE_MAX / 2) new_cap = SIZE_MAX;
         else new_cap = t->entry_cap * 2;
-        ht_entry_t *ne = realloc(t->entries, new_cap * sizeof(ht_entry_t));
-        if (!ne) return VAL_NONE;
+
+        ht_entry_t *ne;
+        if (t->entries_in_block) {
+            ne = calloc(new_cap, sizeof(ht_entry_t));
+            if (!ne) return VAL_NONE;
+            memcpy(ne, t->entries, t->entry_count * sizeof(ht_entry_t));
+            t->entries_in_block = false;
+        } else {
+            ne = realloc(t->entries, new_cap * sizeof(ht_entry_t));
+            if (!ne) return VAL_NONE;
+            memset(ne + t->entry_cap, 0, (new_cap - t->entry_cap) * sizeof(ht_entry_t));
+        }
         t->entries = ne;
         t->entry_cap = new_cap;
     }
 
-    void *data = arena_alloc(t, key_len + value_len);
-    if (!data) {
-        t->arena_size = arena_before;
-        return VAL_NONE;
-    }
+    void *data = kv_alloc(t, key_len + value_len);
+    if (!data) return VAL_NONE;
     memcpy(data, key, key_len);
     if (value_len > 0) {
         memcpy((uint8_t *)data + key_len, value, value_len);
@@ -1006,7 +994,7 @@ static uint32_t alloc_entry(ht_table_t *t, uint16_t hash_hi,
     t->entries[eidx].key_len = (uint16_t)key_len;
     t->entries[eidx].hash_hi = hash_hi;
     t->entries[eidx].val_len = (uint32_t)value_len;
-    t->entries[eidx].arena_offset = (uint32_t)((uint8_t *)data - t->arena);
+    t->entries[eidx].kv_ptr = (uint8_t *)data;
     return eidx;
 }
 
@@ -1015,19 +1003,17 @@ static bool update_entry_value(ht_table_t *t, uint32_t eidx,
                                const void *value, size_t value_len) {
     ht_entry_t *e = &t->entries[eidx];
     if (value_len == e->val_len) {
-        memcpy(t->arena + e->arena_offset + e->key_len, value, value_len);
+        memcpy(e->kv_ptr + e->key_len, value, value_len);
         return true;
     }
-    size_t arena_before = t->arena_size;
-    void *data = arena_alloc(t, key_len + value_len);
-    if (!data) {
-        t->arena_size = arena_before;
-        return false;
-    }
+    void *data = kv_alloc(t, key_len + value_len);
+    if (!data) return false;
     memcpy(data, key, key_len);
     memcpy((uint8_t *)data + key_len, value, value_len);
+    if (!t->allocator)
+        free(e->kv_ptr);
     e->val_len = (uint32_t)value_len;
-    e->arena_offset = (uint32_t)((uint8_t *)data - t->arena);
+    e->kv_ptr = (uint8_t *)data;
     return true;
 }
 
@@ -1036,23 +1022,24 @@ static bool update_entry_value(ht_table_t *t, uint32_t eidx,
 // ============================================================================
 
 static inline bool keys_match(const ht_table_t *t, uint32_t eidx,
-                              uint16_t hash_hi,
-                              const void *key, size_t key_len) {
-    const ht_entry_t *e = &t->entries[eidx];
-    if (e->hash_hi != hash_hi) return false;
-    if (e->key_len != key_len) return false;
-    const void *entry_key = t->arena + e->arena_offset;
-    if (t->eq_fn)
-        return t->eq_fn(entry_key, e->key_len, key, key_len, t->user_ctx);
-    return memcmp(entry_key, key, key_len) == 0;
+		uint16_t hash_hi,
+		const void *key, size_t key_len) {
+	const ht_entry_t *e = &t->entries[eidx];
+	if (e->hash_hi != hash_hi) return false;
+	if (e->key_len != key_len) return false;
+	const void *entry_key = ht_entry_key(e);
+	if (t->eq_fn)
+		return t->eq_fn(entry_key, e->key_len, key, key_len, t->user_ctx);
+	return memcmp(entry_key, key, key_len) == 0;
 }
 
 static inline bool vals_match(const ht_table_t *t, uint32_t eidx,
-                              const void *val, size_t val_len) {
-    const ht_entry_t *e = &t->entries[eidx];
-    if (e->val_len != val_len) return false;
-    const void *entry_val = t->arena + e->arena_offset + e->key_len;
-    return memcmp(entry_val, val, val_len) == 0;
+		const void *val, size_t val_len) {
+	(void)t;
+	const ht_entry_t *e = &t->entries[eidx];
+	if (e->val_len != val_len) return false;
+	const void *entry_val = ht_entry_val(e);
+	return memcmp(entry_val, val, val_len) == 0;
 }
 
 // ============================================================================
@@ -1104,11 +1091,11 @@ struct hl_find_all_ctx {
 };
 
 static bool hl_find_all_cb(uint32_t val, void *user_ctx) {
-    struct hl_find_all_ctx *ctx = user_ctx;
-    const ht_entry_t *e = &ctx->t->entries[val];
-    return ctx->user_cb(ctx->t->arena + e->arena_offset, e->key_len,
-                        ctx->t->arena + e->arena_offset + e->key_len, e->val_len,
-                        ctx->user_ctx);
+	struct hl_find_all_ctx *ctx = user_ctx;
+	const ht_entry_t *e = &ctx->t->entries[val];
+	return ctx->user_cb(ht_entry_key(e), e->key_len,
+		ht_entry_val(e), e->val_len,
+		ctx->user_ctx);
 }
 
 struct hl_key_find_ctx {
@@ -1121,14 +1108,14 @@ struct hl_key_find_ctx {
 };
 
 static bool hl_key_find_cb(uint32_t val, void *user_ctx) {
-    struct hl_key_find_ctx *ctx = user_ctx;
-    if (keys_match(ctx->t, val, ctx->hash_hi, ctx->key, ctx->key_len)) {
-        const ht_entry_t *e = &ctx->t->entries[val];
-        return ctx->user_cb(ctx->t->arena + e->arena_offset, e->key_len,
-                            ctx->t->arena + e->arena_offset + e->key_len, e->val_len,
-                            ctx->user_ctx);
-    }
-    return true;
+	struct hl_key_find_ctx *ctx = user_ctx;
+	if (keys_match(ctx->t, val, ctx->hash_hi, ctx->key, ctx->key_len)) {
+		const ht_entry_t *e = &ctx->t->entries[val];
+		return ctx->user_cb(ht_entry_key(e), e->key_len,
+			ht_entry_val(e), e->val_len,
+			ctx->user_ctx);
+	}
+	return true;
 }
 
 struct hl_kv_find_ctx {
@@ -1180,55 +1167,60 @@ static bool hl_kv_scan_cb(uint32_t val, void *user_ctx) {
 ht_table_t *ht_create(const ht_config_t *cfg,
                        ht_hash_fn hash_fn, ht_eq_fn eq_fn,
                        void *user_ctx) {
-    if (!hash_fn) return NULL;
+    return ht_create_with_arena(cfg, hash_fn, eq_fn, user_ctx, NULL);
+}
 
-    ht_table_t *t = calloc(1, sizeof(ht_table_t));
-    if (!t) return NULL;
+ht_table_t *ht_create_with_arena(const ht_config_t *cfg,
+ ht_hash_fn hash_fn, ht_eq_fn eq_fn,
+ void *user_ctx, struct arena *arena) {
+    if (!hash_fn) return NULL;
 
     ht_config_t c = default_cfg;
     if (cfg) c = *cfg;
     if (c.initial_capacity < 4) c.initial_capacity = 4;
 
+    size_t cap = next_pow2(c.initial_capacity);
+    size_t main_sz = bare_main_block_size(cap);
+    size_t spill_sz = SPILL_INITIAL * (sizeof(uint64_t) + sizeof(uint32_t));
+    size_t entry_cap = 64;
+    size_t table_block_sz = main_sz + spill_sz + entry_cap * sizeof(ht_entry_t);
+
+    uint8_t *table_block = calloc(1, table_block_sz);
+    if (!table_block) return NULL;
+
+    ht_table_t *t = calloc(1, sizeof(ht_table_t));
+    if (!t) { free(table_block); return NULL; }
+
+    t->table_block = table_block;
+
     ht_bare_t *b = &t->bare;
-    b->capacity = next_pow2(c.initial_capacity);
+    bare_main_block_init(b, table_block, cap);
 
-    b->hash_pd = calloc(b->capacity, sizeof(uint64_t));
-    if (!b->hash_pd) { free(t); return NULL; }
-
-    b->vals = malloc(b->capacity * sizeof(uint32_t));
-    if (!b->vals) { free(b->hash_pd); free(t); return NULL; }
-    memset(b->vals, 0xFF, b->capacity * sizeof(uint32_t));
-
-    b->spill_cap = SPILL_INITIAL;
-    size_t spill_size = b->spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
-    b->spill_block = malloc(spill_size);
-    if (!b->spill_block) { free(b->vals); free(b->hash_pd); free(t); return NULL; }
-    memset(b->spill_block, 0, b->spill_cap * sizeof(uint64_t));
-    memset(b->spill_block + b->spill_cap * sizeof(uint64_t), 0xFF, b->spill_cap * sizeof(uint32_t));
+    b->spill_block = table_block + main_sz;
     b->spill_hash_pd = (uint64_t*)b->spill_block;
-    b->spill_vals = (uint32_t*)(b->spill_block + b->spill_cap * sizeof(uint64_t));
+    b->spill_vals = (uint32_t*)(b->spill_block + SPILL_INITIAL * sizeof(uint64_t));
+    b->spill_cap = SPILL_INITIAL;
+    b->spill_in_block = true;
+    memset(b->spill_vals, 0xFF, SPILL_INITIAL * sizeof(uint32_t));
+
+    t->entries = (ht_entry_t *)(table_block + main_sz + spill_sz);
+    t->entry_cap = entry_cap;
+    t->entries_in_block = true;
 
     b->max_load_factor = (c.max_load_factor <= 0) ? 0.75 :
-                         (c.max_load_factor > 0.97) ? 0.97 : c.max_load_factor;
+        (c.max_load_factor > 0.97) ? 0.97 : c.max_load_factor;
     b->min_load_factor = (c.min_load_factor >= 0) ? c.min_load_factor : 0.20;
     b->tomb_threshold = (c.tomb_threshold > 0) ? c.tomb_threshold : 0.20;
     b->zombie_window = c.zombie_window;
 
-    t->entries = calloc(64, sizeof(ht_entry_t));
-    t->entry_cap = 64;
-    if (!t->entries) {
-        free(b->spill_block);
-        free(b->vals); free(b->hash_pd); free(t);
-        return NULL;
+#ifndef DRAUGR_USE_MALLOC
+    if (arena) {
+        t->allocator = arena;
     }
-
-    t->arena = malloc(1024);
-    t->arena_cap = 1024;
-    if (!t->arena) {
-        free(t->entries); free(b->spill_block);
-        free(b->vals); free(b->hash_pd); free(t);
-        return NULL;
-    }
+#endif
+#ifdef DRAUGR_USE_MALLOC
+    (void)arena;
+#endif
 
     t->hash_fn = hash_fn;
     t->eq_fn = eq_fn;
@@ -1238,21 +1230,54 @@ ht_table_t *ht_create(const ht_config_t *cfg,
 }
 
 void ht_destroy(ht_table_t *t) {
-    if (!t) return;
-    ht_bare_t *b = &t->bare;
-    free(b->spill_block);
-    free(b->hash_pd);
-    free(b->vals);
+  if (!t) return;
+  if (!t->allocator) {
+    for (size_t i = 0; i < t->entry_count; i++) {
+      free(t->entries[i].kv_ptr);
+    }
+  }
+  if (!t->entries_in_block)
     free(t->entries);
-    free(t->arena);
-    free(t);
+  if (!t->bare.spill_in_block)
+    free(t->bare.spill_block);
+  free(t->table_block);
+  free(t);
 }
 
 void ht_clear(ht_table_t *t) {
-    if (!t) return;
-    ht_bare_clear(&t->bare);
-    t->arena_size = 0;
-    t->entry_count = 0;
+  if (!t) return;
+  ht_bare_clear(&t->bare);
+#ifndef DRAUGR_USE_MALLOC
+  if (t->allocator) {
+    arena_clear(t->allocator);
+  } else
+#endif
+  {
+    for (size_t i = 0; i < t->entry_count; i++) {
+      free(t->entries[i].kv_ptr);
+    }
+  }
+  if (!t->bare.spill_in_block) {
+    free(t->bare.spill_block);
+    size_t main_sz = bare_main_block_size(t->bare.capacity);
+    t->bare.spill_block = t->table_block + main_sz;
+    t->bare.spill_hash_pd = (uint64_t*)t->bare.spill_block;
+    t->bare.spill_vals = (uint32_t*)(t->bare.spill_block + t->bare.spill_cap * sizeof(uint64_t));
+    t->bare.spill_cap = SPILL_INITIAL;
+    t->bare.spill_in_block = true;
+    memset(t->bare.spill_hash_pd, 0, t->bare.spill_cap * sizeof(uint64_t));
+    memset(t->bare.spill_vals, 0xFF, t->bare.spill_cap * sizeof(uint32_t));
+  }
+  if (!t->entries_in_block) {
+    free(t->entries);
+    size_t main_sz = bare_main_block_size(t->bare.capacity);
+    size_t spill_sz = t->bare.spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    t->entries = (ht_entry_t *)(t->table_block + main_sz + spill_sz);
+    t->entry_cap = 64;
+    t->entries_in_block = true;
+  }
+  memset(t->entries, 0, t->entry_cap * sizeof(ht_entry_t));
+  t->entry_count = 0;
 }
 
 // ============================================================================
@@ -1392,10 +1417,10 @@ const void *ht_find_with_hash(const ht_table_t *t, uint64_t hash,
     };
     ht_bare_find_all(&t->bare, hash, hl_find_one_cb, &ctx);
 
-    if (!ctx.found) return NULL;
-    const ht_entry_t *e = &t->entries[ctx.eidx];
-    if (out_value_len) *out_value_len = e->val_len;
-    return t->arena + e->arena_offset + e->key_len;
+	if (!ctx.found) return NULL;
+	const ht_entry_t *e = &t->entries[ctx.eidx];
+	if (out_value_len) *out_value_len = e->val_len;
+	return ht_entry_val(e);
 }
 
 void ht_find_all(const ht_table_t *t, uint64_t hash,
@@ -1439,10 +1464,10 @@ const void *ht_find_kv_with_hash(const ht_table_t *t, uint64_t hash,
     };
     ht_bare_find_all(&t->bare, hash, hl_kv_find_cb, &ctx);
 
-    if (!ctx.found) return NULL;
-    const ht_entry_t *e = &t->entries[ctx.eidx];
-    if (out_value_len) *out_value_len = e->val_len;
-    return t->arena + e->arena_offset + e->key_len;
+	if (!ctx.found) return NULL;
+	const ht_entry_t *e = &t->entries[ctx.eidx];
+	if (out_value_len) *out_value_len = e->val_len;
+	return ht_entry_val(e);
 }
 
 const void *ht_find_kv(const ht_table_t *t, const void *key, size_t key_len,
@@ -1611,6 +1636,147 @@ bool ht_remove_kv_one(ht_table_t *t, const void *key, size_t key_len,
 // High-Level Public API: Resize / Compact
 // ============================================================================
 
+static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
+  ht_bare_t *b = &t->bare;
+
+  uint8_t *old_main_block = b->main_block;
+  uint64_t *old_hash_pd = b->hash_pd;
+  uint32_t *old_vals = b->vals;
+  ht_entry_t *old_entries = t->entries;
+  size_t old_cap = b->capacity;
+  size_t old_entry_count = t->entry_count;
+  size_t old_entry_cap = t->entry_cap;
+  bool old_entries_in_block = t->entries_in_block;
+  bool old_spill_in_block = b->spill_in_block;
+  uint8_t *old_spill_block = b->spill_block;
+
+  uint64_t *old_spill_hash_pd = b->spill_hash_pd;
+  uint32_t *old_spill_vals = b->spill_vals;
+  size_t old_spill_len = b->spill_len;
+
+    size_t new_entry_cap = old_entry_cap;
+    size_t new_main_sz = bare_main_block_size(new_capacity);
+    size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
+    size_t new_spill_sz = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    size_t new_block_sz = new_main_sz + new_spill_sz + new_entry_cap * sizeof(ht_entry_t);
+
+    uint8_t *new_block = calloc(1, new_block_sz);
+    if (!new_block) return false;
+
+    memset(new_block + new_capacity * sizeof(uint64_t), 0xFF,
+           new_capacity * sizeof(uint32_t));
+
+    uint8_t *new_spill_block = new_block + new_main_sz;
+    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
+    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
+    memset(new_spill_vals, 0xFF, new_spill_cap * sizeof(uint32_t));
+
+    ht_entry_t *tmp_entries = (ht_entry_t *)(new_block + new_main_sz + new_spill_sz);
+    size_t tmp_entry_count = 0;
+    size_t tmp_entry_cap = new_entry_cap;
+
+    ht_bare_t tmp_b = *b;
+    bare_main_block_init(&tmp_b, new_block, new_capacity);
+    tmp_b.size = 0;
+    tmp_b.tombstone_cnt = 0;
+    tmp_b.spill_block = new_spill_block;
+    tmp_b.spill_hash_pd = new_spill_hash_pd;
+    tmp_b.spill_vals = new_spill_vals;
+    tmp_b.spill_cap = new_spill_cap;
+    tmp_b.spill_len = 0;
+    tmp_b.zombie_cursor = 0;
+
+    bool ok = true;
+    for (size_t i = 0; i < old_cap && ok; i++) {
+        uint64_t hpd = old_hash_pd[i];
+        if (!hpd_live(hpd)) continue;
+        uint32_t old_eidx = old_vals[i];
+        const ht_entry_t *e = &old_entries[old_eidx];
+        if (e->key_len == 0) continue;
+
+        if (tmp_entry_count >= tmp_entry_cap) {
+            size_t grow = tmp_entry_cap > SIZE_MAX / 2 ? SIZE_MAX : tmp_entry_cap * 2;
+            ht_entry_t *ne = realloc(tmp_entries, grow * sizeof(ht_entry_t));
+            if (!ne) { ok = false; break; }
+            memset(ne + tmp_entry_cap, 0, (grow - tmp_entry_cap) * sizeof(ht_entry_t));
+            tmp_entries = ne;
+            tmp_entry_cap = grow;
+        }
+
+        void *data = kv_alloc(t, e->key_len + e->val_len);
+        if (!data) { ok = false; break; }
+        memcpy(data, ht_entry_key(e), e->key_len);
+        if (e->val_len > 0) memcpy((uint8_t *)data + e->key_len, ht_entry_val(e), e->val_len);
+
+        uint32_t new_eidx = (uint32_t)tmp_entry_count++;
+        tmp_entries[new_eidx] = *e;
+        tmp_entries[new_eidx].kv_ptr = (uint8_t *)data;
+
+        uint64_t h48 = hpd_hash(hpd);
+        if (h48 < 2)
+            ok = bare_spill_insert(&tmp_b, h48, new_eidx);
+        else
+            ok = bare_rh_insert(&tmp_b, h48, new_eidx);
+    }
+
+    for (size_t i = 0; i < old_spill_len && ok; i++) {
+        uint32_t old_eidx = old_spill_vals[i];
+        if (old_eidx == VAL_NONE) continue;
+        const ht_entry_t *e = &old_entries[old_eidx];
+        if (e->key_len == 0) continue;
+
+        if (tmp_entry_count >= tmp_entry_cap) {
+            size_t grow = tmp_entry_cap > SIZE_MAX / 2 ? SIZE_MAX : tmp_entry_cap * 2;
+            ht_entry_t *ne = realloc(tmp_entries, grow * sizeof(ht_entry_t));
+            if (!ne) { ok = false; break; }
+            memset(ne + tmp_entry_cap, 0, (grow - tmp_entry_cap) * sizeof(ht_entry_t));
+            tmp_entries = ne;
+            tmp_entry_cap = grow;
+        }
+
+        void *data = kv_alloc(t, e->key_len + e->val_len);
+        if (!data) { ok = false; break; }
+        memcpy(data, ht_entry_key(e), e->key_len);
+        if (e->val_len > 0) memcpy((uint8_t *)data + e->key_len, ht_entry_val(e), e->val_len);
+
+        uint32_t new_eidx = (uint32_t)tmp_entry_count++;
+        tmp_entries[new_eidx] = *e;
+        tmp_entries[new_eidx].kv_ptr = (uint8_t *)data;
+
+        ok = bare_spill_insert(&tmp_b, hpd_hash(old_spill_hash_pd[i]), new_eidx);
+    }
+
+    if (!ok) {
+        for (size_t i = 0; i < tmp_entry_count; i++) {
+            if (!t->allocator) free(tmp_entries[i].kv_ptr);
+        }
+        free(new_block);
+        return false;
+    }
+
+    bare_place_prophylactic_tombstones(&tmp_b);
+
+    if (!t->allocator) {
+        for (size_t i = 0; i < old_entry_count; i++) {
+            free(old_entries[i].kv_ptr);
+        }
+    }
+  if (!old_entries_in_block)
+    free(old_entries);
+  if (!old_spill_in_block)
+    free(old_spill_block);
+  free(old_main_block);
+
+  *b = tmp_b;
+  t->table_block = new_block;
+  t->entries = tmp_entries;
+  t->entry_count = tmp_entry_count;
+  t->entry_cap = tmp_entry_cap;
+  t->entries_in_block = (tmp_entries == (ht_entry_t *)(new_block + new_main_sz + new_spill_sz));
+  b->spill_in_block = true;
+  return true;
+}
+
 bool ht_resize(ht_table_t *t, size_t new_capacity) {
     if (!t) return false;
     if (new_capacity < t->bare.size) return false;
@@ -1624,242 +1790,15 @@ bool ht_resize(ht_table_t *t, size_t new_capacity) {
         return true;
     }
 
-    ht_bare_t *b = &t->bare;
-
-    // Save old state
-    uint64_t *old_hash_pd = b->hash_pd;
-    uint32_t *old_vals = b->vals;
-    ht_entry_t *old_entries = t->entries;
-    uint8_t *old_arena = t->arena;
-    size_t old_cap = b->capacity;
-    size_t old_arena_cap = t->arena_cap;
-
-    uint64_t *old_spill_hash_pd = b->spill_hash_pd;
-    uint32_t *old_spill_vals = b->spill_vals;
-    uint8_t *old_spill_block = b->spill_block;
-    size_t old_spill_len = b->spill_len;
-
-    // Allocate new main table
-    uint64_t *new_hash_pd = calloc(new_capacity, sizeof(uint64_t));
-    if (!new_hash_pd) { b->resizing = false; return false; }
-
-    uint32_t *new_vals = malloc(new_capacity * sizeof(uint32_t));
-    if (!new_vals) {
-        free(new_hash_pd);
-        b->resizing = false;
-        return false;
-    }
-    memset(new_vals, 0xFF, new_capacity * sizeof(uint32_t));
-
-    // Allocate new entries
-    size_t new_entry_cap = t->entry_cap;
-    ht_entry_t *new_entries = calloc(new_entry_cap, sizeof(ht_entry_t));
-    if (!new_entries) {
-        free(new_vals); free(new_hash_pd);
-        b->resizing = false;
-        return false;
-    }
-
-    // Allocate new arena
-    uint8_t *new_arena = malloc(old_arena_cap > 0 ? old_arena_cap : 1024);
-    if (!new_arena) {
-        free(new_entries); free(new_vals); free(new_hash_pd);
-        b->resizing = false;
-        return false;
-    }
-
-    // Allocate new spill lane
-    size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
-    uint8_t *new_spill_block = malloc(new_spill_size);
-    if (!new_spill_block) {
-        free(new_arena); free(new_entries); free(new_vals); free(new_hash_pd);
-        b->resizing = false;
-        return false;
-    }
-    memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
-    memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
-    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
-    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
-
-    // Swap to new state
-    b->hash_pd = new_hash_pd;
-    b->vals = new_vals;
-    b->capacity = new_capacity;
-    b->size = 0;
-    b->tombstone_cnt = 0;
-    b->spill_block = new_spill_block;
-    b->spill_hash_pd = new_spill_hash_pd;
-    b->spill_vals = new_spill_vals;
-    b->spill_cap = new_spill_cap;
-    b->spill_len = 0;
-    b->zombie_cursor = 0;
-
-    t->entries = new_entries;
-    t->entry_count = 0;
-    t->entry_cap = new_entry_cap;
-    t->arena = new_arena;
-    t->arena_size = 0;
-    t->arena_cap = old_arena_cap > 0 ? old_arena_cap : 1024;
-
-    // Reinsert main table
-    bool reinsert_ok = true;
-    for (size_t i = 0; i < old_cap; i++) {
-        uint64_t hpd = old_hash_pd[i];
-        if (!hpd_live(hpd)) continue;
-        uint32_t old_eidx = old_vals[i];
-        const ht_entry_t *e = &old_entries[old_eidx];
-        if (e->key_len == 0) continue;
-        const void *k = old_arena + e->arena_offset;
-        const void *v = old_arena + e->arena_offset + e->key_len;
-        uint32_t new_eidx = alloc_entry(t, e->hash_hi, k, e->key_len, v, e->val_len);
-        if (new_eidx == VAL_NONE) { reinsert_ok = false; continue; }
-        uint64_t h48 = hpd_hash(hpd);
-        if (h48 < 2)
-            bare_spill_insert(b, h48, new_eidx);
-        else
-            bare_rh_insert(b, h48, new_eidx);
-    }
-
-    // Reinsert spill
-    for (size_t i = 0; i < old_spill_len; i++) {
-        uint32_t old_eidx = old_spill_vals[i];
-        if (old_eidx == VAL_NONE) continue;
-        const ht_entry_t *e = &old_entries[old_eidx];
-        if (e->key_len == 0) continue;
-        const void *k = old_arena + e->arena_offset;
-        const void *v = old_arena + e->arena_offset + e->key_len;
-        uint32_t new_eidx = alloc_entry(t, e->hash_hi, k, e->key_len, v, e->val_len);
-        if (new_eidx == VAL_NONE) { reinsert_ok = false; continue; }
-        bare_spill_insert(b, hpd_hash(old_spill_hash_pd[i]), new_eidx);
-    }
-
-    bare_place_prophylactic_tombstones(b);
-
-    free(old_hash_pd);
-    free(old_vals);
-    free(old_entries);
-    free(old_arena);
-    free(old_spill_block);
-    b->resizing = false;
-    return reinsert_ok;
+    bool result = ht_rebuild(t, new_capacity);
+    t->bare.resizing = false;
+    return result;
 }
+
 
 bool ht_compact(ht_table_t *t) {
     if (!t) return false;
-
-    ht_bare_t *b = &t->bare;
-
-    // Save old state
-    uint64_t *old_hash_pd = b->hash_pd;
-    uint32_t *old_vals = b->vals;
-    ht_entry_t *old_entries = t->entries;
-    uint8_t *old_arena = t->arena;
-    size_t old_cap = b->capacity;
-    size_t old_arena_cap = t->arena_cap;
-
-    uint64_t *old_spill_hash_pd = b->spill_hash_pd;
-    uint32_t *old_spill_vals = b->spill_vals;
-    uint8_t *old_spill_block = b->spill_block;
-    size_t old_spill_len = b->spill_len;
-
-    // Allocate new main table (same capacity)
-    uint64_t *new_hash_pd = calloc(old_cap, sizeof(uint64_t));
-    if (!new_hash_pd) return false;
-
-    uint32_t *new_vals = malloc(old_cap * sizeof(uint32_t));
-    if (!new_vals) {
-        free(new_hash_pd);
-        return false;
-    }
-    memset(new_vals, 0xFF, old_cap * sizeof(uint32_t));
-
-    // Allocate new entries
-    size_t new_entry_cap = t->entry_cap;
-    ht_entry_t *new_entries = calloc(new_entry_cap, sizeof(ht_entry_t));
-    if (!new_entries) {
-        free(new_vals); free(new_hash_pd);
-        return false;
-    }
-
-    // Allocate new arena
-    uint8_t *new_arena = malloc(old_arena_cap > 0 ? old_arena_cap : 1024);
-    if (!new_arena) {
-        free(new_entries); free(new_vals); free(new_hash_pd);
-        return false;
-    }
-
-    // Allocate new spill lane
-    size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
-    size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
-    uint8_t *new_spill_block = malloc(new_spill_size);
-    if (!new_spill_block) {
-        free(new_arena); free(new_entries); free(new_vals); free(new_hash_pd);
-        return false;
-    }
-    memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
-    memset(new_spill_block + new_spill_cap * sizeof(uint64_t), 0xFF, new_spill_cap * sizeof(uint32_t));
-    uint64_t *new_spill_hash_pd = (uint64_t*)new_spill_block;
-    uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
-
-    // Swap to new state
-    b->hash_pd = new_hash_pd;
-    b->vals = new_vals;
-    b->size = 0;
-    b->tombstone_cnt = 0;
-    b->spill_block = new_spill_block;
-    b->spill_hash_pd = new_spill_hash_pd;
-    b->spill_vals = new_spill_vals;
-    b->spill_cap = new_spill_cap;
-    b->spill_len = 0;
-    b->zombie_cursor = 0;
-
-    t->entries = new_entries;
-    t->entry_count = 0;
-    t->arena = new_arena;
-    t->arena_size = 0;
-    t->arena_cap = old_arena_cap > 0 ? old_arena_cap : 1024;
-
-    // Reinsert main table
-    bool reinsert_ok = true;
-    for (size_t i = 0; i < old_cap; i++) {
-        uint64_t hpd = old_hash_pd[i];
-        if (!hpd_live(hpd)) continue;
-        uint32_t old_eidx = old_vals[i];
-        const ht_entry_t *e = &old_entries[old_eidx];
-        if (e->key_len == 0) continue;
-        const void *k = old_arena + e->arena_offset;
-        const void *v = old_arena + e->arena_offset + e->key_len;
-        uint32_t new_eidx = alloc_entry(t, e->hash_hi, k, e->key_len, v, e->val_len);
-        if (new_eidx == VAL_NONE) { reinsert_ok = false; continue; }
-        uint64_t h48 = hpd_hash(hpd);
-        if (h48 < 2)
-            bare_spill_insert(b, h48, new_eidx);
-        else
-            bare_rh_insert(b, h48, new_eidx);
-    }
-
-    // Reinsert spill
-    for (size_t i = 0; i < old_spill_len; i++) {
-        uint32_t old_eidx = old_spill_vals[i];
-        if (old_eidx == VAL_NONE) continue;
-        const ht_entry_t *e = &old_entries[old_eidx];
-        if (e->key_len == 0) continue;
-        const void *k = old_arena + e->arena_offset;
-        const void *v = old_arena + e->arena_offset + e->key_len;
-        uint32_t new_eidx = alloc_entry(t, e->hash_hi, k, e->key_len, v, e->val_len);
-        if (new_eidx == VAL_NONE) { reinsert_ok = false; continue; }
-        bare_spill_insert(b, hpd_hash(old_spill_hash_pd[i]), new_eidx);
-    }
-
-    bare_place_prophylactic_tombstones(b);
-
-    free(old_hash_pd);
-    free(old_vals);
-    free(old_entries);
-    free(old_arena);
-    free(old_spill_block);
-    return reinsert_ok;
+    return ht_rebuild(t, t->bare.capacity);
 }
 
 // ============================================================================
@@ -1880,15 +1819,15 @@ bool ht_iter_next(ht_table_t *t, ht_iter_t *iter,
     uint64_t hash;
     uint32_t val;
 
-    while (ht_bare_iter_next(&t->bare, iter, &hash, &val)) {
-        if (val == VAL_NONE) continue;
-        const ht_entry_t *e = &t->entries[val];
-        if (out_key) *out_key = t->arena + e->arena_offset;
-        if (out_key_len) *out_key_len = e->key_len;
-        if (out_value) *out_value = t->arena + e->arena_offset + e->key_len;
-        if (out_value_len) *out_value_len = e->val_len;
-        return true;
-    }
+	while (ht_bare_iter_next(&t->bare, iter, &hash, &val)) {
+		if (val == VAL_NONE) continue;
+		const ht_entry_t *e = &t->entries[val];
+		if (out_key) *out_key = ht_entry_key(e);
+		if (out_key_len) *out_key_len = e->key_len;
+		if (out_value) *out_value = ht_entry_val(e);
+		if (out_value_len) *out_value_len = e->val_len;
+		return true;
+	}
 
     return false;
 }
@@ -1920,12 +1859,12 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
             if (eidx == VAL_NONE) {
                 printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s] eidx=VAL_NONE\n",
                        idx, hpd_hash(hpd), hpd_pd(hpd), tag);
-            } else {
-                const ht_entry_t *e = &t->entries[eidx];
-                printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s] klen=%3u vlen=%3u off=%5" PRIu32 "\n",
-                       idx, hpd_hash(hpd), hpd_pd(hpd), tag,
-                       e->key_len, e->val_len, e->arena_offset);
-            }
+	} else {
+		const ht_entry_t *e = &t->entries[eidx];
+		printf(" [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s] klen=%3u vlen=%3u kv=%p\n",
+			idx, hpd_hash(hpd), hpd_pd(hpd), tag,
+			e->key_len, e->val_len, (void *)e->kv_ptr);
+	}
         } else {
             printf("  [%4zu]: hash=0x%08" PRIx64 " dist=%3u [%s]\n",
                    idx, hpd_hash(hpd), hpd_pd(hpd), tag);
@@ -1939,11 +1878,11 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
             if (eidx == VAL_NONE) {
                 printf("  spill[%zu]: hash=0x%08" PRIx64 " eidx=VAL_NONE\n",
                        i, hpd_hash(shpd));
-            } else {
-                const ht_entry_t *e = &t->entries[eidx];
-                printf("  spill[%zu]: hash=0x%08" PRIx64 " klen=%3u vlen=%3u off=%5" PRIu32 "\n",
-                       i, hpd_hash(shpd), e->key_len, e->val_len, e->arena_offset);
-            }
+	} else {
+		const ht_entry_t *e = &t->entries[eidx];
+		printf(" spill[%zu]: hash=0x%08" PRIx64 " klen=%3u vlen=%3u kv=%p\n",
+			i, hpd_hash(shpd), e->key_len, e->val_len, (void *)e->kv_ptr);
+	}
         }
     }
 }

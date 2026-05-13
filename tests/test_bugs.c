@@ -7,7 +7,7 @@
  * 3. Zombie mechanism disabled + tomb_threshold exceeded
  * 4. UPSERT return value inverted
  * 5. bshift_cap=16 hard limit with long probe chains
- * 6. Arena rollback not atomic (entry_count vs arena_size mismatch)
+ * 6. Arena rollback not atomic (entry_count mismatch on failed alloc)
  * 7. Resize partial failure loses entries
  */
 
@@ -350,12 +350,12 @@ static void test_upsert_return_value(void) {
 }
 
 // ============================================================================
-// Bug 5: Arena Rollback Not Atomic (entry_count vs arena_size)
+// Bug 5: Arena Rollback Not Atomic (entry_count on failed alloc)
 // ============================================================================
 
 static void test_arena_rollback_atomicity(void) {
     printf("\n=== Arena Rollback Atomicity ===\n");
-    
+
     for (int trial = 0; trial < 20; trial++) {
         alloc_mock_reset();
         alloc_mock_set_max_alloc_calls(100);
@@ -367,7 +367,6 @@ static void test_arena_rollback_atomicity(void) {
         bool ok = ht_upsert(ht, k, sizeof(k), v, sizeof(v));
         if (!ok) { ht_destroy(ht); continue; }
 
-        size_t arena_size_before = ht->arena_size;
         size_t entry_count_before = ht->entry_count;
 
         alloc_mock_set_max_alloc_size(1024);
@@ -377,24 +376,17 @@ static void test_arena_rollback_atomicity(void) {
         ok = ht_upsert(ht, k, sizeof(k), v_large, sizeof(v_large));
 
         if (!ok) {
-            if (ht->arena_size != arena_size_before) {
-                printf("    trial %d: arena_size drifted from %zu to %zu after failure\n",
-                       trial, arena_size_before, ht->arena_size);
-                ht_destroy(ht);
-                BUG("arena_size not rolled back on failure");
-                return;
-            }
             if (ht->entry_count != entry_count_before) {
-                printf("    trial %d: entry_count drifted from %zu to %zu after failure\n",
+                printf(" trial %d: entry_count drifted from %zu to %zu after failure\n",
                        trial, entry_count_before, ht->entry_count);
                 ht_destroy(ht);
-                BUG("entry_count changed on arena failure");
+                BUG("entry_count not rolled back on failure");
                 return;
             }
         }
         ht_destroy(ht);
     }
-    PASS("arena rollback atomicity: entry_count and arena_size stay consistent");
+    PASS("arena rollback atomicity: entry_count stays consistent");
 }
 
 // ============================================================================
@@ -587,7 +579,6 @@ static void test_arena_grow_failure_during_update(void) {
         bool ok = ht_upsert(ht, k, sizeof(k), v, sizeof(v));
         if (!ok) { ht_destroy(ht); continue; }
 
-        size_t arena_before = ht->arena_size;
         size_t entry_before = ht->entry_count;
 
         alloc_mock_set_max_alloc_size(1024);
@@ -598,17 +589,10 @@ static void test_arena_grow_failure_during_update(void) {
 
         if (!ok) {
             if (ht->entry_count != entry_before) {
-                printf("    trial %d: entry_count=%zu expected=%zu\n",
+                printf(" trial %d: entry_count=%zu expected=%zu\n",
                        trial, ht->entry_count, entry_before);
                 ht_destroy(ht);
                 BUG("arena grow failure: entry_count corrupted");
-                return;
-            }
-            if (ht->arena_size != arena_before) {
-                printf("    trial %d: arena_size=%zu expected=%zu\n",
-                       trial, ht->arena_size, arena_before);
-                ht_destroy(ht);
-                BUG("arena grow failure: arena_size not rolled back");
                 return;
             }
         }

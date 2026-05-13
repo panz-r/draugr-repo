@@ -28,26 +28,27 @@ extern "C" {
 // ============================================================================
 
 struct ht_cache {
-    ht_bare_t *bare;
+ ht_bare_t *bare;
 
-    uint8_t  *entries;
-    uint64_t *hashes;
-    uint8_t  *live;
-    uint32_t *lru_prev;
-    uint32_t *lru_next;
-    uint32_t *free_stack;
-    size_t    free_top;
+ uint8_t *cache_block;
+ uint8_t *entries;
+ uint64_t *hashes;
+ uint8_t *live;
+ uint32_t *lru_prev;
+ uint32_t *lru_next;
+ uint32_t *free_stack;
+ size_t free_top;
 
-    uint32_t lru_head;
-    uint32_t lru_tail;
+ uint32_t lru_head;
+ uint32_t lru_tail;
 
-    size_t capacity;
-    size_t entry_size;
-    size_t size;
+ size_t capacity;
+ size_t entry_size;
+ size_t size;
 
-    ht_cache_hash_fn hash_fn;
-    ht_cache_eq_fn   eq_fn;
-    void            *user_ctx;
+ ht_cache_hash_fn hash_fn;
+ ht_cache_eq_fn eq_fn;
+ void *user_ctx;
 };
 
 // ============================================================================

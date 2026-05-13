@@ -25,6 +25,8 @@
 extern "C" {
 #endif
 
+struct arena;
+
 typedef struct ht_bare ht_bare_t;
 typedef struct ht_table ht_table_t;
 
@@ -87,6 +89,9 @@ bool ht_bare_iter_next(ht_bare_t *t, ht_iter_t *iter,
 ht_table_t *ht_create(const ht_config_t *cfg,
                        ht_hash_fn hash_fn, ht_eq_fn eq_fn,
                        void *user_ctx);
+ht_table_t *ht_create_with_arena(const ht_config_t *cfg,
+                                    ht_hash_fn hash_fn, ht_eq_fn eq_fn,
+                                    void *user_ctx, struct arena *arena);
 void ht_destroy(ht_table_t *t);
 void ht_clear(ht_table_t *t);
 
