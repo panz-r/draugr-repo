@@ -145,6 +145,8 @@ void wbuf_flush(struct arena *a, int freq, int sc) {
 
 static void wbuf_reset(struct arena_write_buffer *wbuf) {
     if (!wbuf) return;
+    wbuf->sealed = true;
+    memset(wbuf->slots, 0, sizeof(wbuf->slots));
     atomic_store_explicit(&wbuf->count, 0, memory_order_relaxed);
     wbuf->sealed = false;
 }
