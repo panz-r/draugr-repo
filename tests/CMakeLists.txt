@@ -44,6 +44,12 @@ add_test(NAME arena_tests COMMAND test_arena)
 add_executable(test_ht_arena test_ht_arena.c)
 target_link_libraries(test_ht_arena draugr)
 add_test(NAME ht_arena_tests COMMAND test_ht_arena)
+
+add_executable(test_arena_concurrent test_arena_concurrent.c)
+target_sources(test_arena_concurrent PRIVATE ${CMAKE_SOURCE_DIR}/src/arena.c)
+target_include_directories(test_arena_concurrent PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(test_arena_concurrent numa m pthread)
+add_test(NAME arena_concurrent_tests COMMAND test_arena_concurrent)
 endif()
 
 add_executable(test_internal test_internal.c)

@@ -14,6 +14,7 @@
 #define _GNU_SOURCE
 
 #include "draugr/arena.h"
+#include "draugr/arena_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -59,8 +60,7 @@ static size_t slab_data_offset(void) {
    WRITE BUFFER — Hot Tier [1]
    ══════════════════════════════════════════════════════════════════ */
 
-__attribute__((unused))
-static struct arena_write_buffer *wbuf_create(int freq, int sc) {
+struct arena_write_buffer *wbuf_create(int freq, int sc) {
     struct arena_write_buffer *wbuf = calloc(1, sizeof(*wbuf));
     if (!wbuf) return NULL;
     wbuf->freq = (uint8_t)freq;
@@ -71,8 +71,7 @@ static struct arena_write_buffer *wbuf_create(int freq, int sc) {
     return wbuf;
 }
 
-__attribute__((unused))
-static int wbuf_add(struct arena_write_buffer *wbuf,
+int wbuf_add(struct arena_write_buffer *wbuf,
                     const void *key, size_t klen,
                     const void *val, size_t vlen) {
     if (wbuf->sealed) return -1;
@@ -93,8 +92,7 @@ static int wbuf_add(struct arena_write_buffer *wbuf,
     return 0;
 }
 
-__attribute__((unused))
-static void wbuf_flush(struct arena *a, int freq, int sc) {
+void wbuf_flush(struct arena *a, int freq, int sc) {
 	struct arena_write_buffer *wbuf = a->arenas[freq][sc].u.hot.wbuf;
 	if (!wbuf) return;
 
@@ -249,7 +247,7 @@ static bool slab_contains(struct arena_slab *slab, void *ptr) {
 	return p >= data_start && p - data_start < data_size;
 }
 
-static void *slab_set_alloc(struct arena_slab_set *set, int node, int sc) {
+void *slab_set_alloc(struct arena_slab_set *set, int node, int sc) {
     int count = atomic_load_explicit(&set->slab_count, memory_order_acquire);
 
     for (int i = 0; i < count && i < 8; i++) {
@@ -291,7 +289,7 @@ static void *slab_set_alloc(struct arena_slab_set *set, int node, int sc) {
     return ptr;
 }
 
-static bool slab_set_free(struct arena_slab_set *set, void *ptr) {
+bool slab_set_free(struct arena_slab_set *set, void *ptr) {
     if (!ptr) return false;
 
     int count = atomic_load_explicit(&set->slab_count, memory_order_acquire);
@@ -311,7 +309,7 @@ static bool slab_set_free(struct arena_slab_set *set, void *ptr) {
     return false;
 }
 
-static bool slab_set_contains(struct arena_slab_set *set, void *ptr) {
+bool slab_set_contains(struct arena_slab_set *set, void *ptr) {
     if (!ptr) return false;
 
     int count = atomic_load_explicit(&set->slab_count, memory_order_acquire);

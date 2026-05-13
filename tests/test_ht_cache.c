@@ -1,4 +1,5 @@
 #include "draugr/ht_cache.h"
+#include "draugr/ht_cache_internal.h"
 #include <assert.h>
 #include <limits.h>
 #include <stdio.h>
@@ -8514,6 +8515,65 @@ static void test_promote_after_evict_of_entry(void) {
     printf("  PASS promote_after_evict_of_entry\n");
 }
 
+/* ── Regression: cache size after clear ─────────────────────── */
+
+static void test_size_after_clear(void) {
+    ht_cache_t *c = create_test_cache(8);
+    for (int i = 0; i < 8; i++) {
+        test_entry_t e = {.key = i, .value = i * 10};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+    assert(ht_cache_size(c) == 8);
+
+    ht_cache_clear(c);
+    assert(ht_cache_size(c) == 0);
+
+    /* Refill and clear again — size must track correctly */
+    for (int i = 0; i < 5; i++) {
+        test_entry_t e = {.key = i + 100, .value = i};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+    assert(ht_cache_size(c) == 5);
+
+    ht_cache_clear(c);
+    assert(ht_cache_size(c) == 0);
+
+    ht_cache_destroy(c);
+    printf("  PASS size_after_clear\n");
+}
+
+/* ── Regression: evict when bare table entry is missing ─────── */
+
+static void test_evict_with_missing_bare_entry(void) {
+    ht_cache_t *c = create_test_cache(8);
+    for (int i = 0; i < 4; i++) {
+        test_entry_t e = {.key = i, .value = i * 10};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+    assert(ht_cache_size(c) == 4);
+
+    /* Clear the bare table directly — cache LRU/live state remains */
+    ht_bare_clear(c->bare);
+
+    /* Evict should fail: bare table no longer has the entry */
+    bool evicted = ht_cache_evict(c);
+    assert(!evicted);
+    assert(ht_cache_size(c) == 4);
+
+    /* Cache should still be usable: clear and refill */
+    ht_cache_clear(c);
+    assert(ht_cache_size(c) == 0);
+
+    for (int i = 0; i < 4; i++) {
+        test_entry_t e = {.key = i + 200, .value = i};
+        ht_cache_put(c, &e, sizeof(e));
+    }
+    assert(ht_cache_size(c) == 4);
+
+    ht_cache_destroy(c);
+    printf("  PASS evict_with_missing_bare_entry\n");
+}
+
 /* ── Main ─────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -8790,6 +8850,10 @@ int main(void) {
     test_find_after_tombstone_churn();
     test_strict_eq_matching();
     test_promote_after_evict_of_entry();
+
+    /* Regression tests */
+    test_size_after_clear();
+    test_evict_with_missing_bare_entry();
 
     printf("  All tests passed!\n");
     return 0;
