@@ -1,3 +1,6 @@
+# Tests must always have assertions enabled (CMake Release sets -DNDEBUG)
+add_compile_options(-UNDEBUG)
+
 add_executable(test_ht test_ht.c)
 target_link_libraries(test_ht draugr)
 add_test(NAME ht_unit_tests COMMAND test_ht)
