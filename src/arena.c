@@ -65,30 +65,27 @@ struct arena_write_buffer *wbuf_create(int freq, int sc) {
     if (!wbuf) return NULL;
     wbuf->freq = (uint8_t)freq;
     wbuf->size_class = (uint8_t)sc;
-    atomic_store(&wbuf->count, 0);
-    atomic_store(&wbuf->epoch, 0);
+    wbuf->count = 0;
     wbuf->sealed = false;
+    pthread_mutex_init(&wbuf->lock, NULL);
     return wbuf;
 }
 
 int wbuf_add(struct arena_write_buffer *wbuf,
                     const void *key, size_t klen,
                     const void *val, size_t vlen) {
-    if (wbuf->sealed) return -1;
-
-    uint32_t idx = atomic_fetch_add_explicit(&wbuf->count, 1,
-                                             memory_order_acquire);
-    if (idx >= ARENA_WBUF_CAPACITY) {
-        atomic_fetch_sub_explicit(&wbuf->count, 1, memory_order_release);
+    pthread_mutex_lock(&wbuf->lock);
+    if (wbuf->sealed || wbuf->count >= ARENA_WBUF_CAPACITY) {
+        pthread_mutex_unlock(&wbuf->lock);
         return -1;
     }
-
+    uint32_t idx = wbuf->count++;
     struct arena_wbuf_slot *slot = &wbuf->slots[idx];
     slot->key_len = (uint32_t)klen;
     slot->val_len = (uint32_t)vlen;
     if (klen <= 64) memcpy(slot->key, key, klen);
     if (vlen <= 256) memcpy(slot->val, val, vlen);
-
+    pthread_mutex_unlock(&wbuf->lock);
     return 0;
 }
 
@@ -96,33 +93,36 @@ void wbuf_flush(struct arena *a, int freq, int sc) {
 	struct arena_write_buffer *wbuf = a->arenas[freq][sc].u.hot.wbuf;
 	if (!wbuf) return;
 
-	if (wbuf->sealed) return;
-
+	pthread_mutex_lock(&wbuf->lock);
+	if (wbuf->sealed || wbuf->count == 0) {
+		pthread_mutex_unlock(&wbuf->lock);
+		return;
+	}
 	wbuf->sealed = true;
-
-	uint32_t count = (uint32_t)atomic_fetch_and_explicit(&wbuf->count, 0,
-		memory_order_acq_rel);
-	if (count == 0) { wbuf->sealed = false; return; }
+	uint32_t count = wbuf->count;
+	pthread_mutex_unlock(&wbuf->lock);
 
 	uint8_t *ring = a->arenas[freq][sc].u.hot.ring_base;
-	if (!ring) { wbuf->sealed = false; return; }
+	if (!ring) {
+		pthread_mutex_lock(&wbuf->lock);
+		wbuf->sealed = false;
+		pthread_mutex_unlock(&wbuf->lock);
+		return;
+	}
 
 	size_t ring_cap = a->arenas[freq][sc].u.hot.ring_cap;
 	size_t ring_pos = atomic_load_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
 		memory_order_relaxed);
 
+	uint32_t flushed = 0;
 	for (uint32_t i = 0; i < count; i++) {
 		struct arena_wbuf_slot *slot = &wbuf->slots[i];
 
 		size_t entry_sz = sizeof(struct arena_ring_entry) + slot->key_len + slot->val_len;
 		entry_sz = (entry_sz + 15) & ~(size_t)15;
 
-		if (ring_pos + entry_sz > ring_cap) {
-			atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
-				ring_pos, memory_order_release);
-			a->wbuf_flushes++;
-			return;
-		}
+		if (ring_pos + entry_sz > ring_cap)
+			break;
 
 		struct arena_ring_entry *hdr = (struct arena_ring_entry *)(ring + ring_pos);
 		hdr->total_len = (uint32_t)entry_sz;
@@ -134,21 +134,37 @@ void wbuf_flush(struct arena *a, int freq, int sc) {
 			memcpy(ring + ring_pos + sizeof(*hdr) + slot->key_len, slot->val, slot->val_len);
 
 		ring_pos += entry_sz;
+		flushed++;
 	}
 
-	atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
-		ring_pos, memory_order_release);
-	a->wbuf_flushes++;
+	if (flushed > 0) {
+		atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
+			ring_pos, memory_order_release);
+		a->wbuf_flushes++;
+	}
 
+	uint32_t remaining = count - flushed;
+	if (remaining > 0 && flushed > 0) {
+		memmove(&wbuf->slots[0], &wbuf->slots[flushed],
+			remaining * sizeof(wbuf->slots[0]));
+		memset(&wbuf->slots[remaining], 0,
+			flushed * sizeof(wbuf->slots[0]));
+	}
+
+	pthread_mutex_lock(&wbuf->lock);
+	wbuf->count = remaining;
 	wbuf->sealed = false;
+	pthread_mutex_unlock(&wbuf->lock);
 }
 
 static void wbuf_reset(struct arena_write_buffer *wbuf) {
     if (!wbuf) return;
+    pthread_mutex_lock(&wbuf->lock);
     wbuf->sealed = true;
     memset(wbuf->slots, 0, sizeof(wbuf->slots));
-    atomic_store_explicit(&wbuf->count, 0, memory_order_relaxed);
+    wbuf->count = 0;
     wbuf->sealed = false;
+    pthread_mutex_unlock(&wbuf->lock);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -860,7 +876,10 @@ void arena_destroy(struct arena *a) {
             munmap(a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base,
                    a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap);
         }
-        free(a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf);
+        if (a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf) {
+            pthread_mutex_destroy(&a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf->lock);
+            free(a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf);
+        }
     }
 
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {

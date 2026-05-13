@@ -13,6 +13,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/mman.h>
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -188,6 +189,73 @@ static void test_concurrent_slab_alloc(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+   Test 3: Partial flush preserves unflushed entries
+   ══════════════════════════════════════════════════════════════════ */
+
+static void test_wbuf_partial_flush(void) {
+    printf("Running: %s\n", __func__);
+
+    struct arena *a = arena_create(0);
+    TEST_ASSERT(a != NULL, "arena_create returned NULL");
+
+    struct arena_write_buffer *wbuf = a->arenas[ARENA_FREQ_HOT][0].u.hot.wbuf;
+    TEST_ASSERT(wbuf != NULL, "wbuf is NULL");
+
+    /* Shrink the ring to 256 bytes so it fills after a few entries */
+    munmap(a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_base,
+           a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_cap);
+    a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_cap = 256;
+    a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_base = mmap(NULL, 256,
+        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    atomic_store(&a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_pos, 0);
+
+    /* Fill the wbuf to capacity */
+    uint8_t key[8], val[64];
+    for (int i = 0; i < ARENA_WBUF_CAPACITY; i++) {
+        memset(key, (uint8_t)i, sizeof(key));
+        memset(val, (uint8_t)i, sizeof(val));
+        int r = wbuf_add(wbuf, key, sizeof(key), val, sizeof(val));
+        TEST_ASSERT_EQ(r, 0, "wbuf_add should succeed");
+    }
+    TEST_ASSERT_EQ((int)wbuf->count, ARENA_WBUF_CAPACITY,
+                   "count should be at capacity");
+
+    /* Flush — ring is small, only some entries fit */
+    wbuf_flush(a, ARENA_FREQ_HOT, 0);
+
+    int remaining = (int)wbuf->count;
+    TEST_ASSERT(remaining > 0, "partial flush should leave remaining entries");
+    TEST_ASSERT(remaining < ARENA_WBUF_CAPACITY,
+                "partial flush should have flushed some entries");
+    TEST_ASSERT(!wbuf->sealed, "wbuf should be unsealed after partial flush");
+
+    /* Verify remaining entries have correct data (not zeroed) */
+    for (int i = 0; i < remaining; i++) {
+        struct arena_wbuf_slot *slot = &wbuf->slots[i];
+        TEST_ASSERT(slot->key_len == sizeof(key),
+                    "remaining slot key_len should be intact");
+        TEST_ASSERT(slot->val_len == sizeof(val),
+                    "remaining slot val_len should be intact");
+        uint8_t expected = (uint8_t)(ARENA_WBUF_CAPACITY - remaining + i);
+        TEST_ASSERT(slot->key[0] == expected,
+                    "remaining slot key data should be intact");
+    }
+
+    /* Drain the ring and enlarge it so the second flush can hold everything */
+    munmap(a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_base, 256);
+    a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_cap = 64 * 1024;
+    a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_base = mmap(NULL, 64 * 1024,
+        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    atomic_store(&a->arenas[ARENA_FREQ_HOT][0].u.hot.ring_pos, 0);
+    wbuf_flush(a, ARENA_FREQ_HOT, 0);
+
+    int final_count = (int)wbuf->count;
+    TEST_ASSERT_EQ(final_count, 0, "all entries should be flushed after drain");
+
+    arena_destroy(a);
+}
+
+/* ══════════════════════════════════════════════════════════════════
    Main
    ══════════════════════════════════════════════════════════════════ */
 
@@ -196,6 +264,7 @@ int main(void) {
 
     test_concurrent_wbuf_flush_add();
     test_concurrent_slab_alloc();
+    test_wbuf_partial_flush();
 
     printf("\n=== Results ===\n");
     printf("Tests run: %d\n", tests_run);

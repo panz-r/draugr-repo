@@ -39,11 +39,11 @@ struct arena_wbuf_slot {
 
 struct arena_write_buffer {
     struct arena_wbuf_slot slots[ARENA_WBUF_SLOTS];
-    _Atomic unsigned int count;
-    _Atomic unsigned int epoch;
+    unsigned int count;
+    bool sealed;
     uint8_t freq;
     uint8_t size_class;
-    bool sealed;
+    pthread_mutex_t lock;
 };
 
 /* ─── Slab allocator for warm tier [2][3] ─────────────────────── */
