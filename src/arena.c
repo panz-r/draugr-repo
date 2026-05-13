@@ -701,11 +701,11 @@ static void tuner_adapt(struct arena *a) {
     struct arena_tuner *t = &a->tuner;
     if (t->sample_count < 1024) return;
 
-    uint32_t total_small = 0, total_large = 0;
+    uint64_t total_small = 0, total_large = 0;
     for (int i = 0; i < 8; i++) total_small += t->hist[i];
     for (int i = 32; i < 64; i++) total_large += t->hist[i];
 
-    uint32_t total = t->sample_count;
+    uint64_t total = t->sample_count;
     if (total == 0) return;
 
     if (total_small * 100 / total > 70) {
