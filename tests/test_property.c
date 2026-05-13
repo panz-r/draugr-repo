@@ -1973,10 +1973,15 @@ static void test_reinsert_cycling(void) {
 static void test_prefix_keys(void) {
     printf("\n=== Property: Prefix Key Patterns ===\n");
     
-    uint64_t sm_state = (uint64_t)(time(NULL) ^ 0xFADE1234ULL);
+    uint64_t sm_state;
+    if (getenv("DRAUGR_SM_STATE"))
+        sm_state = (uint64_t)strtoull(getenv("DRAUGR_SM_STATE"), NULL, 10);
+    else
+        sm_state = (uint64_t)(time(NULL) ^ 0xFADE1234ULL);
     uint32_t seed = (uint32_t)(splitmix64(&sm_state) >> 32);
+    if (getenv("DRAUGR_SEED")) seed = (uint32_t)atol(getenv("DRAUGR_SEED"));
     my_srand(seed);
-    printf("  seed=%u\n", seed);
+    printf("  seed=%u sm_state=%llu\n", seed, (unsigned long long)sm_state);
     
     ht_table_t *ht = ht_create(NULL, simple_hash, NULL, NULL);
     if (!ht) { BUG("ht_create failed"); return; }
@@ -2002,17 +2007,30 @@ static void test_prefix_keys(void) {
         if (action < 50) {
             ht_insert_result_t result = ht_upsert(ht, keys[idx], 64, vals[idx], 32);
             if (result != HT_INSERT_FAILED) model_set(m, keys[idx], 64, vals[idx], 32);
+            if (ht_size(ht) != model_size(m)) {
+                int m_idx = model_find(m, keys[idx], 64);
+                printf("  DIVERGE op=%d idx=%d result=%d model_has=%d ht_size=%zu model_size=%zu\n",
+                       op, idx, result, m_idx >= 0, ht_size(ht), model_size(m));
+            }
         } else if (action < 75) {
             size_t vlen = 0;
             const char *found = (const char*)ht_find(ht, keys[idx], 64, &vlen);
             const char *mfound = model_find_val(m, keys[idx], 64, NULL);
             MODEL_CHECK((found != NULL) == (mfound != NULL));
         } else {
-            ht_remove(ht, keys[idx], 64);
-            model_remove(m, keys[idx], 64);
+            size_t removed = ht_remove(ht, keys[idx], 64);
+            bool mremoved = model_remove(m, keys[idx], 64);
+            if ((removed > 0) != mremoved) {
+                printf("  DIVERGE op=%d idx=%d removed=%zu mremoved=%d ht_size=%zu model_size=%zu\n",
+                       op, idx, removed, (int)mremoved, ht_size(ht), model_size(m));
+            }
         }
         
         if (op > 0 && op % 2000 == 0) {
+            if (ht_size(ht) != model_size(m)) {
+                printf("  DIVERGE op=%d ht_size=%zu model_size=%zu\n",
+                       op, ht_size(ht), model_size(m));
+            }
             MODEL_CHECK(ht_size(ht) == model_size(m));
         }
     }

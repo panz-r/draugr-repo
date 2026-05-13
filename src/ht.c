@@ -263,7 +263,13 @@ bool bare_verify_ideal_safe(const ht_bare_t *t, size_t idx, size_t len) {
 
         size_t target = (idx + write_offset) & cap_mask;
         size_t ideal = hpd_hash(hpd) & cap_mask;
-        if (ideal > target && (ideal - target) < t->capacity / 2) return false;
+        if (ideal > target && (ideal - target) < t->capacity / 2)
+            return false;
+
+        size_t shift = (i + 1) - write_offset;
+        if (shift > hpd_pd(hpd))
+            return false;
+
         write_offset++;
     }
     return true;
