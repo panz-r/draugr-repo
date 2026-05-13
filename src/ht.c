@@ -1674,9 +1674,10 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
     uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
     memset(new_spill_vals, 0xFF, new_spill_cap * sizeof(uint32_t));
 
-    ht_entry_t *tmp_entries = (ht_entry_t *)(new_block + new_main_sz + new_spill_sz);
-    size_t tmp_entry_count = 0;
-    size_t tmp_entry_cap = new_entry_cap;
+	ht_entry_t *tmp_entries = (ht_entry_t *)(new_block + new_main_sz + new_spill_sz);
+	ht_entry_t *tmp_entries_block_start = tmp_entries;
+	size_t tmp_entry_count = 0;
+	size_t tmp_entry_cap = new_entry_cap;
 
     ht_bare_t tmp_b = *b;
     bare_main_block_init(&tmp_b, new_block, new_capacity);
@@ -1749,13 +1750,15 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
         ok = bare_spill_insert(&tmp_b, hpd_hash(old_spill_hash_pd[i]), new_eidx);
     }
 
-    if (!ok) {
-        for (size_t i = 0; i < tmp_entry_count; i++) {
-            if (!t->allocator) free(tmp_entries[i].kv_ptr);
-        }
-        free(new_block);
-        return false;
-    }
+	if (!ok) {
+		for (size_t i = 0; i < tmp_entry_count; i++) {
+			if (!t->allocator) free(tmp_entries[i].kv_ptr);
+		}
+		if (tmp_entries != tmp_entries_block_start)
+			free(tmp_entries);
+		free(new_block);
+		return false;
+	}
 
     bare_place_prophylactic_tombstones(&tmp_b);
 

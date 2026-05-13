@@ -90,14 +90,14 @@ struct arena_tcache {
 #define ARENA_COLD_SEGS_PER_CLASS 4
 
 struct arena_seg_hdr {
-    _Atomic uint64_t control;
-    uint64_t free_bitmap[2];
-    _Atomic unsigned int epoch;
-    uint8_t freq;
-    uint8_t size_class;
-    uint8_t node_id;
-    uint8_t flags;
-    struct arena_seg_hdr *next;
+	_Atomic uint64_t control;
+	_Atomic uint64_t free_bitmap[2];
+	_Atomic unsigned int epoch;
+	uint8_t freq;
+	uint8_t size_class;
+	uint8_t node_id;
+	uint8_t flags;
+	struct arena_seg_hdr *next;
 };
 
 struct arena_segment {

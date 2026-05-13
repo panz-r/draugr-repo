@@ -95,49 +95,51 @@ static int wbuf_add(struct arena_write_buffer *wbuf,
 
 __attribute__((unused))
 static void wbuf_flush(struct arena *a, int freq, int sc) {
-    struct arena_write_buffer *wbuf = a->arenas[freq][sc].u.hot.wbuf;
-    if (!wbuf) return;
+	struct arena_write_buffer *wbuf = a->arenas[freq][sc].u.hot.wbuf;
+	if (!wbuf) return;
 
-    uint32_t count = atomic_load_explicit(&wbuf->count, memory_order_acquire);
-    if (count == 0) return;
+	if (wbuf->sealed) return;
 
-    uint8_t *ring = a->arenas[freq][sc].u.hot.ring_base;
-    if (!ring) return;
+	uint32_t count = (uint32_t)atomic_fetch_and_explicit(&wbuf->count, 0,
+		memory_order_acq_rel);
+	if (count == 0) return;
 
-    size_t ring_cap = a->arenas[freq][sc].u.hot.ring_cap;
-    size_t ring_pos = atomic_load_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
-                                           memory_order_relaxed);
+	uint8_t *ring = a->arenas[freq][sc].u.hot.ring_base;
+	if (!ring) return;
 
-    for (uint32_t i = 0; i < count; i++) {
-        struct arena_wbuf_slot *slot = &wbuf->slots[i];
+	size_t ring_cap = a->arenas[freq][sc].u.hot.ring_cap;
+	size_t ring_pos = atomic_load_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
+		memory_order_relaxed);
 
-        size_t entry_sz = sizeof(struct arena_ring_entry) + slot->key_len + slot->val_len;
-        entry_sz = (entry_sz + 15) & ~(size_t)15;
+	for (uint32_t i = 0; i < count; i++) {
+		struct arena_wbuf_slot *slot = &wbuf->slots[i];
 
-        if (ring_pos + entry_sz > ring_cap) {
-            wbuf->sealed = true;
-            atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
-                                  ring_pos, memory_order_release);
-            a->wbuf_flushes++;
-            return;
-        }
+		size_t entry_sz = sizeof(struct arena_ring_entry) + slot->key_len + slot->val_len;
+		entry_sz = (entry_sz + 15) & ~(size_t)15;
 
-        struct arena_ring_entry *hdr = (struct arena_ring_entry *)(ring + ring_pos);
-        hdr->total_len = (uint32_t)entry_sz;
-        hdr->key_len = (uint16_t)slot->key_len;
-        hdr->val_len = (uint16_t)slot->val_len;
-        if (slot->key_len > 0)
-            memcpy(ring + ring_pos + sizeof(*hdr), slot->key, slot->key_len);
-        if (slot->val_len > 0)
-            memcpy(ring + ring_pos + sizeof(*hdr) + slot->key_len, slot->val, slot->val_len);
+		if (ring_pos + entry_sz > ring_cap) {
+			wbuf->sealed = true;
+			atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
+				ring_pos, memory_order_release);
+			a->wbuf_flushes++;
+			return;
+		}
 
-        ring_pos += entry_sz;
-    }
+		struct arena_ring_entry *hdr = (struct arena_ring_entry *)(ring + ring_pos);
+		hdr->total_len = (uint32_t)entry_sz;
+		hdr->key_len = (uint16_t)slot->key_len;
+		hdr->val_len = (uint16_t)slot->val_len;
+		if (slot->key_len > 0)
+			memcpy(ring + ring_pos + sizeof(*hdr), slot->key, slot->key_len);
+		if (slot->val_len > 0)
+			memcpy(ring + ring_pos + sizeof(*hdr) + slot->key_len, slot->val, slot->val_len);
 
-    atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
-                          ring_pos, memory_order_release);
-    atomic_store_explicit(&wbuf->count, 0, memory_order_release);
-    a->wbuf_flushes++;
+		ring_pos += entry_sz;
+	}
+
+	atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
+		ring_pos, memory_order_release);
+	a->wbuf_flushes++;
 }
 
 static void wbuf_reset(struct arena_write_buffer *wbuf) {
@@ -203,12 +205,16 @@ static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
 }
 
 static bool slab_free_slot(struct arena_slab *slab, void *ptr) {
-    size_t data_offset = slab_data_offset();
-    size_t slot_size = g_slab_sizes[slab->size_class];
-    size_t data_size = slot_size * ARENA_SLAB_SLOTS;
-
-    uintptr_t offset = (uint8_t *)ptr - ((uint8_t *)slab + data_offset);
-    if (offset >= data_size) return false;
+	uintptr_t slab_start = (uintptr_t)slab;
+	uintptr_t p = (uintptr_t)ptr;
+	if (p < slab_start || p >= slab_start + slab->mmap_size) return false;
+	size_t data_offset = slab_data_offset();
+	size_t slot_size = g_slab_sizes[slab->size_class];
+	size_t data_size = slot_size * ARENA_SLAB_SLOTS;
+	uintptr_t data_start = slab_start + data_offset;
+	if (p < data_start) return false;
+	size_t offset = p - data_start;
+	if (offset >= data_size) return false;
 
     int slot = (int)(offset / slot_size);
     if (slot < 0 || slot >= ARENA_SLAB_SLOTS) return false;
@@ -228,11 +234,15 @@ static bool slab_free_slot(struct arena_slab *slab, void *ptr) {
 }
 
 static bool slab_contains(struct arena_slab *slab, void *ptr) {
-    size_t data_offset = slab_data_offset();
-    size_t slot_size = g_slab_sizes[slab->size_class];
-    size_t data_size = slot_size * ARENA_SLAB_SLOTS;
-    uintptr_t offset = (uint8_t *)ptr - ((uint8_t *)slab + data_offset);
-    return offset < data_size;
+	uintptr_t slab_start = (uintptr_t)slab;
+	uintptr_t slab_end = slab_start + slab->mmap_size;
+	uintptr_t p = (uintptr_t)ptr;
+	if (p < slab_start || p >= slab_end) return false;
+	size_t data_offset = slab_data_offset();
+	size_t slot_size = g_slab_sizes[slab->size_class];
+	size_t data_size = slot_size * ARENA_SLAB_SLOTS;
+	uintptr_t data_start = slab_start + data_offset;
+	return p >= data_start && p - data_start < data_size;
 }
 
 static void *slab_set_alloc(struct arena_slab_set *set, int node, int sc) {
@@ -431,17 +441,19 @@ static void sys_alloc_untrack(void *ptr) {
 }
 
 static bool sys_alloc_contains(const void *ptr) {
-    pthread_mutex_lock(&sys_alloc_lock);
-    for (size_t i = 0; i < sys_alloc_count; i++) {
-        const struct sys_alloc_record *r = &sys_alloc_records[i];
-        if ((const uint8_t *)ptr >= (const uint8_t *)r->ptr &&
-            (const uint8_t *)ptr < (const uint8_t *)r->ptr + r->size) {
-            pthread_mutex_unlock(&sys_alloc_lock);
-            return true;
-        }
-    }
-    pthread_mutex_unlock(&sys_alloc_lock);
-    return false;
+	pthread_mutex_lock(&sys_alloc_lock);
+	for (size_t i = 0; i < sys_alloc_count; i++) {
+		const struct sys_alloc_record *r = &sys_alloc_records[i];
+		uintptr_t start = (uintptr_t)r->ptr;
+		uintptr_t end = start + r->size;
+		uintptr_t p = (uintptr_t)ptr;
+		if (p >= start && p < end) {
+			pthread_mutex_unlock(&sys_alloc_lock);
+			return true;
+		}
+	}
+	pthread_mutex_unlock(&sys_alloc_lock);
+	return false;
 }
 
 static void *sys_numa_alloc(size_t size, int node) {
@@ -496,92 +508,126 @@ static struct arena_segment *seg_create(uint8_t freq, uint8_t sc,
     }
     if (base == MAP_FAILED) return NULL;
 
-    struct arena_segment *seg = base;
-    atomic_store(&seg->hdr.control, 0);
-    seg->hdr.free_bitmap[0] = UINT64_MAX;
-    seg->hdr.free_bitmap[1] = UINT64_MAX;
-    atomic_store(&seg->hdr.epoch, 0);
-    seg->hdr.freq = freq;
-    seg->hdr.size_class = sc;
-    seg->hdr.node_id = node_id;
-    seg->hdr.flags = 0;
-    seg->hdr.next = NULL;
+	struct arena_segment *seg = base;
+	atomic_store(&seg->hdr.control, 0);
+	atomic_store_explicit(&seg->hdr.free_bitmap[0], UINT64_MAX,
+		memory_order_relaxed);
+	atomic_store_explicit(&seg->hdr.free_bitmap[1], UINT64_MAX,
+		memory_order_relaxed);
+	atomic_store(&seg->hdr.epoch, 0);
+	seg->hdr.freq = freq;
+	seg->hdr.size_class = sc;
+	seg->hdr.node_id = node_id;
+	seg->hdr.flags = 0;
+	seg->hdr.next = NULL;
 
-    return seg;
+	return seg;
 }
 
 static void *seg_alloc(struct arena_segment *seg, size_t size) {
-    if (!seg) return NULL;
+	if (!seg) return NULL;
 
-    size_t granularity = 64;
-    size_t slots_needed = (size + granularity - 1) / granularity;
-    size_t total_slots = 128;
+	size_t granularity = 64;
+	size_t slots_needed = (size + granularity - 1) / granularity;
+	size_t total_slots = 128;
 
-    uint64_t *bm = seg->hdr.free_bitmap;
-    size_t consecutive = 0;
-    size_t start_slot = 0;
+	_Atomic uint64_t *bm = seg->hdr.free_bitmap;
+	size_t consecutive = 0;
+	size_t start_slot = 0;
 
-    for (size_t i = 0; i < total_slots; i++) {
-        int word = (int)(i / 64);
-        int bit = (int)(i % 64);
-        if (word > 1) break;
+	for (size_t i = 0; i < total_slots; i++) {
+		int word = (int)(i / 64);
+		int bit = (int)(i % 64);
+		if (word > 1) break;
 
-        if (bm[word] & (1ULL << bit)) {
-            consecutive++;
-            if (consecutive == 1) start_slot = i;
-            if (consecutive >= slots_needed) {
-                for (size_t j = start_slot; j < start_slot + slots_needed; j++) {
-                    int w = (int)(j / 64);
-                    int b = (int)(j % 64);
-                    bm[w] &= ~(1ULL << b);
-                }
+		uint64_t bits = atomic_load_explicit(&bm[word], memory_order_acquire);
+		if (bits & (1ULL << bit)) {
+			consecutive++;
+			if (consecutive == 1) start_slot = i;
+			if (consecutive >= slots_needed) {
+				for (size_t j = start_slot; j < start_slot + slots_needed; j++) {
+					int w = (int)(j / 64);
+					int b = (int)(j % 64);
+					uint64_t old_b, new_b;
+					do {
+						old_b = atomic_load_explicit(&bm[w], memory_order_acquire);
+						if (!(old_b & (1ULL << b))) goto retry_scan;
+						new_b = old_b & ~(1ULL << b);
+					} while (!atomic_compare_exchange_strong_explicit(
+						&bm[w], &old_b, new_b,
+						memory_order_acq_rel, memory_order_acquire));
+				}
 
-                uint64_t ctrl = atomic_load(&seg->hdr.control);
-                uint64_t used = (ctrl >> 48) & 0xFFFF;
-                used += slots_needed;
-                ctrl = (ctrl & ~(0xFFFFULL << 48)) | (used << 48);
-                atomic_store(&seg->hdr.control, ctrl);
+				uint64_t ctrl = atomic_load_explicit(&seg->hdr.control,
+					memory_order_relaxed);
+				uint64_t used;
+				do {
+					used = (ctrl >> 48) & 0xFFFF;
+					used += slots_needed;
+					uint64_t new_ctrl = (ctrl & ~(0xFFFFULL << 48)) | (used << 48);
+					if (atomic_compare_exchange_strong_explicit(
+						&seg->hdr.control, &ctrl, new_ctrl,
+						memory_order_relaxed, memory_order_relaxed))
+						break;
+				} while (1);
 
-                return seg->data + start_slot * granularity;
-            }
-        } else {
-            consecutive = 0;
-        }
-    }
-    return NULL;
+				return seg->data + start_slot * granularity;
+			}
+		} else {
+			consecutive = 0;
+		}
+		retry_scan:;
+	}
+	return NULL;
 }
 
 static bool seg_free(struct arena_segment *seg, void *ptr, size_t size) {
-    if (!seg || !ptr) return false;
+	if (!seg || !ptr) return false;
 
-    size_t granularity = 64;
-    size_t seg_data_size = ARENA_SEG_SIZE - sizeof(struct arena_seg_hdr);
-    uintptr_t offset = (uint8_t *)ptr - seg->data;
-    if (offset >= seg_data_size) return false;
+	size_t granularity = 64;
+	size_t seg_data_size = ARENA_SEG_SIZE - sizeof(struct arena_seg_hdr);
+	uintptr_t seg_start = (uintptr_t)seg;
+	uintptr_t data_start = seg_start + sizeof(struct arena_seg_hdr);
+	uintptr_t p = (uintptr_t)ptr;
+	if (p < data_start || p - data_start >= seg_data_size) return false;
+	size_t offset = p - data_start;
 
     size_t start_slot = offset / granularity;
     size_t slots = (size + granularity - 1) / granularity;
 
-    for (size_t i = start_slot; i < start_slot + slots && i < 128; i++) {
-        int w = (int)(i / 64);
-        int b = (int)(i % 64);
-        if (w > 1) break;
-        seg->hdr.free_bitmap[w] |= (1ULL << b);
-    }
+	for (size_t i = start_slot; i < start_slot + slots && i < 128; i++) {
+		int w = (int)(i / 64);
+		int b = (int)(i % 64);
+		if (w > 1) break;
+		uint64_t old_b, new_b;
+		do {
+			old_b = atomic_load_explicit(&seg->hdr.free_bitmap[w],
+				memory_order_acquire);
+			new_b = old_b | (1ULL << b);
+		} while (!atomic_compare_exchange_strong_explicit(
+			&seg->hdr.free_bitmap[w], &old_b, new_b,
+			memory_order_acq_rel, memory_order_acquire));
+	}
 
-    uint64_t ctrl = atomic_load(&seg->hdr.control);
-    uint64_t used = (ctrl >> 48) & 0xFFFF;
-    used = (used >= slots) ? used - slots : 0;
-    ctrl = (ctrl & ~(0xFFFFULL << 48)) | (used << 48);
-    atomic_store(&seg->hdr.control, ctrl);
+	uint64_t ctrl = atomic_load_explicit(&seg->hdr.control, memory_order_relaxed);
+	do {
+		uint64_t used = (ctrl >> 48) & 0xFFFF;
+		used = (used >= slots) ? used - slots : 0;
+		uint64_t new_ctrl = (ctrl & ~(0xFFFFULL << 48)) | (used << 48);
+		if (atomic_compare_exchange_strong_explicit(
+			&seg->hdr.control, &ctrl, new_ctrl,
+			memory_order_relaxed, memory_order_relaxed))
+			break;
+	} while (1);
 
-    return true;
+	return true;
 }
 
 static bool seg_contains(struct arena_segment *seg, void *ptr) {
-    if (!seg || !ptr) return false;
-    uintptr_t offset = (uint8_t *)ptr - (uint8_t *)seg;
-    return offset < ARENA_SEG_SIZE;
+	if (!seg || !ptr) return false;
+	uintptr_t seg_start = (uintptr_t)seg;
+	uintptr_t p = (uintptr_t)ptr;
+	return p >= seg_start && p - seg_start < ARENA_SEG_SIZE;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -1015,20 +1061,24 @@ void arena_clear(struct arena *a) {
             atomic_store(&set->free_slots, atomic_load(&set->total_slots));
         }
 
-        if (a->arenas[ARENA_FREQ_COLD][sc].u.segs) {
-            for (int i = 0; i < ARENA_COLD_SEGS_PER_CLASS; i++) {
-                struct arena_segment *seg = a->arenas[ARENA_FREQ_COLD][sc].u.segs[i];
-                if (seg) {
-                    seg->hdr.free_bitmap[0] = UINT64_MAX;
-                    seg->hdr.free_bitmap[1] = UINT64_MAX;
-                    uint64_t ctrl = atomic_load(&seg->hdr.control);
-                    ctrl &= ~(0xFFFFULL << 48);
-                    atomic_store(&seg->hdr.control, ctrl);
-                    atomic_store(&seg->hdr.epoch, 0);
-                    seg->hdr.flags = 0;
-                }
-            }
-        }
+	if (a->arenas[ARENA_FREQ_COLD][sc].u.segs) {
+		for (int i = 0; i < ARENA_COLD_SEGS_PER_CLASS; i++) {
+			struct arena_segment *seg = a->arenas[ARENA_FREQ_COLD][sc].u.segs[i];
+			if (seg) {
+				atomic_store_explicit(&seg->hdr.free_bitmap[0],
+					UINT64_MAX, memory_order_relaxed);
+				atomic_store_explicit(&seg->hdr.free_bitmap[1],
+					UINT64_MAX, memory_order_relaxed);
+				uint64_t ctrl = atomic_load_explicit(&seg->hdr.control,
+					memory_order_relaxed);
+				ctrl &= ~(0xFFFFULL << 48);
+				atomic_store_explicit(&seg->hdr.control, ctrl,
+					memory_order_relaxed);
+				atomic_store(&seg->hdr.epoch, 0);
+				seg->hdr.flags = 0;
+			}
+		}
+	}
     }
 
     atomic_store_explicit(&a->alloc_count, 0, memory_order_relaxed);
