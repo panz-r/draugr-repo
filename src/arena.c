@@ -2,12 +2,11 @@
  * Draugr Arena v4 — Production-Ready Memory Allocator
  *
  * Implements:
- *   - Three frequency tiers: HOT (write buffer + ring), WARM (slab), COLD (segment)
- *   - Write-coalescing buffer for hot tier [1]
+ *   - Two frequency tiers: WARM (slab), COLD (segment)
  *   - Slab allocator for small objects (zero fragmentation) [2][3]
  *   - Hardware-aware prefetching [4]
  *   - Epoch-based generational GC [6][7]
- *   - NUMA-aware allocation [8]
+ *   - Thread cache for fast per-thread allocation
  *   - Adaptive size class tuning [9]
  */
 
@@ -21,14 +20,7 @@
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <errno.h>
-#include <sched.h>
 #include <pthread.h>
-
-#ifdef __linux__
-#include <numa.h>
-#include <numaif.h>
-#endif
 
 /* ══════════════════════════════════════════════════════════════════
    SIZE CLASS HELPERS
@@ -57,122 +49,10 @@ static size_t slab_data_offset(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   WRITE BUFFER — Hot Tier [1]
-   ══════════════════════════════════════════════════════════════════ */
-
-struct arena_write_buffer *wbuf_create(int freq, int sc) {
-    struct arena_write_buffer *wbuf = calloc(1, sizeof(*wbuf));
-    if (!wbuf) return NULL;
-    wbuf->freq = (uint8_t)freq;
-    wbuf->size_class = (uint8_t)sc;
-    wbuf->count = 0;
-    wbuf->sealed = false;
-    pthread_mutex_init(&wbuf->lock, NULL);
-    return wbuf;
-}
-
-int wbuf_add(struct arena_write_buffer *wbuf,
-                    const void *key, size_t klen,
-                    const void *val, size_t vlen) {
-    pthread_mutex_lock(&wbuf->lock);
-    if (wbuf->sealed || wbuf->count >= ARENA_WBUF_CAPACITY) {
-        pthread_mutex_unlock(&wbuf->lock);
-        return -1;
-    }
-    uint32_t idx = wbuf->count++;
-    struct arena_wbuf_slot *slot = &wbuf->slots[idx];
-    slot->key_len = (uint32_t)klen;
-    slot->val_len = (uint32_t)vlen;
-    if (klen <= 64) memcpy(slot->key, key, klen);
-    if (vlen <= 256) memcpy(slot->val, val, vlen);
-    pthread_mutex_unlock(&wbuf->lock);
-    return 0;
-}
-
-void wbuf_flush(struct arena *a, int freq, int sc) {
-	struct arena_write_buffer *wbuf = a->arenas[freq][sc].u.hot.wbuf;
-	if (!wbuf) return;
-
-	pthread_mutex_lock(&wbuf->lock);
-	if (wbuf->sealed || wbuf->count == 0) {
-		pthread_mutex_unlock(&wbuf->lock);
-		return;
-	}
-	wbuf->sealed = true;
-	uint32_t count = wbuf->count;
-	pthread_mutex_unlock(&wbuf->lock);
-
-	uint8_t *ring = a->arenas[freq][sc].u.hot.ring_base;
-	if (!ring) {
-		pthread_mutex_lock(&wbuf->lock);
-		wbuf->sealed = false;
-		pthread_mutex_unlock(&wbuf->lock);
-		return;
-	}
-
-	size_t ring_cap = a->arenas[freq][sc].u.hot.ring_cap;
-	size_t ring_pos = atomic_load_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
-		memory_order_relaxed);
-
-	uint32_t flushed = 0;
-	for (uint32_t i = 0; i < count; i++) {
-		struct arena_wbuf_slot *slot = &wbuf->slots[i];
-
-		size_t entry_sz = sizeof(struct arena_ring_entry) + slot->key_len + slot->val_len;
-		entry_sz = (entry_sz + 15) & ~(size_t)15;
-
-		if (ring_pos + entry_sz > ring_cap)
-			break;
-
-		struct arena_ring_entry *hdr = (struct arena_ring_entry *)(ring + ring_pos);
-		hdr->total_len = (uint32_t)entry_sz;
-		hdr->key_len = (uint16_t)slot->key_len;
-		hdr->val_len = (uint16_t)slot->val_len;
-		if (slot->key_len > 0)
-			memcpy(ring + ring_pos + sizeof(*hdr), slot->key, slot->key_len);
-		if (slot->val_len > 0)
-			memcpy(ring + ring_pos + sizeof(*hdr) + slot->key_len, slot->val, slot->val_len);
-
-		ring_pos += entry_sz;
-		flushed++;
-	}
-
-	if (flushed > 0) {
-		atomic_store_explicit(&a->arenas[freq][sc].u.hot.ring_pos,
-			ring_pos, memory_order_release);
-		a->wbuf_flushes++;
-	}
-
-	uint32_t remaining = count - flushed;
-	if (remaining > 0 && flushed > 0) {
-		memmove(&wbuf->slots[0], &wbuf->slots[flushed],
-			remaining * sizeof(wbuf->slots[0]));
-		memset(&wbuf->slots[remaining], 0,
-			flushed * sizeof(wbuf->slots[0]));
-	}
-
-	pthread_mutex_lock(&wbuf->lock);
-	wbuf->count = remaining;
-	wbuf->sealed = false;
-	pthread_mutex_unlock(&wbuf->lock);
-}
-
-static void wbuf_reset(struct arena_write_buffer *wbuf) {
-    if (!wbuf) return;
-    pthread_mutex_lock(&wbuf->lock);
-    wbuf->sealed = true;
-    memset(wbuf->slots, 0, sizeof(wbuf->slots));
-    wbuf->count = 0;
-    wbuf->sealed = false;
-    pthread_mutex_unlock(&wbuf->lock);
-}
-
-/* ══════════════════════════════════════════════════════════════════
    SLAB ALLOCATOR — Warm Tier [2][3]
    ══════════════════════════════════════════════════════════════════ */
 
-static struct arena_slab *slab_create(int size_class, uint8_t freq,
-                                      uint16_t node_id) {
+static struct arena_slab *slab_create(int size_class, uint8_t freq) {
     size_t total = slab_total_size(size_class);
 
     void *base = mmap(NULL, total,
@@ -194,7 +74,7 @@ static struct arena_slab *slab_create(int size_class, uint8_t freq,
     atomic_store(&slab->used_count, 0);
     slab->size_class = (uint8_t)size_class;
     slab->freq = freq;
-    slab->node_id = node_id;
+    slab->node_id = 0;
     slab->mmap_size = total;
 
     return slab;
@@ -265,7 +145,7 @@ static bool slab_contains(struct arena_slab *slab, void *ptr) {
 	return p >= data_start && p - data_start < data_size;
 }
 
-void *slab_set_alloc(struct arena_slab_set *set, int node, int sc) {
+void *slab_set_alloc(struct arena_slab_set *set, int sc) {
     int count = atomic_load_explicit(&set->slab_count, memory_order_acquire);
 
     for (int i = 0; i < count && i < 8; i++) {
@@ -282,7 +162,7 @@ void *slab_set_alloc(struct arena_slab_set *set, int node, int sc) {
 
     if (count >= 8) return NULL;
 
-    struct arena_slab *slab = slab_create(sc, ARENA_FREQ_WARM, (uint16_t)node);
+    struct arena_slab *slab = slab_create(sc, ARENA_FREQ_WARM);
     if (!slab) return NULL;
 
     int slot = atomic_fetch_add_explicit(&set->slab_count, 1,
@@ -340,21 +220,17 @@ bool slab_set_contains(struct arena_slab_set *set, void *ptr) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   THREAD CACHE [8]
-   Per-NUMA-node free-list sharding (mimalloc-inspired).
-   
-   Uses pthread_mutex for simplicity and correctness.
-   Contention is minimal: each thread typically uses one node's cache.
+   THREAD CACHE
+   Per-thread free-list sharding (mimalloc-inspired).
    ══════════════════════════════════════════════════════════════════ */
 
-static struct arena_tcache *tcache_for_node(struct arena *a, int node) {
+static struct arena_tcache *tcache_get(struct arena *a) {
     if (!a->thread_caches || a->tcache_count == 0) return NULL;
-    if (node < 0 || (size_t)node >= a->tcache_count) node = 0;
-    return &a->thread_caches[node];
+    return &a->thread_caches[0];
 }
 
-static void *tcache_try_get(struct arena *a, int sc, int node) {
-    struct arena_tcache *tc = tcache_for_node(a, node);
+static void *tcache_try_get(struct arena *a, int sc) {
+    struct arena_tcache *tc = tcache_get(a);
     if (!tc) return NULL;
     if (sc < 0 || sc >= ARENA_TCACHE_BINS) return NULL;
 
@@ -371,8 +247,8 @@ static void *tcache_try_get(struct arena *a, int sc, int node) {
     return ptr;
 }
 
-static void tcache_put(struct arena *a, void *ptr, int sc, int node) {
-    struct arena_tcache *tc = tcache_for_node(a, node);
+static void tcache_put(struct arena *a, void *ptr, int sc) {
+    struct arena_tcache *tc = tcache_get(a);
     if (!tc) return;
     if (sc < 0 || sc >= ARENA_TCACHE_BINS) return;
 
@@ -402,26 +278,8 @@ static void tcache_clear(struct arena *a) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   NUMA SUPPORT [8]
+   LARGE ALLOCATION TRACKING
    ══════════════════════════════════════════════════════════════════ */
-
-static int get_numa_node(void) {
-#ifdef __linux__
-    if (numa_available() >= 0) {
-        return numa_node_of_cpu(sched_getcpu());
-    }
-#endif
-    return 0;
-}
-
-static int numa_node_count(void) {
-#ifdef __linux__
-    if (numa_available() >= 0) {
-        return numa_max_node() + 1;
-    }
-#endif
-    return 1;
-}
 
 struct sys_alloc_record {
     void *ptr;
@@ -477,17 +335,7 @@ static bool sys_alloc_contains(const void *ptr) {
 	return false;
 }
 
-static void *sys_numa_alloc(size_t size, int node) {
-#ifdef __linux__
-    if (numa_available() >= 0 && node >= 0) {
-        void *ptr = numa_alloc_onnode(size, node);
-        if (ptr && ptr != MAP_FAILED) {
-            sys_alloc_track(ptr, size);
-            return ptr;
-        }
-    }
-#endif
-    (void)node;
+static void *sys_alloc(size_t size) {
     void *ptr = mmap(NULL, size, PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr != MAP_FAILED) {
@@ -497,16 +345,8 @@ static void *sys_numa_alloc(size_t size, int node) {
     return NULL;
 }
 
-__attribute__((unused))
-static void sys_numa_free(void *ptr, size_t size, int node) {
+static void sys_free(void *ptr, size_t size) {
     sys_alloc_untrack(ptr);
-#ifdef __linux__
-    if (node >= 0 && ptr) {
-        numa_free(ptr, size);
-        return;
-    }
-#endif
-    (void)node;
     if (ptr) munmap(ptr, size);
 }
 
@@ -514,8 +354,7 @@ static void sys_numa_free(void *ptr, size_t size, int node) {
    COLD TIER SEGMENTS [6][7]
    ══════════════════════════════════════════════════════════════════ */
 
-static struct arena_segment *seg_create(uint8_t freq, uint8_t sc,
-                                        uint8_t node_id) {
+static struct arena_segment *seg_create(uint8_t freq, uint8_t sc) {
     size_t seg_size = ARENA_SEG_SIZE;
 
     void *base = mmap(NULL, seg_size,
@@ -538,7 +377,7 @@ static struct arena_segment *seg_create(uint8_t freq, uint8_t sc,
 	atomic_store(&seg->hdr.epoch, 0);
 	seg->hdr.freq = freq;
 	seg->hdr.size_class = sc;
-	seg->hdr.node_id = node_id;
+	seg->hdr.node_id = 0;
 	seg->hdr.flags = 0;
 	seg->hdr.next = NULL;
 
@@ -659,8 +498,6 @@ static bool seg_contains(struct arena_segment *seg, void *ptr) {
    ══════════════════════════════════════════════════════════════════ */
 
 static void epoch_gc_start(struct arena *a, int freq) {
-    if (freq == ARENA_FREQ_HOT) return;
-
     uint32_t epoch = atomic_fetch_add_explicit(&a->epoch_ctl.global_epoch, 1,
                                                memory_order_acq_rel) + 1;
     atomic_fetch_add_explicit(&a->epoch_ctl.evacuating, 1, memory_order_acq_rel);
@@ -728,17 +565,13 @@ static void tuner_adapt(struct arena *a) {
     if (total == 0) return;
 
     if (total_small * 100 / total > 70) {
-        a->config.hot_threshold = 2;
         a->config.warm_threshold = 8;
     } else if (total_large * 100 / total > 50) {
-        a->config.hot_threshold = 5;
         a->config.warm_threshold = 20;
     } else {
-        a->config.hot_threshold = 3;
         a->config.warm_threshold = 10;
     }
 
-    t->freq_thresholds[ARENA_FREQ_HOT] = a->config.hot_threshold;
     t->freq_thresholds[ARENA_FREQ_WARM] = a->config.warm_threshold;
     t->freq_thresholds[ARENA_FREQ_COLD] = (uint8_t)(a->config.warm_threshold * 2);
 
@@ -747,20 +580,6 @@ static void tuner_adapt(struct arena *a) {
 
     memset(t->hist, 0, sizeof(t->hist));
     t->sample_count = 0;
-}
-
-/* ══════════════════════════════════════════════════════════════════
-   FREQUENCY ROUTING
-   ══════════════════════════════════════════════════════════════════ */
-
-__attribute__((unused))
-static int arena_freq_for_size(struct arena *a, size_t size) {
-    (void)a;
-    if (size <= g_slab_sizes[ARENA_SLAB_SIZES - 1])
-        return ARENA_FREQ_WARM;
-    if (size <= 4096)
-        return ARENA_FREQ_WARM;
-    return ARENA_FREQ_COLD;
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -773,32 +592,20 @@ struct arena *arena_create(size_t initial_capacity) {
     struct arena *a = calloc(1, sizeof(struct arena));
     if (!a) return NULL;
 
-    a->config.hot_threshold = 3;
     a->config.warm_threshold = 10;
-    a->config.enable_numa = 0;
     a->config.enable_prefetch = 1;
     a->config.enable_thread_cache = 1;
     a->config.enable_adaptive_tuning = 1;
-    a->config.numa_node_count = 1;
 
-#ifdef __linux__
-    if (numa_available() >= 0) {
-        a->config.enable_numa = 1;
-        a->config.numa_node_count = (uint32_t)numa_node_count();
-    }
-#endif
-
-    a->numa_node = get_numa_node();
-
-    if (a->config.enable_thread_cache && a->config.numa_node_count > 0) {
-        a->tcache_count = a->config.numa_node_count;
+    if (a->config.enable_thread_cache) {
+        a->tcache_count = 1;
         a->thread_caches = calloc(a->tcache_count, sizeof(struct arena_tcache));
         if (!a->thread_caches) {
             a->tcache_count = 0;
             a->config.enable_thread_cache = 0;
         } else {
             for (size_t i = 0; i < a->tcache_count; i++) {
-                a->thread_caches[i].node_id = (uint8_t)i;
+                a->thread_caches[i].node_id = 0;
                 for (int b = 0; b < ARENA_TCACHE_BINS; b++) {
                     pthread_mutex_init(&a->thread_caches[i].bins[b].lock, NULL);
                 }
@@ -806,45 +613,24 @@ struct arena *arena_create(size_t initial_capacity) {
         }
     }
 
- for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf = wbuf_create(ARENA_FREQ_HOT, sc);
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap = 64 * 1024;
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base = mmap(NULL,
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap,
- PROT_READ | PROT_WRITE,
- MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
- atomic_store(&a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_pos, 0);
- if (!a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf ||
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base == MAP_FAILED) {
- if (a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base != MAP_FAILED)
- munmap(a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base,
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap);
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base = NULL;
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap = 0;
- free(a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf);
- a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf = NULL;
- goto fail;
- }
- }
+	for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
+		a->arenas[ARENA_FREQ_WARM][sc].u.slabs = calloc(1, sizeof(struct arena_slab_set));
+		if (!a->arenas[ARENA_FREQ_WARM][sc].u.slabs) goto fail;
+		atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->slab_count, 0);
+		atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->total_slots, 0);
+		atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->free_slots, 0);
+	}
 
- for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
- a->arenas[ARENA_FREQ_WARM][sc].u.slabs = calloc(1, sizeof(struct arena_slab_set));
- if (!a->arenas[ARENA_FREQ_WARM][sc].u.slabs) goto fail;
- atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->slab_count, 0);
- atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->total_slots, 0);
- atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->free_slots, 0);
- }
-
- for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
- a->arenas[ARENA_FREQ_COLD][sc].u.segs = calloc(ARENA_COLD_SEGS_PER_CLASS,
- sizeof(struct arena_segment *));
- if (!a->arenas[ARENA_FREQ_COLD][sc].u.segs) goto fail;
- for (int i = 0; i < ARENA_COLD_SEGS_PER_CLASS; i++) {
- a->arenas[ARENA_FREQ_COLD][sc].u.segs[i] = seg_create(
- ARENA_FREQ_COLD, (uint8_t)sc, (uint8_t)a->numa_node);
- }
- a->arenas[ARENA_FREQ_COLD][sc].count = ARENA_COLD_SEGS_PER_CLASS;
- }
+	for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
+		a->arenas[ARENA_FREQ_COLD][sc].u.segs = calloc(ARENA_COLD_SEGS_PER_CLASS,
+			sizeof(struct arena_segment *));
+		if (!a->arenas[ARENA_FREQ_COLD][sc].u.segs) goto fail;
+		for (int i = 0; i < ARENA_COLD_SEGS_PER_CLASS; i++) {
+			a->arenas[ARENA_FREQ_COLD][sc].u.segs[i] = seg_create(
+				ARENA_FREQ_COLD, (uint8_t)sc);
+		}
+		a->arenas[ARENA_FREQ_COLD][sc].count = ARENA_COLD_SEGS_PER_CLASS;
+	}
 
     a->epoch_ctl.global_epoch = 0;
     a->epoch_ctl.evacuating = 0;
@@ -854,9 +640,7 @@ struct arena *arena_create(size_t initial_capacity) {
 
     a->prefetch_ctl.enabled = a->config.enable_prefetch;
     a->prefetch_ctl.prefetch_distance = 2;
-    a->prefetch_ctl.numa_aware = a->config.enable_numa;
 
-    a->tuner.freq_thresholds[ARENA_FREQ_HOT] = a->config.hot_threshold;
     a->tuner.freq_thresholds[ARENA_FREQ_WARM] = a->config.warm_threshold;
     a->tuner.freq_thresholds[ARENA_FREQ_COLD] = a->config.warm_threshold * 2;
     a->tuner.last_tune_epoch = 0;
@@ -865,25 +649,14 @@ struct arena *arena_create(size_t initial_capacity) {
     return a;
 
 fail:
- arena_destroy(a);
- return NULL;
+	arena_destroy(a);
+	return NULL;
 }
 
 void arena_destroy(struct arena *a) {
     if (!a) return;
 
     tcache_clear(a);
-
-    for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
-        if (a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base) {
-            munmap(a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_base,
-                   a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap);
-        }
-        if (a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf) {
-            pthread_mutex_destroy(&a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf->lock);
-            free(a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf);
-        }
-    }
 
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
         struct arena_slab_set *set = a->arenas[ARENA_FREQ_WARM][sc].u.slabs;
@@ -935,7 +708,7 @@ void *arena_alloc(struct arena *a, size_t size) {
         int sc = size_to_slab_class(size);
 
         if (a->config.enable_thread_cache) {
-            void *cached = tcache_try_get(a, sc, a->numa_node);
+            void *cached = tcache_try_get(a, sc);
             if (cached) {
                 if (a->prefetch_ctl.enabled)
                     prefetch_range(cached, size);
@@ -945,8 +718,7 @@ void *arena_alloc(struct arena *a, size_t size) {
 
         if (sc >= 0 && sc < ARENA_SLAB_SIZES &&
             a->arenas[ARENA_FREQ_WARM][sc].u.slabs) {
-            void *ptr = slab_set_alloc(a->arenas[ARENA_FREQ_WARM][sc].u.slabs,
-                                       a->numa_node, sc);
+            void *ptr = slab_set_alloc(a->arenas[ARENA_FREQ_WARM][sc].u.slabs, sc);
             if (ptr) {
                 atomic_fetch_add_explicit(&a->alloc_count, 1, memory_order_relaxed);
                 atomic_fetch_add_explicit(&a->alloc_bytes, size, memory_order_relaxed);
@@ -986,7 +758,7 @@ void *arena_alloc(struct arena *a, size_t size) {
         }
     }
 
-    void *ptr = sys_numa_alloc(size, a->numa_node);
+    void *ptr = sys_alloc(size);
     if (ptr) {
         atomic_fetch_add_explicit(&a->alloc_count, 1, memory_order_relaxed);
         atomic_fetch_add_explicit(&a->alloc_bytes, size, memory_order_relaxed);
@@ -1019,14 +791,14 @@ void arena_free(struct arena *a, void *ptr, size_t size) {
         int sc = size_to_slab_class(size);
 
         if (a->config.enable_thread_cache) {
-            struct arena_tcache *tc = tcache_for_node(a, a->numa_node);
+            struct arena_tcache *tc = tcache_get(a);
             if (tc && sc >= 0 && sc < ARENA_TCACHE_BINS) {
                 unsigned int count;
                 pthread_mutex_lock(&tc->bins[sc].lock);
                 count = tc->bins[sc].count;
                 pthread_mutex_unlock(&tc->bins[sc].lock);
                 if (count < ARENA_TCACHE_DEPTH) {
-                    tcache_put(a, ptr, sc, a->numa_node);
+                    tcache_put(a, ptr, sc);
                     return;
                 }
             }
@@ -1059,7 +831,7 @@ void arena_free(struct arena *a, void *ptr, size_t size) {
         }
     }
 
-    sys_numa_free(ptr, size, a->numa_node);
+    sys_free(ptr, size);
 }
 
 void arena_clear(struct arena *a) {
@@ -1068,11 +840,6 @@ void arena_clear(struct arena *a) {
     tcache_clear(a);
 
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
-        if (a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf) {
-            wbuf_reset(a->arenas[ARENA_FREQ_HOT][sc].u.hot.wbuf);
-        }
-        atomic_store(&a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_pos, 0);
-
         struct arena_slab_set *set = a->arenas[ARENA_FREQ_WARM][sc].u.slabs;
         if (set) {
             int count = atomic_load(&set->slab_count);
@@ -1123,11 +890,6 @@ int arena_get_stats(const struct arena *a, size_t *out) {
     size_t total = 0, used = 0, waste = 0;
 
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
-        total += a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap;
-        used += atomic_load(&a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_pos);
-    }
-
-    for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
         const struct arena_slab_set *set = a->arenas[ARENA_FREQ_WARM][sc].u.slabs;
         if (set) {
             unsigned int total_slots = atomic_load(&set->total_slots);
@@ -1157,7 +919,6 @@ int arena_get_stats(const struct arena *a, size_t *out) {
     out[ARENA_STAT_USED] = used;
     out[ARENA_STAT_WASTE] = waste;
     out[ARENA_STAT_COMPACTIONS] = a->compactions;
-    out[ARENA_STAT_WBUF_FLUSHES] = a->wbuf_flushes;
     out[ARENA_STAT_WRITE_AMP] = a->write_amplification;
 
     return 0;
@@ -1172,10 +933,6 @@ size_t arena_capacity(const struct arena *a) {
     if (!a) return 0;
 
     size_t total = 0;
-
-    for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
-        total += a->arenas[ARENA_FREQ_HOT][sc].u.hot.ring_cap;
-    }
 
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
         const struct arena_slab_set *set = a->arenas[ARENA_FREQ_WARM][sc].u.slabs;

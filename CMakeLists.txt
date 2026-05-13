@@ -23,15 +23,10 @@ if(DRAUGR_USE_MALLOC)
 else()
     message(STATUS "Building with arena allocator (default)")
     set(DRAUGR_SOURCES src/ht.c src/ht_cache.c src/util.c src/arena.c)
-    find_library(NUMA_LIB numa REQUIRED)
 endif()
 
 add_library(draugr ${DRAUGR_SOURCES})
-if(NUMA_LIB)
-    target_link_libraries(draugr ${NUMA_LIB} m)
-else()
-    target_link_libraries(draugr m)
-endif()
+target_link_libraries(draugr m)
 
 target_include_directories(draugr
     PUBLIC

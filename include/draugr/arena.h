@@ -12,39 +12,15 @@ extern "C" {
 
 /* ─── Frequency tiers ──────────────────────────────────────────── */
 enum arena_freq {
-    ARENA_FREQ_HOT  = 0,
-    ARENA_FREQ_WARM = 1,
-    ARENA_FREQ_COLD = 2,
+    ARENA_FREQ_WARM = 0,
+    ARENA_FREQ_COLD = 1,
 };
 
-#define ARENA_FREQ_COUNT 3
+#define ARENA_FREQ_COUNT 2
 
 /* ─── Adaptive size classes (tuned at runtime) [9] ─────────────── */
 #define ARENA_MIN_CLASSES  8
 #define ARENA_MAX_CLASSES  24
-
-/* ─── NUMA configuration ──────────────────────────────────────── */
-#define ARENA_MAX_NUMA_NODES 16
-
-/* ─── Write buffer for hot tier [1] ───────────────────────────── */
-#define ARENA_WBUF_SLOTS    64
-#define ARENA_WBUF_CAPACITY 48
-
-struct arena_wbuf_slot {
-    uint32_t key_len;
-    uint32_t val_len;
-    uint8_t key[64];
-    uint8_t val[256];
-};
-
-struct arena_write_buffer {
-    struct arena_wbuf_slot slots[ARENA_WBUF_SLOTS];
-    unsigned int count;
-    bool sealed;
-    uint8_t freq;
-    uint8_t size_class;
-    pthread_mutex_t lock;
-};
 
 /* ─── Slab allocator for warm tier [2][3] ─────────────────────── */
 #define ARENA_SLAB_SIZES  4
@@ -68,7 +44,7 @@ struct arena_slab_set {
     _Atomic unsigned int free_slots;
 };
 
-/* ─── NUMA-aware thread cache [8] ─────────────────────────────── */
+/* ─── Thread cache ────────────────────────────────────────────── */
 #define ARENA_TCACHE_BINS    4
 #define ARENA_TCACHE_DEPTH   32
 
@@ -118,34 +94,20 @@ struct arena_epoch_ctl {
 struct arena_prefetch_ctl {
     bool enabled;
     uint8_t prefetch_distance;
-    uint8_t numa_aware;
 };
 
 /* ─── Adaptive tuner [9] ───────────────────────────────────────── */
 struct arena_tuner {
     uint32_t hist[64];
     uint32_t sample_count;
-    uint8_t freq_thresholds[3];
+    uint8_t freq_thresholds[2];
     uint8_t last_tune_epoch;
-};
-
-/* ─── Ring entry header for hot tier ──────────────────────────── */
-struct arena_ring_entry {
-    uint32_t total_len;
-    uint16_t key_len;
-    uint16_t val_len;
 };
 
 /* ─── Main arena structure ───────────────────────────────────── */
 struct arena {
     struct {
         union {
-            struct {
-                struct arena_write_buffer *wbuf;
-                uint8_t *ring_base;
-                size_t ring_cap;
-                _Atomic size_t ring_pos;
-            } hot;
             struct arena_slab_set *slabs;
             struct arena_segment **segs;
         } u;
@@ -163,24 +125,18 @@ struct arena {
     struct arena_tuner tuner;
 
     struct {
-        uint8_t hot_threshold;
         uint8_t warm_threshold;
-        uint8_t enable_numa;
         uint8_t enable_prefetch;
         uint8_t enable_thread_cache;
         uint8_t enable_adaptive_tuning;
-        uint32_t numa_node_count;
     } config;
 
     size_t total_memory;
     size_t write_amplification;
     size_t compactions;
-    size_t wbuf_flushes;
 
     _Atomic size_t alloc_count;
     _Atomic size_t alloc_bytes;
-
-    int numa_node;
 };
 
 /* ─── Public API ──────────────────────────────────────────────── */
@@ -212,9 +168,8 @@ enum {
     ARENA_STAT_USED         = 1,
     ARENA_STAT_WASTE        = 2,
     ARENA_STAT_COMPACTIONS  = 3,
-    ARENA_STAT_WBUF_FLUSHES = 4,
-    ARENA_STAT_WRITE_AMP    = 5,
-    ARENA_STAT_COUNT        = 6,
+    ARENA_STAT_WRITE_AMP    = 4,
+    ARENA_STAT_COUNT        = 5,
 };
 
 #ifdef __cplusplus

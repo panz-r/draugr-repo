@@ -222,7 +222,7 @@ static void test_arena_compact(void) {
     struct arena *a = arena_create(64 * 1024);
     TEST_ASSERT_PTR(a, "arena_create returned NULL");
 
-    arena_compact(a, ARENA_FREQ_HOT);
+    arena_compact(a, ARENA_FREQ_WARM);
     arena_compact(a, ARENA_FREQ_WARM);
     arena_compact(a, ARENA_FREQ_COLD);
 
