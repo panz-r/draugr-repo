@@ -3100,18 +3100,18 @@ void test_inc_overflow(void) {
     int64_t r = ht_inc(t, "k", 1, INT64_MAX);
     assert(r == INT64_MAX);
 
-    /* Increment by 1 — signed overflow is UB, verify platform behavior */
+    /* Increment by 1 — saturates at INT64_MAX (no UB) */
     r = ht_inc(t, "k", 1, 1);
-    assert(r == INT64_MIN); /* wraps on 2's complement */
-
-    /* Decrement by 1 — back to INT64_MAX */
-    r = ht_inc(t, "k", 1, -1);
     assert(r == INT64_MAX);
 
-    INV_CHECK(t, "inc_overflow: after wraps");
+    /* Decrement by 1 — back to INT64_MAX - 1 */
+    r = ht_inc(t, "k", 1, -1);
+    assert(r == INT64_MAX - 1);
+
+    INV_CHECK(t, "inc_overflow: after saturate");
 
     const int64_t *v = ht_find(t, "k", 1, NULL);
-    assert(v != NULL && *v == INT64_MAX);
+    assert(v != NULL && *v == INT64_MAX - 1);
 
     ht_destroy(t);
     printf("Inc overflow passed!\n");

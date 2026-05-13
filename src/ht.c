@@ -1494,7 +1494,12 @@ int64_t ht_inc(ht_table_t *t, const void *key, size_t key_len, int64_t delta) {
     int64_t new_val;
     if (found && val_len == sizeof(int64_t)) {
         memcpy(&new_val, found, sizeof(new_val));
-        new_val += delta;
+        if (delta > 0 && new_val > INT64_MAX - delta)
+            new_val = INT64_MAX;
+        else if (delta < 0 && new_val < INT64_MIN - delta)
+            new_val = INT64_MIN;
+        else
+            new_val += delta;
     } else {
         new_val = delta;
     }
@@ -1513,7 +1518,12 @@ int64_t ht_inc_with_hash(ht_table_t *t, uint64_t hash,
     int64_t new_val;
     if (found && val_len == sizeof(int64_t)) {
         memcpy(&new_val, found, sizeof(new_val));
-        new_val += delta;
+        if (delta > 0 && new_val > INT64_MAX - delta)
+            new_val = INT64_MAX;
+        else if (delta < 0 && new_val < INT64_MIN - delta)
+            new_val = INT64_MIN;
+        else
+            new_val += delta;
     } else {
         new_val = delta;
     }

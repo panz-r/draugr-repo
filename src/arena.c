@@ -605,6 +605,9 @@ static void *seg_alloc(struct arena_segment *seg, size_t size) {
 static bool seg_free(struct arena_segment *seg, void *ptr, size_t size) {
 	if (!seg || !ptr) return false;
 
+	if (atomic_load_explicit(&seg->hdr.flags, memory_order_acquire) & 0x01)
+		return true;
+
 	size_t granularity = 64;
 	size_t seg_data_size = ARENA_SEG_SIZE - sizeof(struct arena_seg_hdr);
 	uintptr_t seg_start = (uintptr_t)seg;
@@ -680,7 +683,7 @@ static void epoch_gc_start(struct arena *a, int freq) {
 
             if (pct > threshold) {
                 atomic_store(&seg->hdr.epoch, epoch);
-                seg->hdr.flags |= 0x01;
+                atomic_fetch_or(&seg->hdr.flags, 0x01);
             }
         }
     }

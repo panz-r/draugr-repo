@@ -96,7 +96,7 @@ struct arena_seg_hdr {
 	uint8_t freq;
 	uint8_t size_class;
 	uint8_t node_id;
-	uint8_t flags;
+	_Atomic uint8_t flags;         /* bit 0: evacuating */
 	struct arena_seg_hdr *next;
 };
 
