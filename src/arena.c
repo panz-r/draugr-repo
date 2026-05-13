@@ -79,7 +79,7 @@ static int wbuf_add(struct arena_write_buffer *wbuf,
 
     uint32_t idx = atomic_fetch_add_explicit(&wbuf->count, 1,
                                              memory_order_acquire);
-    if (idx >= ARENA_WBUF_FLUSH_THRESH) {
+    if (idx >= ARENA_WBUF_CAPACITY) {
         atomic_fetch_sub_explicit(&wbuf->count, 1, memory_order_release);
         return -1;
     }
@@ -244,6 +244,7 @@ static bool slab_contains(struct arena_slab *slab, void *ptr) {
 	size_t data_offset = slab_data_offset();
 	size_t slot_size = g_slab_sizes[slab->size_class];
 	size_t data_size = slot_size * ARENA_SLAB_SLOTS;
+	if (data_offset > UINTPTR_MAX - slab_start) return false;
 	uintptr_t data_start = slab_start + data_offset;
 	return p >= data_start && p - data_start < data_size;
 }
@@ -378,6 +379,7 @@ static void tcache_clear(struct arena *a) {
             struct arena_tcache_bin *bin = &tc->bins[b];
             pthread_mutex_lock(&bin->lock);
             bin->count = 0;
+            memset(bin->entries, 0, sizeof(bin->entries));
             pthread_mutex_unlock(&bin->lock);
         }
     }

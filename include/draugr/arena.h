@@ -27,8 +27,8 @@ enum arena_freq {
 #define ARENA_MAX_NUMA_NODES 16
 
 /* ─── Write buffer for hot tier [1] ───────────────────────────── */
-#define ARENA_WBUF_SLOTS       64
-#define ARENA_WBUF_FLUSH_THRESH 48
+#define ARENA_WBUF_SLOTS    64
+#define ARENA_WBUF_CAPACITY 48
 
 struct arena_wbuf_slot {
     uint32_t key_len;
