@@ -22,6 +22,12 @@
 #include <unistd.h>
 #include <pthread.h>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#include <arm_neon.h>
+#endif
+
 /* ══════════════════════════════════════════════════════════════════
    SIZE CLASS HELPERS
    ══════════════════════════════════════════════════════════════════ */
@@ -48,6 +54,33 @@ static size_t slab_total_size(int size_class) {
 
 static size_t slab_data_offset(void) {
     return sizeof(struct arena_slab);
+}
+
+static int bitmap_find_nonfull_word(const uint64_t *bitmap) {
+#if defined(__x86_64__) || defined(_M_X64)
+    __m256i all_ones = _mm256_set1_epi64x((long long)UINT64_MAX);
+    __m256i chunk = _mm256_loadu_si256((const __m256i *)bitmap);
+    __m256i cmp = _mm256_cmpeq_epi64(chunk, all_ones);
+    unsigned mask = (unsigned)_mm256_movemask_epi8(cmp);
+    if (mask == 0xFFFFFFFF) return -1;
+    return __builtin_ctz(~mask) / 8;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    uint64x2_t all_ones = vdupq_n_u64(UINT64_MAX);
+    uint64x2_t lo = vld1q_u64(&bitmap[0]);
+    uint64x2_t hi = vld1q_u64(&bitmap[2]);
+    uint64x2_t cmp_lo = vceqq_u64(lo, all_ones);
+    uint64x2_t cmp_hi = vceqq_u64(hi, all_ones);
+    if (vgetq_lane_u64(cmp_lo, 0) && vgetq_lane_u64(cmp_lo, 1) &&
+        vgetq_lane_u64(cmp_hi, 0) && vgetq_lane_u64(cmp_hi, 1))
+        return -1;
+    for (int i = 0; i < 4; i++)
+        if (bitmap[i] != UINT64_MAX) return i;
+    return -1;
+#else
+    for (int i = 0; i < 4; i++)
+        if (bitmap[i] != UINT64_MAX) return i;
+    return -1;
+#endif
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -85,15 +118,19 @@ static struct arena_slab *slab_create(int size_class, uint8_t freq) {
 static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
     uint64_t *bitmap = slab->bitmap;
 
-    for (int word = 0; word < 4; word++) {
+    int start = bitmap_find_nonfull_word(bitmap);
+    if (start < 0) return NULL;
+
+    for (int i = 0; i < 4; i++) {
+        int word = (start + i) & 3;
         uint64_t bits = atomic_load_explicit(&bitmap[word],
-                                             memory_order_acquire);
+                                             memory_order_relaxed);
         if (ARENA_LIKELY(bits != UINT64_MAX)) {
             int bit = __builtin_ctzll(~bits);
             uint64_t mask = ~(1ULL << bit);
             if (atomic_compare_exchange_strong_explicit(
                     &bitmap[word], &bits, mask,
-                    memory_order_acq_rel, memory_order_acquire)) {
+                    memory_order_acq_rel, memory_order_relaxed)) {
                 atomic_fetch_add_explicit(&slab->used_count, 1,
                                           memory_order_relaxed);
                 int slot = word * 64 + bit;
@@ -127,7 +164,7 @@ static bool slab_free_slot(struct arena_slab *slab, void *ptr) {
 
     uint64_t set_mask = (1ULL << bit);
     uint64_t bits = atomic_load_explicit(&slab->bitmap[word],
-                                         memory_order_acquire);
+                                         memory_order_relaxed);
     if (bits & set_mask) return false;
 
     atomic_store_explicit(&slab->bitmap[word], bits | set_mask,
