@@ -10,6 +10,24 @@
 extern "C" {
 #endif
 
+/* ─── Branch prediction hints ──────────────────────────────────── */
+#if defined(__GNUC__) || defined(__clang__)
+#define ARENA_LIKELY(x)   __builtin_expect(!!(x), 1)
+#define ARENA_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define ARENA_LIKELY(x)   (x)
+#define ARENA_UNLIKELY(x) (x)
+#endif
+
+/* ─── Cache line size (build-time platform check) ─────────────── */
+#if defined(__x86_64__) || defined(_M_X64)
+#define ARENA_CACHE_LINE 64
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#define ARENA_CACHE_LINE 64
+#else
+#define ARENA_CACHE_LINE 64
+#endif
+
 /* ─── Frequency tiers ──────────────────────────────────────────── */
 enum arena_freq {
     ARENA_FREQ_WARM = 0,
@@ -18,14 +36,9 @@ enum arena_freq {
 
 #define ARENA_FREQ_COUNT 2
 
-/* ─── Adaptive size classes (tuned at runtime) [9] ─────────────── */
-#define ARENA_MIN_CLASSES  8
-#define ARENA_MAX_CLASSES  24
-
-/* ─── Slab allocator for warm tier [2][3] ─────────────────────── */
-#define ARENA_SLAB_SIZES  4
+/* ─── Slab allocator — warm tier [2][3] ───────────────────────── */
+#define ARENA_SLAB_SIZES  8
 #define ARENA_SLAB_SLOTS  256
-#define ARENA_SLAB_ORDER  12
 
 struct arena_slab {
     uint64_t bitmap[4];
@@ -45,22 +58,20 @@ struct arena_slab_set {
 };
 
 /* ─── Thread cache ────────────────────────────────────────────── */
-#define ARENA_TCACHE_BINS    4
+#define ARENA_TCACHE_BINS    ARENA_SLAB_SIZES
 #define ARENA_TCACHE_DEPTH   32
 
 struct arena_tcache_bin {
 	void *entries[ARENA_TCACHE_DEPTH];
-	_Atomic unsigned int count;
+	unsigned int count;
 	pthread_mutex_t lock;
-};
+} __attribute__((aligned(ARENA_CACHE_LINE)));
 
 struct arena_tcache {
     struct arena_tcache_bin bins[ARENA_TCACHE_BINS];
-    uint8_t node_id;
-    uint8_t padding[7];
 };
 
-/* ─── Segment for cold tier ────────────────────────────────────── */
+/* ─── Segment — cold tier ─────────────────────────────────────── */
 #define ARENA_SEG_SHIFT 16
 #define ARENA_SEG_SIZE  (1U << ARENA_SEG_SHIFT)
 #define ARENA_COLD_SEGS_PER_CLASS 4
@@ -104,6 +115,19 @@ struct arena_tuner {
     uint8_t last_tune_epoch;
 };
 
+/* ─── Deferred free list (mimalloc-style batched free) ────────── */
+struct arena_deferred_entry {
+    void *ptr;
+    size_t size;
+};
+
+#define ARENA_DEFERRED_BATCH 64
+
+struct arena_deferred {
+    struct arena_deferred_entry entries[ARENA_DEFERRED_BATCH];
+    unsigned int count;
+};
+
 /* ─── Main arena structure ───────────────────────────────────── */
 struct arena {
     struct {
@@ -115,10 +139,12 @@ struct arena {
         size_t total_bytes;
         size_t used_bytes;
         size_t waste_bytes;
-    } arenas[ARENA_FREQ_COUNT][ARENA_MAX_CLASSES];
+    } arenas[ARENA_FREQ_COUNT][ARENA_SLAB_SIZES];
 
     struct arena_tcache *thread_caches;
     size_t tcache_count;
+
+    struct arena_deferred *deferred;
 
     struct arena_epoch_ctl epoch_ctl;
     struct arena_prefetch_ctl prefetch_ctl;
@@ -153,6 +179,9 @@ void arena_destroy(struct arena *a);
 void *arena_alloc(struct arena *a, size_t size);
 void *arena_realloc(struct arena *a, void *ptr, size_t old_size, size_t new_size);
 void arena_free(struct arena *a, void *ptr, size_t size);
+
+void arena_free_deferred(struct arena *a, void *ptr, size_t size);
+void arena_flush_deferred(struct arena *a);
 
 void arena_clear(struct arena *a);
 void arena_compact(struct arena *a, int freq);

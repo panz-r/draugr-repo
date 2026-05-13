@@ -26,11 +26,13 @@
    SIZE CLASS HELPERS
    ══════════════════════════════════════════════════════════════════ */
 
-static const size_t g_slab_sizes[ARENA_SLAB_SIZES] = {16, 32, 64, 128};
+static const size_t g_slab_sizes[ARENA_SLAB_SIZES] = {
+    8, 16, 24, 32, 48, 64, 96, 128
+};
 
 static int size_to_slab_class(size_t bytes) {
     for (int i = 0; i < ARENA_SLAB_SIZES; i++) {
-        if (bytes <= g_slab_sizes[i]) return i;
+        if (ARENA_LIKELY(bytes <= g_slab_sizes[i])) return i;
     }
     return ARENA_SLAB_SIZES - 1;
 }
@@ -86,18 +88,20 @@ static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
     for (int word = 0; word < 4; word++) {
         uint64_t bits = atomic_load_explicit(&bitmap[word],
                                              memory_order_acquire);
-        if (bits == UINT64_MAX) continue;
-
-        int bit = __builtin_ctzll(~bits);
-        uint64_t mask = ~(1ULL << bit);
-        if (atomic_compare_exchange_strong_explicit(
-                &bitmap[word], &bits, mask,
-                memory_order_acq_rel, memory_order_acquire)) {
-            atomic_fetch_add_explicit(&slab->used_count, 1,
-                                      memory_order_relaxed);
-            int slot = word * 64 + bit;
-            size_t off = slab_data_offset();
-            return (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
+        if (ARENA_LIKELY(bits != UINT64_MAX)) {
+            int bit = __builtin_ctzll(~bits);
+            uint64_t mask = ~(1ULL << bit);
+            if (atomic_compare_exchange_strong_explicit(
+                    &bitmap[word], &bits, mask,
+                    memory_order_acq_rel, memory_order_acquire)) {
+                atomic_fetch_add_explicit(&slab->used_count, 1,
+                                          memory_order_relaxed);
+                int slot = word * 64 + bit;
+                size_t off = slab_data_offset();
+                void *ptr = (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
+                __builtin_prefetch(ptr, 1, 3);
+                return ptr;
+            }
         }
     }
     return NULL;
@@ -231,12 +235,12 @@ static struct arena_tcache *tcache_get(struct arena *a) {
 
 static void *tcache_try_get(struct arena *a, int sc) {
     struct arena_tcache *tc = tcache_get(a);
-    if (!tc) return NULL;
-    if (sc < 0 || sc >= ARENA_TCACHE_BINS) return NULL;
+    if (ARENA_UNLIKELY(!tc)) return NULL;
+    if (ARENA_UNLIKELY(sc < 0 || sc >= ARENA_TCACHE_BINS)) return NULL;
 
     struct arena_tcache_bin *bin = &tc->bins[sc];
     pthread_mutex_lock(&bin->lock);
-    if (bin->count == 0) {
+    if (ARENA_UNLIKELY(bin->count == 0)) {
         pthread_mutex_unlock(&bin->lock);
         return NULL;
     }
@@ -249,12 +253,12 @@ static void *tcache_try_get(struct arena *a, int sc) {
 
 static void tcache_put(struct arena *a, void *ptr, int sc) {
     struct arena_tcache *tc = tcache_get(a);
-    if (!tc) return;
-    if (sc < 0 || sc >= ARENA_TCACHE_BINS) return;
+    if (ARENA_UNLIKELY(!tc)) return;
+    if (ARENA_UNLIKELY(sc < 0 || sc >= ARENA_TCACHE_BINS)) return;
 
     struct arena_tcache_bin *bin = &tc->bins[sc];
     pthread_mutex_lock(&bin->lock);
-    if (bin->count >= ARENA_TCACHE_DEPTH) {
+    if (ARENA_UNLIKELY(bin->count >= ARENA_TCACHE_DEPTH)) {
         pthread_mutex_unlock(&bin->lock);
         return;
     }
@@ -605,7 +609,6 @@ struct arena *arena_create(size_t initial_capacity) {
             a->config.enable_thread_cache = 0;
         } else {
             for (size_t i = 0; i < a->tcache_count; i++) {
-                a->thread_caches[i].node_id = 0;
                 for (int b = 0; b < ARENA_TCACHE_BINS; b++) {
                     pthread_mutex_init(&a->thread_caches[i].bins[b].lock, NULL);
                 }
@@ -632,6 +635,9 @@ struct arena *arena_create(size_t initial_capacity) {
 		a->arenas[ARENA_FREQ_COLD][sc].count = ARENA_COLD_SEGS_PER_CLASS;
 	}
 
+    a->deferred = calloc(1, sizeof(struct arena_deferred));
+    if (!a->deferred) goto fail;
+
     a->epoch_ctl.global_epoch = 0;
     a->epoch_ctl.evacuating = 0;
     a->epoch_ctl.completed = 0;
@@ -655,6 +661,11 @@ fail:
 
 void arena_destroy(struct arena *a) {
     if (!a) return;
+
+    if (a->deferred) {
+        arena_flush_deferred(a);
+        free(a->deferred);
+    }
 
     tcache_clear(a);
 
@@ -695,16 +706,16 @@ void arena_destroy(struct arena *a) {
 }
 
 void *arena_alloc(struct arena *a, size_t size) {
-    if (!a || size == 0) return NULL;
+    if (ARENA_UNLIKELY(!a || size == 0)) return NULL;
 
-    if (a->config.enable_adaptive_tuning) {
+    if (ARENA_LIKELY(a->config.enable_adaptive_tuning)) {
         tuner_record(&a->tuner, size);
-        if (a->tuner.sample_count % 4096 == 0) {
+        if (ARENA_UNLIKELY(a->tuner.sample_count % 4096 == 0)) {
             tuner_adapt(a);
         }
     }
 
-    if (size <= 128) {
+    if (ARENA_LIKELY(size <= 128)) {
         int sc = size_to_slab_class(size);
 
         if (a->config.enable_thread_cache) {
@@ -785,9 +796,9 @@ void *arena_realloc(struct arena *a, void *ptr, size_t old_size, size_t new_size
 }
 
 void arena_free(struct arena *a, void *ptr, size_t size) {
-    if (!a || !ptr) return;
+    if (ARENA_UNLIKELY(!a || !ptr)) return;
 
-    if (size <= 128) {
+    if (ARENA_LIKELY(size <= 128)) {
         int sc = size_to_slab_class(size);
 
         if (a->config.enable_thread_cache) {
@@ -832,6 +843,32 @@ void arena_free(struct arena *a, void *ptr, size_t size) {
     }
 
     sys_free(ptr, size);
+}
+
+void arena_free_deferred(struct arena *a, void *ptr, size_t size) {
+    if (!a || !ptr) return;
+
+    struct arena_deferred *d = a->deferred;
+    if (ARENA_LIKELY(d && d->count < ARENA_DEFERRED_BATCH)) {
+        d->entries[d->count].ptr = ptr;
+        d->entries[d->count].size = size;
+        d->count++;
+        return;
+    }
+
+    arena_free(a, ptr, size);
+}
+
+void arena_flush_deferred(struct arena *a) {
+    if (!a || !a->deferred) return;
+
+    struct arena_deferred *d = a->deferred;
+    unsigned int count = d->count;
+    d->count = 0;
+
+    for (unsigned int i = 0; i < count; i++) {
+        arena_free(a, d->entries[i].ptr, d->entries[i].size);
+    }
 }
 
 void arena_clear(struct arena *a) {
