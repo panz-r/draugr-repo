@@ -102,15 +102,16 @@ static struct arena_slab *slab_create(int size_class, uint8_t freq) {
     if (base == MAP_FAILED) return NULL;
 
     struct arena_slab *slab = base;
-    slab->bitmap[0] = UINT64_MAX;
-    slab->bitmap[1] = UINT64_MAX;
-    slab->bitmap[2] = UINT64_MAX;
-    slab->bitmap[3] = UINT64_MAX;
-    atomic_store(&slab->used_count, 0);
-    slab->size_class = (uint8_t)size_class;
-    slab->freq = freq;
-    slab->node_id = 0;
-    slab->mmap_size = total;
+	slab->bitmap[0] = UINT64_MAX;
+	slab->bitmap[1] = UINT64_MAX;
+	slab->bitmap[2] = UINT64_MAX;
+	slab->bitmap[3] = UINT64_MAX;
+	atomic_store_explicit(&slab->used_count, 0, memory_order_relaxed);
+	atomic_store_explicit(&slab->free_top, 0, memory_order_relaxed);
+	slab->size_class = (uint8_t)size_class;
+	slab->freq = freq;
+	slab->node_id = 0;
+	slab->mmap_size = total;
 
     return slab;
 }
@@ -118,61 +119,62 @@ static struct arena_slab *slab_create(int size_class, uint8_t freq) {
 static _Thread_local uint32_t slab_color;
 
 static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
-    uint64_t *bitmap = slab->bitmap;
+	uint64_t *bitmap = slab->bitmap;
+	uint32_t top = atomic_load_explicit(&slab->free_top,
+		memory_order_acquire);
+	while (top > 0) {
+		if (atomic_compare_exchange_weak_explicit(&slab->free_top, &top,
+			top - 1, memory_order_acquire, memory_order_acquire)) {
+			uint32_t slot = slab->free_stack[top - 1];
+			int word = slot / 64;
+			int bit = slot % 64;
+			uint64_t bits = atomic_load_explicit(&bitmap[word],
+				memory_order_relaxed);
+			uint64_t mask = 1ULL << bit;
+			if ((bits & mask) &&
+				atomic_compare_exchange_strong_explicit(
+					&bitmap[word], &bits, bits & ~mask,
+					memory_order_relaxed, memory_order_relaxed)) {
+				atomic_fetch_add_explicit(&slab->used_count, 1,
+					memory_order_relaxed);
+				size_t off = slab_data_offset();
+				void *ptr = (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
+				__builtin_prefetch(ptr, 1, 3);
+				return ptr;
+			}
+			continue;
+		}
+	}
 
-    uint32_t top = atomic_load_explicit(&slab->free_top, memory_order_acquire);
-    while (top > 0) {
-        if (atomic_compare_exchange_weak_explicit(&slab->free_top, &top, top - 1,
-                                                   memory_order_acq_rel,
-                                                   memory_order_acquire)) {
-            uint32_t slot = slab->free_stack[top - 1];
-            int word = slot / 64;
-            int bit = slot % 64;
-            uint64_t bits = atomic_load_explicit(&bitmap[word],
-                                                 memory_order_relaxed);
-            uint64_t mask = 1ULL << bit;
-            if ((bits & mask) &&
-                atomic_compare_exchange_strong_explicit(
-                    &bitmap[word], &bits, bits & ~mask,
-                    memory_order_acq_rel, memory_order_relaxed)) {
-                atomic_fetch_add_explicit(&slab->used_count, 1,
-                                          memory_order_relaxed);
-                size_t off = slab_data_offset();
-                void *ptr = (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
-                __builtin_prefetch(ptr, 1, 3);
-                return ptr;
-            }
-            continue;
-        }
-    }
+	if (bitmap_find_nonfull_word(bitmap) < 0) return NULL;
 
-    int start = bitmap_find_nonfull_word(bitmap);
-    if (start < 0) return NULL;
+	uint32_t hint = slab_color++;
+	int start_word = (hint / 64) & 3;
+	int rot = hint & 63;
 
-    for (int i = 0; i < 4; i++) {
-        int word = (start + i) & 3;
-        uint64_t bits = atomic_load_explicit(&bitmap[word],
-                                             memory_order_relaxed);
-        if (ARENA_LIKELY(bits != UINT64_MAX)) {
-            uint64_t free_bits = ~bits;
-            uint32_t c = slab_color++ & 63;
-            uint64_t rotated = (free_bits >> c) | (free_bits << (64 - c));
-            int bit = (__builtin_ctzll(rotated) + c) & 63;
-            uint64_t mask = ~(1ULL << bit);
-            if (atomic_compare_exchange_strong_explicit(
-                    &bitmap[word], &bits, mask,
-                    memory_order_acq_rel, memory_order_relaxed)) {
-                atomic_fetch_add_explicit(&slab->used_count, 1,
-                                          memory_order_relaxed);
-                int slot = word * 64 + bit;
-                size_t off = slab_data_offset();
-                void *ptr = (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
-                __builtin_prefetch(ptr, 1, 3);
-                return ptr;
-            }
-        }
-    }
-    return NULL;
+	for (int i = 0; i < 4; i++) {
+		int word = (start_word + i) & 3;
+		uint64_t bits = atomic_load_explicit(&bitmap[word],
+			memory_order_relaxed);
+		if (ARENA_LIKELY(bits != UINT64_MAX)) {
+			uint64_t free_bits = ~bits;
+			uint64_t rotated = (free_bits >> rot) | (free_bits << (64 - rot));
+			int bit = (__builtin_ctzll(rotated) + rot) & 63;
+			uint64_t mask = ~(1ULL << bit);
+			if (atomic_compare_exchange_strong_explicit(
+				&bitmap[word], &bits, mask,
+				memory_order_relaxed, memory_order_relaxed)) {
+				atomic_fetch_add_explicit(&slab->used_count, 1,
+					memory_order_relaxed);
+				int slot = word * 64 + bit;
+				size_t off = slab_data_offset();
+				void *ptr = (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
+				__builtin_prefetch(ptr, 1, 3);
+				return ptr;
+			}
+		}
+	}
+	return NULL;
 }
 
 static bool slab_free_slot(struct arena_slab *slab, void *ptr) {
@@ -187,27 +189,30 @@ static bool slab_free_slot(struct arena_slab *slab, void *ptr) {
 	size_t offset = p - data_start;
 	if (offset >= data_size) return false;
 
-    int slot = (int)(offset / slot_size);
-    if (slot < 0 || slot >= ARENA_SLAB_SLOTS) return false;
+	int slot = (int)(offset / slot_size);
+	if (slot < 0 || slot >= ARENA_SLAB_SLOTS) return false;
 
-    int word = slot / 64;
-    int bit = slot % 64;
+	int word = slot / 64;
+	int bit = slot % 64;
 
-    uint64_t set_mask = (1ULL << bit);
-    uint64_t bits = atomic_load_explicit(&slab->bitmap[word],
-                                         memory_order_relaxed);
-    if (bits & set_mask) return false;
+	uint64_t set_mask = (1ULL << bit);
+	uint64_t old_bits, new_bits;
+	do {
+		old_bits = atomic_load_explicit(&slab->bitmap[word],
+			memory_order_relaxed);
+		if (old_bits & set_mask) return false;
+		new_bits = old_bits | set_mask;
+	} while (!atomic_compare_exchange_strong_explicit(
+		&slab->bitmap[word], &old_bits, new_bits,
+		memory_order_release, memory_order_relaxed));
+	atomic_fetch_sub_explicit(&slab->used_count, 1, memory_order_relaxed);
 
-    atomic_store_explicit(&slab->bitmap[word], bits | set_mask,
-                          memory_order_release);
-    atomic_fetch_sub_explicit(&slab->used_count, 1, memory_order_relaxed);
+	uint32_t idx = atomic_fetch_add_explicit(&slab->free_top, 1,
+		memory_order_release);
+	if (idx < ARENA_SLAB_SLOTS)
+		slab->free_stack[idx] = slot;
 
-    uint32_t idx = atomic_fetch_add_explicit(&slab->free_top, 1,
-                                             memory_order_release);
-    if (idx < ARENA_SLAB_SLOTS)
-        slab->free_stack[idx] = slot;
-
-    return true;
+	return true;
 }
 
 static bool slab_contains(struct arena_slab *slab, void *ptr) {
@@ -224,21 +229,21 @@ static bool slab_contains(struct arena_slab *slab, void *ptr) {
 }
 
 void *slab_set_alloc(struct arena_slab_set *set, int sc) {
-    int count = atomic_load_explicit(&set->slab_count, memory_order_acquire);
+	int count = atomic_load_explicit(&set->slab_count, memory_order_relaxed);
 
-    for (int i = 0; i < count && i < 8; i++) {
-        struct arena_slab *slab = set->slabs[i];
-        if (!slab) continue;
+	for (int i = 0; i < count && i < 8; i++) {
+		struct arena_slab *slab = set->slabs[i];
+		if (!slab) continue;
 
-        void *ptr = slab_alloc_slot(slab, slab->size_class);
-        if (ptr) {
-            atomic_fetch_sub_explicit(&set->free_slots, 1,
-                                      memory_order_relaxed);
-            return ptr;
-        }
-    }
+		void *ptr = slab_alloc_slot(slab, slab->size_class);
+		if (ptr) {
+			atomic_fetch_sub_explicit(&set->free_slots, 1,
+				memory_order_relaxed);
+			return ptr;
+		}
+	}
 
-    if (count >= 8) return NULL;
+	if (count >= 8) return NULL;
 
     struct arena_slab *slab = slab_create(sc, ARENA_FREQ_WARM);
     if (!slab) return NULL;
@@ -268,12 +273,12 @@ void *slab_set_alloc(struct arena_slab_set *set, int sc) {
 bool slab_set_free(struct arena_slab_set *set, void *ptr) {
     if (!ptr) return false;
 
-    int count = atomic_load_explicit(&set->slab_count, memory_order_acquire);
-    for (int i = 0; i < count && i < 8; i++) {
-        struct arena_slab *slab = set->slabs[i];
-        if (!slab) continue;
+	int count = atomic_load_explicit(&set->slab_count, memory_order_relaxed);
+	for (int i = 0; i < count && i < 8; i++) {
+		struct arena_slab *slab = set->slabs[i];
+		if (!slab) continue;
 
-        if (slab_contains(slab, ptr)) {
+		if (slab_contains(slab, ptr)) {
             if (slab_free_slot(slab, ptr)) {
                 atomic_fetch_add_explicit(&set->free_slots, 1,
                                           memory_order_relaxed);
@@ -288,8 +293,8 @@ bool slab_set_free(struct arena_slab_set *set, void *ptr) {
 bool slab_set_contains(struct arena_slab_set *set, void *ptr) {
     if (!ptr) return false;
 
-    int count = atomic_load_explicit(&set->slab_count, memory_order_acquire);
-    for (int i = 0; i < count && i < 8; i++) {
+	int count = atomic_load_explicit(&set->slab_count, memory_order_relaxed);
+	for (int i = 0; i < count && i < 8; i++) {
         struct arena_slab *slab = set->slabs[i];
         if (!slab) continue;
         if (slab_contains(slab, ptr)) return true;
@@ -447,12 +452,12 @@ static struct arena_segment *seg_create(uint8_t freq, uint8_t sc) {
     if (base == MAP_FAILED) return NULL;
 
 	struct arena_segment *seg = base;
-	atomic_store(&seg->hdr.control, 0);
-	atomic_store_explicit(&seg->hdr.free_bitmap[0], UINT64_MAX,
-		memory_order_relaxed);
-	atomic_store_explicit(&seg->hdr.free_bitmap[1], UINT64_MAX,
-		memory_order_relaxed);
-	atomic_store(&seg->hdr.epoch, 0);
+	atomic_store_explicit(&seg->hdr.control, 0, memory_order_relaxed);
+	for (unsigned i = 0; i < ARENA_SEG_BITMAP_WORDS; i++) {
+		atomic_store_explicit(&seg->hdr.free_bitmap[i], UINT64_MAX,
+			memory_order_relaxed);
+	}
+	atomic_store_explicit(&seg->hdr.epoch, 0, memory_order_relaxed);
 	seg->hdr.freq = freq;
 	seg->hdr.size_class = sc;
 	seg->hdr.node_id = 0;
@@ -465,35 +470,34 @@ static struct arena_segment *seg_create(uint8_t freq, uint8_t sc) {
 static void *seg_alloc(struct arena_segment *seg, size_t size) {
 	if (!seg) return NULL;
 
-	size_t granularity = 64;
+	size_t granularity = ARENA_SEG_GRANULARITY;
 	size_t slots_needed = (size + granularity - 1) / granularity;
-	size_t total_slots = 128;
 
 	_Atomic uint64_t *bm = seg->hdr.free_bitmap;
 	size_t consecutive = 0;
 	size_t start_slot = 0;
 
-	for (size_t i = 0; i < total_slots; i++) {
-		int word = (int)(i / 64);
-		int bit = (int)(i % 64);
-		if (word > 1) break;
+	for (size_t i = 0; i < ARENA_SEG_SLOTS; i++) {
+	unsigned word = (unsigned)(i / 64);
+	unsigned bit = (unsigned)(i % 64);
+	if (word >= ARENA_SEG_BITMAP_WORDS) break;
 
-		uint64_t bits = atomic_load_explicit(&bm[word], memory_order_acquire);
+		uint64_t bits = atomic_load_explicit(&bm[word], memory_order_relaxed);
 		if (bits & (1ULL << bit)) {
 			consecutive++;
 			if (consecutive == 1) start_slot = i;
 			if (consecutive >= slots_needed) {
 				for (size_t j = start_slot; j < start_slot + slots_needed; j++) {
-					int w = (int)(j / 64);
-					int b = (int)(j % 64);
+					unsigned w = (unsigned)(j / 64);
+					unsigned b = (unsigned)(j % 64);
 					uint64_t old_b, new_b;
 					do {
-						old_b = atomic_load_explicit(&bm[w], memory_order_acquire);
+						old_b = atomic_load_explicit(&bm[w], memory_order_relaxed);
 						if (!(old_b & (1ULL << b))) goto retry_scan;
 						new_b = old_b & ~(1ULL << b);
-					} while (!atomic_compare_exchange_strong_explicit(
-						&bm[w], &old_b, new_b,
-						memory_order_acq_rel, memory_order_acquire));
+		} while (!atomic_compare_exchange_strong_explicit(
+			&bm[w], &old_b, new_b,
+			memory_order_relaxed, memory_order_relaxed));
 				}
 
 				uint64_t ctrl = atomic_load_explicit(&seg->hdr.control,
@@ -522,32 +526,31 @@ static void *seg_alloc(struct arena_segment *seg, size_t size) {
 static bool seg_free(struct arena_segment *seg, void *ptr, size_t size) {
 	if (!seg || !ptr) return false;
 
-	if (atomic_load_explicit(&seg->hdr.flags, memory_order_acquire) & 0x01)
+	if (atomic_load_explicit(&seg->hdr.flags, memory_order_relaxed) & 0x01)
 		return true;
 
-	size_t granularity = 64;
-	size_t seg_data_size = ARENA_SEG_SIZE - sizeof(struct arena_seg_hdr);
+	size_t granularity = ARENA_SEG_GRANULARITY;
 	uintptr_t seg_start = (uintptr_t)seg;
 	uintptr_t data_start = seg_start + sizeof(struct arena_seg_hdr);
 	uintptr_t p = (uintptr_t)ptr;
-	if (p < data_start || p - data_start >= seg_data_size) return false;
+	if (p < data_start || p - data_start >= ARENA_SEG_DATA_SIZE) return false;
 	size_t offset = p - data_start;
 
     size_t start_slot = offset / granularity;
     size_t slots = (size + granularity - 1) / granularity;
 
-	for (size_t i = start_slot; i < start_slot + slots && i < 128; i++) {
-		int w = (int)(i / 64);
-		int b = (int)(i % 64);
-		if (w > 1) break;
+	for (size_t i = start_slot; i < start_slot + slots && i < ARENA_SEG_SLOTS; i++) {
+	unsigned w = (unsigned)(i / 64);
+	unsigned b = (unsigned)(i % 64);
+	if (w >= ARENA_SEG_BITMAP_WORDS) break;
 		uint64_t old_b, new_b;
 		do {
 			old_b = atomic_load_explicit(&seg->hdr.free_bitmap[w],
 				memory_order_acquire);
 			new_b = old_b | (1ULL << b);
-		} while (!atomic_compare_exchange_strong_explicit(
-			&seg->hdr.free_bitmap[w], &old_b, new_b,
-			memory_order_acq_rel, memory_order_acquire));
+	} while (!atomic_compare_exchange_strong_explicit(
+		&seg->hdr.free_bitmap[w], &old_b, new_b,
+		memory_order_relaxed, memory_order_relaxed));
 	}
 
 	uint64_t ctrl = atomic_load_explicit(&seg->hdr.control, memory_order_relaxed);
@@ -576,35 +579,36 @@ static bool seg_contains(struct arena_segment *seg, void *ptr) {
    ══════════════════════════════════════════════════════════════════ */
 
 static void epoch_gc_start(struct arena *a, int freq) {
-    uint32_t epoch = atomic_fetch_add_explicit(&a->epoch_ctl.global_epoch, 1,
-                                               memory_order_acq_rel) + 1;
-    atomic_fetch_add_explicit(&a->epoch_ctl.evacuating, 1, memory_order_acq_rel);
+	uint32_t epoch = atomic_fetch_add_explicit(&a->epoch_ctl.global_epoch, 1,
+		memory_order_relaxed) + 1;
+	atomic_fetch_add_explicit(&a->epoch_ctl.evacuating, 1, memory_order_acquire);
 
-    for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
-        struct arena_segment **segs = a->arenas[freq][sc].u.segs;
-        if (!segs) continue;
+	for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
+		struct arena_segment **segs = a->arenas[freq][sc].u.segs;
+		if (!segs) continue;
 
-        for (size_t i = 0; i < a->arenas[freq][sc].count; i++) {
-            struct arena_segment *seg = segs[i];
-            if (!seg) continue;
+		for (size_t i = 0; i < a->arenas[freq][sc].count; i++) {
+			struct arena_segment *seg = segs[i];
+			if (!seg) continue;
 
-            uint64_t ctrl = atomic_load(&seg->hdr.control);
-            uint64_t used = (ctrl >> 48) & 0xFFFF;
-            double pct = (double)used / 128.0;
+			uint64_t ctrl = atomic_load_explicit(&seg->hdr.control,
+				memory_order_relaxed);
+			uint64_t used = (ctrl >> 48) & 0xFFFF;
+			uint64_t threshold_numer = (freq == ARENA_FREQ_COLD)
+				? a->epoch_ctl.compact_trigger
+				: 50;
 
-            double threshold = (freq == ARENA_FREQ_COLD)
-                ? (double)a->epoch_ctl.compact_trigger / 100.0
-                : 0.50;
+			if (used * 100 > ARENA_SEG_SLOTS * threshold_numer) {
+				atomic_fetch_or_explicit(&seg->hdr.flags, 0x01,
+					memory_order_release);
+				atomic_store_explicit(&seg->hdr.epoch, epoch,
+					memory_order_release);
+			}
+		}
+	}
 
-            if (pct > threshold) {
-                atomic_store(&seg->hdr.epoch, epoch);
-                atomic_fetch_or(&seg->hdr.flags, 0x01);
-            }
-        }
-    }
-
-    atomic_fetch_sub_explicit(&a->epoch_ctl.evacuating, 1,
-                              memory_order_acq_rel);
+	atomic_fetch_sub_explicit(&a->epoch_ctl.evacuating, 1,
+		memory_order_relaxed);
     a->compactions++;
 }
 
@@ -653,7 +657,7 @@ static void tuner_adapt(struct arena *a) {
     t->freq_thresholds[ARENA_FREQ_WARM] = a->config.warm_threshold;
     t->freq_thresholds[ARENA_FREQ_COLD] = (uint8_t)(a->config.warm_threshold * 2);
 
-    uint8_t new_epoch = (uint8_t)(atomic_load(&a->epoch_ctl.global_epoch) & 0xFF);
+    uint8_t new_epoch = (uint8_t)(atomic_load_explicit(&a->epoch_ctl.global_epoch, memory_order_relaxed) & 0xFF);
     t->last_tune_epoch = new_epoch;
 
     memset(t->hist, 0, sizeof(t->hist));
@@ -693,9 +697,9 @@ struct arena *arena_create(size_t initial_capacity) {
 	for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
 		a->arenas[ARENA_FREQ_WARM][sc].u.slabs = calloc(1, sizeof(struct arena_slab_set));
 		if (!a->arenas[ARENA_FREQ_WARM][sc].u.slabs) goto fail;
-		atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->slab_count, 0);
-		atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->total_slots, 0);
-		atomic_store(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->free_slots, 0);
+		atomic_store_explicit(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->slab_count, 0, memory_order_relaxed);
+		atomic_store_explicit(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->total_slots, 0, memory_order_relaxed);
+		atomic_store_explicit(&a->arenas[ARENA_FREQ_WARM][sc].u.slabs->free_slots, 0, memory_order_relaxed);
 	}
 
 	for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
@@ -715,10 +719,9 @@ struct arena *arena_create(size_t initial_capacity) {
     a->epoch_ctl.global_epoch = 0;
     a->epoch_ctl.evacuating = 0;
     a->epoch_ctl.completed = 0;
-    a->epoch_ctl.compact_trigger = 50;
-    a->epoch_ctl.batch_size = 256;
+	a->epoch_ctl.compact_trigger = 50;
 
-    a->prefetch_ctl.enabled = a->config.enable_prefetch;
+	a->prefetch_ctl.enabled = a->config.enable_prefetch;
     a->prefetch_ctl.prefetch_distance = 2;
 
     a->tuner.freq_thresholds[ARENA_FREQ_WARM] = a->config.warm_threshold;
@@ -746,7 +749,7 @@ void arena_destroy(struct arena *a) {
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
         struct arena_slab_set *set = a->arenas[ARENA_FREQ_WARM][sc].u.slabs;
         if (set) {
-            int count = atomic_load(&set->slab_count);
+            int count = atomic_load_explicit(&set->slab_count, memory_order_relaxed);
             for (int i = 0; i < count && i < 8; i++) {
                 if (set->slabs[i]) {
                     munmap(set->slabs[i], set->slabs[i]->mmap_size);
@@ -953,34 +956,34 @@ void arena_clear(struct arena *a) {
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
         struct arena_slab_set *set = a->arenas[ARENA_FREQ_WARM][sc].u.slabs;
         if (set) {
-            int count = atomic_load(&set->slab_count);
+            int count = atomic_load_explicit(&set->slab_count, memory_order_relaxed);
             for (int i = 0; i < count && i < 8; i++) {
                 if (set->slabs[i]) {
                     for (int w = 0; w < 4; w++) {
                         atomic_store_explicit(&set->slabs[i]->bitmap[w],
                                               UINT64_MAX, memory_order_relaxed);
                     }
-                    atomic_store(&set->slabs[i]->used_count, 0);
-                    atomic_store(&set->slabs[i]->free_top, 0);
+                    atomic_store_explicit(&set->slabs[i]->used_count, 0, memory_order_relaxed);
+                    atomic_store_explicit(&set->slabs[i]->free_top, 0, memory_order_relaxed);
                 }
             }
-            atomic_store(&set->free_slots, atomic_load(&set->total_slots));
+            unsigned int total = atomic_load_explicit(&set->total_slots, memory_order_relaxed);
+            atomic_store_explicit(&set->free_slots, total, memory_order_relaxed);
         }
 
 	if (a->arenas[ARENA_FREQ_COLD][sc].u.segs) {
 		for (int i = 0; i < ARENA_COLD_SEGS_PER_CLASS; i++) {
 			struct arena_segment *seg = a->arenas[ARENA_FREQ_COLD][sc].u.segs[i];
 			if (seg) {
-				atomic_store_explicit(&seg->hdr.free_bitmap[0],
-					UINT64_MAX, memory_order_relaxed);
-				atomic_store_explicit(&seg->hdr.free_bitmap[1],
-					UINT64_MAX, memory_order_relaxed);
+				for (unsigned j = 0; j < ARENA_SEG_BITMAP_WORDS; j++)
+					atomic_store_explicit(&seg->hdr.free_bitmap[j],
+						UINT64_MAX, memory_order_relaxed);
 				uint64_t ctrl = atomic_load_explicit(&seg->hdr.control,
 					memory_order_relaxed);
 				ctrl &= ~(0xFFFFULL << 48);
 				atomic_store_explicit(&seg->hdr.control, ctrl,
 					memory_order_relaxed);
-				atomic_store(&seg->hdr.epoch, 0);
+				atomic_store_explicit(&seg->hdr.epoch, 0, memory_order_relaxed);
 				seg->hdr.flags = 0;
 			}
 		}
@@ -1004,8 +1007,8 @@ int arena_get_stats(const struct arena *a, size_t *out) {
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
         const struct arena_slab_set *set = a->arenas[ARENA_FREQ_WARM][sc].u.slabs;
         if (set) {
-            unsigned int total_slots = atomic_load(&set->total_slots);
-            unsigned int free_slots = atomic_load(&set->free_slots);
+            unsigned int total_slots = atomic_load_explicit(&set->total_slots, memory_order_relaxed);
+            unsigned int free_slots = atomic_load_explicit(&set->free_slots, memory_order_relaxed);
             total += (size_t)total_slots * g_slab_sizes[sc];
             used += (size_t)(total_slots - free_slots) * g_slab_sizes[sc];
             waste += (size_t)free_slots * g_slab_sizes[sc];
@@ -1017,8 +1020,9 @@ int arena_get_stats(const struct arena *a, size_t *out) {
             for (int i = 0; i < ARENA_COLD_SEGS_PER_CLASS; i++) {
                 if (a->arenas[ARENA_FREQ_COLD][sc].u.segs[i]) {
                     total += ARENA_SEG_SIZE;
-                    uint64_t ctrl = atomic_load(
-                        &a->arenas[ARENA_FREQ_COLD][sc].u.segs[i]->hdr.control);
+                    uint64_t ctrl = atomic_load_explicit(
+                        &a->arenas[ARENA_FREQ_COLD][sc].u.segs[i]->hdr.control,
+                        memory_order_relaxed);
                     uint64_t seg_used = ((ctrl >> 48) & 0xFFFF) * 64;
                     used += seg_used;
                     waste += ARENA_SEG_SIZE - seg_used;
@@ -1038,7 +1042,7 @@ int arena_get_stats(const struct arena *a, size_t *out) {
 
 size_t arena_size(const struct arena *a) {
     if (!a) return 0;
-    return atomic_load(&a->alloc_bytes);
+    return atomic_load_explicit(&a->alloc_bytes, memory_order_relaxed);
 }
 
 size_t arena_capacity(const struct arena *a) {
@@ -1049,7 +1053,7 @@ size_t arena_capacity(const struct arena *a) {
     for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
         const struct arena_slab_set *set = a->arenas[ARENA_FREQ_WARM][sc].u.slabs;
         if (set) {
-            total += (size_t)atomic_load(&set->total_slots) * g_slab_sizes[sc];
+            total += (size_t)atomic_load_explicit(&set->total_slots, memory_order_relaxed) * g_slab_sizes[sc];
         }
     }
 

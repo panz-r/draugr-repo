@@ -41,15 +41,15 @@ enum arena_freq {
 #define ARENA_SLAB_SLOTS  256
 
 struct arena_slab {
-    uint64_t bitmap[4];
-    _Atomic unsigned int used_count;
-    _Atomic uint32_t free_top;
-    uint32_t free_stack[ARENA_SLAB_SLOTS];
-    uint8_t size_class;
-    uint8_t freq;
-    uint16_t node_id;
-    size_t mmap_size;
-    uint8_t data[];
+uint64_t bitmap[4];
+_Atomic unsigned int used_count;
+_Atomic uint32_t free_top;
+uint32_t free_stack[ARENA_SLAB_SLOTS];
+uint8_t size_class;
+uint8_t freq;
+uint16_t node_id;
+size_t mmap_size;
+uint8_t data[];
 };
 
 struct arena_slab_set {
@@ -75,24 +75,32 @@ struct arena_tcache {
 
 /* ─── Segment — cold tier ─────────────────────────────────────── */
 #define ARENA_SEG_SHIFT 16
-#define ARENA_SEG_SIZE  (1U << ARENA_SEG_SHIFT)
+#define ARENA_SEG_SIZE (1U << ARENA_SEG_SHIFT)
 #define ARENA_COLD_SEGS_PER_CLASS 4
+#define ARENA_SEG_GRANULARITY 64
+#define ARENA_SEG_HDR_SIZE 152
+#define ARENA_SEG_DATA_SIZE (ARENA_SEG_SIZE - ARENA_SEG_HDR_SIZE)
+#define ARENA_SEG_SLOTS (ARENA_SEG_DATA_SIZE / ARENA_SEG_GRANULARITY)
+#define ARENA_SEG_BITMAP_WORDS ((ARENA_SEG_SLOTS + 63) / 64)
 
 struct arena_seg_hdr {
-	_Atomic uint64_t control;      /* bits 0-47: reserved, bits 48-63: used slot count */
-	_Atomic uint64_t free_bitmap[2];
+	_Atomic uint64_t control;
 	_Atomic unsigned int epoch;
 	uint8_t freq;
 	uint8_t size_class;
 	uint8_t node_id;
-	_Atomic uint8_t flags;         /* bit 0: evacuating */
+	_Atomic uint8_t flags;
 	struct arena_seg_hdr *next;
+	_Atomic uint64_t free_bitmap[ARENA_SEG_BITMAP_WORDS];
 };
 
 struct arena_segment {
-    struct arena_seg_hdr hdr;
-    uint8_t data[];
+	struct arena_seg_hdr hdr;
+	uint8_t data[];
 };
+
+_Static_assert(sizeof(struct arena_seg_hdr) == ARENA_SEG_HDR_SIZE,
+	"ARENA_SEG_HDR_SIZE must match struct arena_seg_hdr layout");
 
 /* ─── Epoch-based GC control [6][7] ───────────────────────────── */
 struct arena_epoch_ctl {
@@ -100,7 +108,6 @@ struct arena_epoch_ctl {
     _Atomic unsigned int evacuating;
     _Atomic unsigned int completed;
     uint32_t compact_trigger;
-    size_t batch_size;
 };
 
 /* ─── Hardware prefetch control [4] ────────────────────────────── */
@@ -111,10 +118,10 @@ struct arena_prefetch_ctl {
 
 /* ─── Adaptive tuner [9] ───────────────────────────────────────── */
 struct arena_tuner {
-    uint32_t hist[64];
-    uint32_t sample_count;
-    uint8_t freq_thresholds[2];
-    uint8_t last_tune_epoch;
+	uint8_t freq_thresholds[ARENA_FREQ_COUNT];
+	uint8_t last_tune_epoch;
+	uint32_t hist[64];
+	uint32_t sample_count;
 };
 
 /* ─── Deferred free list (mimalloc-style batched free) ────────── */
@@ -138,9 +145,6 @@ struct arena {
             struct arena_segment **segs;
         } u;
         size_t count;
-        size_t total_bytes;
-        size_t used_bytes;
-        size_t waste_bytes;
     } arenas[ARENA_FREQ_COUNT][ARENA_SLAB_SIZES];
 
     struct arena_tcache *thread_caches;
@@ -159,7 +163,6 @@ struct arena {
         uint8_t enable_adaptive_tuning;
     } config;
 
-    size_t total_memory;
     size_t write_amplification;
     size_t compactions;
 
