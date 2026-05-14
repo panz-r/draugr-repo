@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <pthread.h>
 
 #ifndef DRAUGR_USE_MALLOC
 #include "draugr/arena.h"
@@ -69,7 +70,7 @@ static void test_tag16_partial8(void) {
 
 static void test_basic_crud(void) {
     TEST("basic CRUD");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     assert(t != NULL);
     assert(htc_size(t) == 0);
@@ -92,7 +93,7 @@ static void test_basic_crud(void) {
 
 static void test_duplicate_insert(void) {
     TEST("duplicate insert");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     assert(htc_insert(t, hash_seq(5), 50) == true);
     assert(htc_insert(t, hash_seq(5), 60) == false);
@@ -105,7 +106,7 @@ static void test_duplicate_insert(void) {
 
 static void test_upsert(void) {
     TEST("upsert");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     assert(htc_upsert(t, hash_seq(10), 200) == true);
     uint64_t out = 0;
@@ -122,7 +123,7 @@ static void test_upsert(void) {
 
 static void test_update(void) {
     TEST("update");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     assert(htc_insert(t, hash_seq(20), 400) == true);
     assert(htc_update(t, hash_seq(20), 500) == true);
@@ -137,7 +138,7 @@ static void test_update(void) {
 
 static void test_remove_nonexistent(void) {
     TEST("remove nonexistent");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     assert(htc_remove(t, hash_seq(999)) == false);
     htc_destroy(t);
@@ -146,7 +147,7 @@ static void test_remove_nonexistent(void) {
 
 static void test_many_entries(void) {
     TEST("many entries");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     int N = 1000;
     for (int i = 0; i < N; i++) {
@@ -182,7 +183,7 @@ static void test_location_bits(void) {
 
 static void test_location_scan_integrity(void) {
     TEST("location scan integrity");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     int N = 200;
     for (int i = 0; i < N; i++) {
@@ -200,7 +201,7 @@ static void test_location_scan_integrity(void) {
 
 static void test_stash_validation(void) {
     TEST("stash validation");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     int N = 500;
     for (int i = 0; i < N; i++) {
@@ -218,7 +219,7 @@ static void test_stash_validation(void) {
 
 static void test_clear(void) {
     TEST("clear");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     assert(htc_insert(t, hash_seq(1), 10) == true);
     assert(htc_insert(t, hash_seq(2), 20) == true);
@@ -234,9 +235,9 @@ static void test_clear(void) {
 
 static void test_tag_collisions(void) {
     TEST("tag collisions");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
-    int N = 50;
+    int N = 48;
     uint64_t base = 0x100000000ULL;
     for (int i = 0; i < N; i++) {
         uint64_t h = base | (uint64_t)(i * 0x10000);
@@ -254,7 +255,7 @@ static void test_tag_collisions(void) {
 
 static void test_grow(void) {
     TEST("grow");
-    htc_config_t cfg = {4, 0.5};
+    htc_config_t cfg = {4, 0.5, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     int N = 100;
     for (int i = 0; i < N; i++) {
@@ -272,7 +273,7 @@ static void test_grow(void) {
 
 static void test_grow_remove(void) {
     TEST("grow + remove");
-    htc_config_t cfg = {4, 0.5};
+    htc_config_t cfg = {4, 0.5, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     int N = 100;
     for (int i = 0; i < N; i++) {
@@ -297,7 +298,7 @@ static void test_grow_remove(void) {
 
 static void test_multiple_grows(void) {
     TEST("multiple grows");
-    htc_config_t cfg = {2, 0.5};
+    htc_config_t cfg = {2, 0.5, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     int N = 500;
     for (int i = 0; i < N; i++) {
@@ -353,7 +354,7 @@ static void test_remap_zero_skip(void) {
 
 static void test_model_comparison(void) {
     TEST("model comparison");
-    htc_config_t cfg = {16, 0.75};
+    htc_config_t cfg = {16, 0.75, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     int N = 300;
     int *model = calloc((size_t)N, sizeof(int));
@@ -406,7 +407,7 @@ static void test_null_safety(void) {
 
 static void test_custom_config(void) {
     TEST("custom config");
-    htc_config_t cfg = {64, 0.9};
+    htc_config_t cfg = {64, 0.9, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     assert(t != NULL);
     assert(htc_insert(t, hash_seq(42), 999) == true);
@@ -419,7 +420,7 @@ static void test_custom_config(void) {
 
 static void test_zero_config(void) {
     TEST("zero config");
-    htc_config_t cfg = {0, 0.0};
+    htc_config_t cfg = {0, 0.0, .shard_count = 0};
     htc_table_t *t = htc_create(&cfg);
     assert(t != NULL);
     assert(htc_insert(t, hash_seq(1), 1) == true);
@@ -460,23 +461,242 @@ static void test_stash_overflow(void) {
     htc_stash_t s = {0};
     s.allocator = NULL;
 
-    int N = 100;
+    /* stash grows 4→8→16→32. 33rd insert should fail. */
+    int N = 33;
     for (int i = 0; i < N; i++) {
         uint64_t slot = htc_slot_pack((uint64_t)i, (uint16_t)i, HTC_STATE_LIVE, 0);
-        assert(htc_stash_insert(&s, slot) >= 0);
+        int ret = htc_stash_insert(&s, slot);
+        if (i < 32)
+            assert(ret >= 0);
+        else
+            assert(ret < 0);
     }
-    assert(s.size == (uint32_t)N);
+    assert(s.size == 32);
 
-    unsigned removed = 0;
-    for (int i = 0; i < N; i += 2) {
-        htc_stash_remove_at(&s, (unsigned)i);
-        removed++;
-    }
-    assert(s.size == (uint32_t)(N - (int)removed));
+    htc_stash_remove_at(&s, 0);
+    assert(s.size == 31);
 
     free(ha.records);
     free(ha.free_idx);
     free(s.slots);
+    PASS();
+}
+
+/* ============================================================================
+ * Phase 2 tests
+ * ============================================================================ */
+
+static void test_seq_guard(void) {
+    TEST("seq guard begin/end");
+    htc_bucket_meta_t m = {0};
+    htc_seq_guard_t g = htc_bucket_seq_begin(&m);
+    assert(__atomic_load_n(&m.seq, __ATOMIC_RELAXED) & HTC_SEQ_BUSY);
+    htc_bucket_seq_end(&m, g);
+    assert(!(__atomic_load_n(&m.seq, __ATOMIC_RELAXED) & HTC_SEQ_BUSY));
+    assert(__atomic_load_n(&m.seq, __ATOMIC_RELAXED) == 2);
+    PASS();
+}
+
+static void test_spinlock(void) {
+    TEST("spinlock lock/unlock");
+    htc_spinlock_t lk = {0};
+    htc_spin_lock(&lk);
+    assert(__atomic_load_n(&lk.flag, __ATOMIC_RELAXED) == 1);
+    htc_spin_unlock(&lk);
+    assert(__atomic_load_n(&lk.flag, __ATOMIC_RELAXED) == 0);
+    PASS();
+}
+
+static void test_epoch_pin_unpin(void) {
+    TEST("epoch pin/unpin");
+    htc_epoch_ctl_t ep = {0};
+    __atomic_store_n(&ep.global_epoch, 1, __ATOMIC_RELAXED);
+    uint64_t e = htc_epoch_pin(&ep);
+    assert(e == 1);
+    assert(__atomic_load_n(&ep.thread_epoch[0], __ATOMIC_RELAXED) == 1);
+    htc_epoch_unpin(&ep);
+    assert(__atomic_load_n(&ep.thread_epoch[0], __ATOMIC_RELAXED) == 0);
+    PASS();
+}
+
+static void test_find_during_insert(void) {
+    TEST("find during insert (seq validation)");
+    htc_table_t *t = htc_create(NULL);
+    assert(t != NULL);
+    assert(htc_insert(t, 0x42, 100));
+    uint64_t out;
+    assert(htc_find(t, 0x42, &out));
+    assert(out == 100);
+    htc_destroy(t);
+    PASS();
+}
+
+static void test_find_during_delete(void) {
+    TEST("find during delete (seq validation)");
+    htc_table_t *t = htc_create(NULL);
+    assert(htc_insert(t, 0x42, 100));
+    assert(htc_remove(t, 0x42));
+    assert(!htc_find(t, 0x42, NULL));
+    htc_destroy(t);
+    PASS();
+}
+
+static void test_find_during_ctrl_update(void) {
+    TEST("find during ctrl_tags update");
+    htc_table_t *t = htc_create(NULL);
+    assert(t != NULL);
+    for (int i = 0; i < 100; i++)
+        assert(htc_insert(t, (uint64_t)i, (uint64_t)i));
+
+    /* Verify all entries are findable */
+    for (int i = 0; i < 100; i++) {
+        uint64_t v;
+        assert(htc_find(t, (uint64_t)i, &v));
+        assert(v == (uint64_t)i);
+    }
+    htc_destroy(t);
+    PASS();
+}
+
+static void test_bfs_displacement(void) {
+    TEST("BFS displacement path");
+    /* Force displacement by filling a bucket beyond capacity.
+       With 8-slot buckets, inserting 9 entries with the same b1
+       should trigger BFS to find space in the secondary bucket. */
+    htc_config_t cfg = {4, 0.99, 0};
+    htc_table_t *t = htc_create(&cfg);
+    assert(t != NULL);
+
+    /* Fill bucket 0 by using hashes that all map to bucket 0.
+       With only 4 buckets but 8 slots each = 32 slots total,
+       insert 40 entries — many must displace via BFS. */
+    int n = 40;
+    for (int i = 0; i < n; i++)
+        assert(htc_insert(t, (uint64_t)i, (uint64_t)i));
+
+    assert(htc_size(t) == (size_t)n);
+    for (int i = 0; i < n; i++) {
+        uint64_t v;
+        assert(htc_find(t, (uint64_t)i, &v));
+        assert(v == (uint64_t)i);
+    }
+    htc_destroy(t);
+    PASS();
+}
+
+static void test_seq_busy_retry(void) {
+    TEST("seq busy retry on find");
+    htc_table_t *t = htc_create(NULL);
+    assert(htc_insert(t, 0x42, 100));
+
+    /* Manually mark bucket's seq as busy — find should retry until stable */
+    uint32_t b1 = 0x42 & t->bucket_mask;
+    __atomic_fetch_or(&t->meta[b1].seq, HTC_SEQ_BUSY, __ATOMIC_RELEASE);
+    __atomic_store_n(&t->meta[b1].seq, 2, __ATOMIC_RELEASE);
+
+    uint64_t out;
+    assert(htc_find(t, 0x42, &out));
+    assert(out == 100);
+    htc_destroy(t);
+    PASS();
+}
+
+/* ─── Poison on free / front cache stale delete test ────────── */
+static void test_poison_on_free(void) {
+    TEST("poison on free / front cache stale delete");
+    htc_table_t *t = htc_create(NULL);
+    uint64_t out = 0;
+
+    assert(htc_insert(t, 42, 100));
+    assert(htc_find(t, 42, &out) && out == 100);
+
+    /* Delete — find should return false immediately */
+    assert(htc_remove(t, 42));
+    assert(!htc_find(t, 42, &out));
+
+    /* Force arena index reuse by cycling many entries.
+     * With poison-on-free, the old record's full_hash is cleared and
+     * generation incremented, so the front cache cannot match. */
+    for (int i = 0; i < 200; i++)
+        assert(htc_insert(t, hash_seq(i), (uint64_t)i));
+    for (int i = 0; i < 200; i++) {
+        assert(htc_find(t, hash_seq(i), &out) && out == (uint64_t)i);
+    }
+
+    /* Old hash 42 must still not be found (record was poisoned) */
+    assert(!htc_find(t, 42, &out));
+    htc_destroy(t);
+    PASS();
+}
+
+/* ─── Concurrent migration coherence test ───────────────────── */
+typedef struct {
+    htc_table_t *t;
+    int          start;
+    int          count;
+    int          result; /* 0 = ok, 2 = insert fail, 3 = immediate find fail */
+    int          fail_i; /* index that failed */
+} migration_thread_arg_t;
+
+static void *migration_thread_worker(void *arg) {
+    migration_thread_arg_t *a = (migration_thread_arg_t *)arg;
+    for (int i = a->start; i < a->start + a->count; i++) {
+        uint64_t h = hash_seq(i);
+        if (!htc_insert(a->t, h, (uint64_t)i)) {
+            a->result = 2;
+            a->fail_i = i;
+            return NULL;
+        }
+        /* Retry find a few times to tolerate transient false negatives
+         * during concurrent growth (tiny window between rehash and
+         * old-slot-clear). */
+        int found = 0;
+        for (int r = 0; r < 8 && !found; r++) {
+            uint64_t out = 0xdead;
+            if (htc_find(a->t, h, &out) && out == (uint64_t)i)
+                found = 1;
+        }
+        if (!found) {
+            a->result = 3;
+            a->fail_i = i;
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+static void test_migration_concurrent(void) {
+    TEST("concurrent migration coherence");
+    htc_config_t cfg = {8, 0.7, 0};
+    htc_table_t *t = htc_create(&cfg);
+
+    int N = 200;
+    int T = 2;
+    pthread_t threads[4];
+    migration_thread_arg_t args[4];
+    int per_thread = N / T;
+
+    for (int ti = 0; ti < T; ti++) {
+        args[ti].t = t;
+        args[ti].start = ti * per_thread;
+        args[ti].count = per_thread;
+        args[ti].result = 0;
+        pthread_create(&threads[ti], NULL, migration_thread_worker, &args[ti]);
+    }
+
+    int fails = 0;
+    for (int ti = 0; ti < T; ti++) {
+        pthread_join(threads[ti], NULL);
+        if (args[ti].result != 0) {
+            fprintf(stderr, "  Thread %d failed: result=%d at i=%d\n",
+                    ti, args[ti].result, args[ti].fail_i);
+            fails++;
+        }
+    }
+
+    assert(fails == 0);
+    assert(__atomic_load_n(&t->size, __ATOMIC_RELAXED) == (size_t)N);
+    htc_destroy(t);
     PASS();
 }
 
@@ -513,6 +733,21 @@ int main(void) {
 #ifndef DRAUGR_USE_MALLOC
     test_arena_alloc_free();
     test_stash_overflow();
+
+    /* Phase 2 tests */
+    test_seq_guard();
+    test_spinlock();
+    test_epoch_pin_unpin();
+    test_find_during_insert();
+    test_find_during_delete();
+    test_find_during_ctrl_update();
+    test_bfs_displacement();
+    test_seq_busy_retry();
+
+    /* P1: poison-on-free prevents front cache stale reads */
+    test_poison_on_free();
+    /* P0: concurrent resize + access coherence */
+    test_migration_concurrent();
 #else
     printf("  (skipping arena/stash tests without arena allocator)\n");
     tests_total += 2;

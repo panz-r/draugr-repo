@@ -57,6 +57,7 @@ target_link_libraries(test_internal draugr)
 add_test(NAME ht_internal_tests COMMAND test_internal)
 
 add_executable(test_htc test_htc.c)
+target_compile_options(test_htc PRIVATE -Wno-missing-field-initializers)
 target_link_libraries(test_htc draugr)
 add_test(NAME htc_phase1_tests COMMAND test_htc)
 

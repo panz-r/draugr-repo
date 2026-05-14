@@ -16,6 +16,7 @@ typedef struct htc_table htc_table_t;
 typedef struct {
     uint32_t initial_buckets;
     double   max_load_factor;
+    uint32_t shard_count;       /* default 128, 0 = use default */
 } htc_config_t;
 
 htc_table_t *htc_create(const htc_config_t *cfg);
