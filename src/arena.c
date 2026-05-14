@@ -600,7 +600,7 @@ static bool seg_free(struct arena_segment *seg, void *ptr, size_t size) {
 		uint64_t old_b, new_b;
 		do {
 			old_b = atomic_load_explicit(&seg->hdr.free_bitmap[w],
-				memory_order_acquire);
+				memory_order_relaxed);
 			new_b = old_b | (1ULL << b);
 	} while (!atomic_compare_exchange_strong_explicit(
 		&seg->hdr.free_bitmap[w], &old_b, new_b,
