@@ -1260,7 +1260,8 @@ void ht_clear(ht_table_t *t) {
     free(t->entries);
     size_t main_sz = bare_main_block_size(t->bare.capacity);
     size_t spill_sz = t->bare.spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
-    t->entries = (ht_entry_t *)(t->table_block + main_sz + spill_sz);
+    size_t off_entries = (main_sz + spill_sz + 7) & ~(size_t)7;
+    t->entries = (ht_entry_t *)(t->table_block + off_entries);
     t->entry_cap = 64;
     t->entries_in_block = true;
   }
@@ -1659,7 +1660,9 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
     size_t new_main_sz = bare_main_block_size(new_capacity);
     size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
     size_t new_spill_sz = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
-    size_t new_block_sz = new_main_sz + new_spill_sz + new_entry_cap * sizeof(ht_entry_t);
+    size_t off_entries = new_main_sz + new_spill_sz;
+    off_entries = (off_entries + 7) & ~(size_t)7;
+    size_t new_block_sz = off_entries + new_entry_cap * sizeof(ht_entry_t);
 
     uint8_t *new_block = calloc(1, new_block_sz);
     if (!new_block) return false;
@@ -1672,7 +1675,7 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
     uint32_t *new_spill_vals = (uint32_t*)(new_spill_block + new_spill_cap * sizeof(uint64_t));
     memset(new_spill_vals, 0xFF, new_spill_cap * sizeof(uint32_t));
 
-	ht_entry_t *tmp_entries = (ht_entry_t *)(new_block + new_main_sz + new_spill_sz);
+	ht_entry_t *tmp_entries = (ht_entry_t *)(new_block + off_entries);
 	ht_entry_t *tmp_entries_block_start = tmp_entries;
 	size_t tmp_entry_count = 0;
 	size_t tmp_entry_cap = new_entry_cap;
@@ -1777,7 +1780,7 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
   t->entries = tmp_entries;
   t->entry_count = tmp_entry_count;
   t->entry_cap = tmp_entry_cap;
-  t->entries_in_block = (tmp_entries == (ht_entry_t *)(new_block + new_main_sz + new_spill_sz));
+  t->entries_in_block = (tmp_entries == (ht_entry_t *)(new_block + off_entries));
   b->spill_in_block = true;
   return true;
 }
