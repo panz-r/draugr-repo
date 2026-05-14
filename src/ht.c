@@ -229,6 +229,7 @@ static size_t overflow_stash_remove(ht_bare_t *t, uint64_t h48) {
 }
 
 bool bare_rh_insert_bounded(ht_bare_t *t, uint64_t h48, uint32_t val) {
+    if (t->capacity == 0) return bare_rh_insert_unbounded(t, h48, val);
  size_t cap_mask = t->capacity - 1;
  size_t ideal = h48 & cap_mask;
 
@@ -506,9 +507,11 @@ void bare_reinsert_spill(ht_bare_t *t,
 // Bare Public API: Lifecycle
 // ============================================================================
 
-ht_bare_t *ht_bare_create(const ht_config_t *cfg) {
+ht_bare_t *ht_bare_create(const ht_config_t *cfg, struct arena *arena) {
+    (void)arena;
     ht_bare_t *t = calloc(1, sizeof(ht_bare_t));
     if (!t) return NULL;
+    t->allocator = NULL;
 
     ht_config_t c = default_cfg;
     if (cfg) c = *cfg;
@@ -534,7 +537,8 @@ ht_bare_t *ht_bare_create(const ht_config_t *cfg) {
     t->min_load_factor = (c.min_load_factor >= 0) ? c.min_load_factor : 0.20;
     t->tomb_threshold = (c.tomb_threshold > 0) ? c.tomb_threshold : 0.20;
     t->zombie_window = c.zombie_window;
-    t->max_probe_dist = (c.max_probe_dist > UINT16_MAX) ? UINT16_MAX : c.max_probe_dist;
+    t->max_probe_dist = (c.max_probe_dist == 0) ? 255 :
+        (c.max_probe_dist > UINT16_MAX) ? UINT16_MAX : c.max_probe_dist;
 
     return t;
 }
@@ -788,28 +792,10 @@ bool ht_bare_remove_val(ht_bare_t *t, uint64_t hash, uint32_t val) {
 // ============================================================================
 
 bool bare_resize_table(ht_bare_t *t) {
-    if (t->capacity > SIZE_MAX / 2) return false;
-    return ht_bare_resize(t, t->capacity * 2);
-}
-
-bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
-    if (!t) return false;
-    size_t main_live_for_resize = t->size - t->spill_len - t->overflow_len;
-    if (new_capacity < main_live_for_resize) return false;
-    if (t->resizing) return true;
-
-    t->resizing = true;
-    new_capacity = next_pow2(new_capacity);
-
-    if (new_capacity == t->capacity) {
-        t->resizing = false;
-        return true;
-    }
-
-  uint8_t *old_main_block = t->main_block;
+  size_t old_cap = t->capacity;
   uint64_t *old_hash_pd = t->hash_pd;
   uint32_t *old_vals = t->vals;
-  size_t old_cap = t->capacity;
+  uint8_t *old_main_block = t->main_block;
   bool old_spill_in_block = t->spill_in_block;
 
   uint64_t *old_spill_hash_pd = t->spill_hash_pd;
@@ -823,15 +809,16 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
   memcpy(old_overflow_hash, t->overflow_hash_pd, old_overflow_len * sizeof(uint64_t));
   memcpy(old_overflow_vals, t->overflow_vals, old_overflow_len * sizeof(uint32_t));
 
+  size_t new_capacity = next_pow2(t->size * 2);
+  if (new_capacity < 4) new_capacity = 4;
   uint8_t *new_main_block = bare_alloc_main_block(new_capacity);
-  if (!new_main_block) { t->resizing = false; return false; }
+  if (!new_main_block) return false;
 
   size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
   size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
   uint8_t *new_spill_block = malloc(new_spill_size);
   if (!new_spill_block) {
     free(new_main_block);
-    t->resizing = false;
     return false;
   }
   memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
@@ -862,8 +849,18 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
   free(old_main_block);
   if (!old_spill_in_block)
     free(old_spill_block);
-  t->resizing = false;
   return true;
+}
+
+bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
+    if (!t) return false;
+    size_t main_live = t->size - t->spill_len - t->overflow_len;
+    if (new_capacity < main_live) return false;
+    if (t->resizing) return true;
+    t->resizing = true;
+    bool ok = bare_resize_table(t);
+    t->resizing = false;
+    return ok;
 }
 
 void ht_bare_compact(ht_bare_t *t) {

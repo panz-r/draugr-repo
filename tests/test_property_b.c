@@ -1,216 +1,4 @@
-/**
- * test_property_b.c - Extended Property-Based Testing for draugr Hash Table
- *
- * Extended tests for long-running processes, multi-table scenarios, and edge cases:
- * - Multi-table isolation verification
- * - Long-running accumulation (1M+ operations)
- * - Batch vs interleaved operation equivalence
- * - Collision stress testing
- * - Delete-reinsert cycling
- * - Progressive load factor testing
- * - Memory pattern verification
- * - Iterator modification stress
- * - Table copy semantics
- * - Edge value combinations (null/empty/max-size)
- * - Tombstone accumulation and cleanup
- */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <assert.h>
-#include <time.h>
-
-#include "draugr/ht.h"
-#include "draugr/ht_internal.h"
-
-extern void *__real_malloc(size_t size);
-extern void *__real_calloc(size_t nmemb, size_t size);
-extern void *__real_realloc(void *ptr, size_t size);
-extern void __real_free(void *ptr);
-
-static struct {
-    int max_alloc_calls;
-    int alloc_count;
-    int alloc_num_to_fail;
-    bool fail_by_size;
-    size_t fail_size_threshold;
-    int fail_count;
-    bool active;
-} mock = {-1, 0, -1, false, 0, 0, false};
-
-void alloc_mock_reset(void) {
-    mock.max_alloc_calls = -1;
-    mock.alloc_count = 0;
-    mock.alloc_num_to_fail = -1;
-    mock.fail_by_size = false;
-    mock.fail_size_threshold = SIZE_MAX;
-    mock.fail_count = 0;
-    mock.active = false;
-}
-
-static bool should_fail(size_t size) {
-    if (!mock.active) return false;
-    if (mock.max_alloc_calls > 0 && mock.alloc_count >= mock.max_alloc_calls) return true;
-    if (mock.fail_by_size && size >= mock.fail_size_threshold) return true;
-    if (mock.alloc_num_to_fail >= 0 && mock.alloc_count == mock.alloc_num_to_fail) return true;
-    return false;
-}
-
-void *__wrap_malloc(size_t size) {
-    mock.alloc_count++;
-    if (should_fail(size)) { mock.fail_count++; return NULL; }
-    return __real_malloc(size);
-}
-
-void *__wrap_calloc(size_t nmemb, size_t size) {
-    mock.alloc_count++;
-    if (should_fail(nmemb * size)) { mock.fail_count++; return NULL; }
-    return __real_calloc(nmemb, size);
-}
-
-void *__wrap_realloc(void *ptr, size_t size) {
-    mock.alloc_count++;
-    if (should_fail(size)) { mock.fail_count++; return NULL; }
-    return __real_realloc(ptr, size);
-}
-
-void __wrap_free(void *ptr) { __real_free(ptr); }
-
-#define MODEL_MAX_ENTRIES 8192
-#define MODEL_MAX_KEY_LEN 512
-#define MODEL_MAX_VAL_LEN 1024
-
-typedef struct {
-    char keys[MODEL_MAX_ENTRIES][MODEL_MAX_KEY_LEN];
-    size_t key_lens[MODEL_MAX_ENTRIES];
-    char vals[MODEL_MAX_ENTRIES][MODEL_MAX_VAL_LEN];
-    size_t val_lens[MODEL_MAX_ENTRIES];
-    size_t count;
-} model_t;
-
-static model_t* model_create(void) {
-    model_t *m = (model_t*)calloc(1, sizeof(model_t));
-    return m;
-}
-
-static void model_destroy(model_t *m) {
-    free(m);
-}
-
-static size_t model_size(model_t *m) {
-    return m->count;
-}
-
-static int model_find(model_t *m, const char *key, size_t key_len) {
-    for (size_t i = 0; i < m->count; i++) {
-        if (m->key_lens[i] == key_len && memcmp(m->keys[i], key, key_len) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-static void model_set(model_t *m, const char *key, size_t key_len, const char *value, size_t value_len) {
-    int idx = model_find(m, key, key_len);
-    if (idx >= 0) {
-        memcpy(m->vals[idx], value, value_len < MODEL_MAX_VAL_LEN ? value_len : MODEL_MAX_VAL_LEN);
-        m->val_lens[idx] = value_len;
-    } else {
-        if (m->count >= MODEL_MAX_ENTRIES) return;
-        if (key_len > MODEL_MAX_KEY_LEN || value_len > MODEL_MAX_VAL_LEN) return;
-        idx = (int)m->count++;
-        memcpy(m->keys[idx], key, key_len);
-        m->key_lens[idx] = key_len;
-        memcpy(m->vals[idx], value, value_len);
-        m->val_lens[idx] = value_len;
-    }
-}
-
-static bool model_remove(model_t *m, const char *key, size_t key_len) {
-    int idx = model_find(m, key, key_len);
-    if (idx < 0) return false;
-    m->count--;
-    for (size_t i = idx; i < m->count; i++) {
-        memcpy(m->keys[i], m->keys[i + 1], MODEL_MAX_KEY_LEN);
-        m->key_lens[i] = m->key_lens[i + 1];
-        memcpy(m->vals[i], m->vals[i + 1], MODEL_MAX_VAL_LEN);
-        m->val_lens[i] = m->val_lens[i + 1];
-    }
-    memset(m->keys[m->count], 0, MODEL_MAX_KEY_LEN);
-    memset(m->vals[m->count], 0, MODEL_MAX_VAL_LEN);
-    m->key_lens[m->count] = 0;
-    m->val_lens[m->count] = 0;
-    return true;
-}
-
-static const char* model_find_val(model_t *m, const char *key, size_t key_len, size_t *out_val_len) {
-    int idx = model_find(m, key, key_len);
-    if (idx < 0) return NULL;
-    if (out_val_len) *out_val_len = m->val_lens[idx];
-    return m->vals[idx];
-}
-
-static uint32_t g_seed = 0;
-static uint64_t g_seed2 = 0;
-
-static void my_srand(uint32_t seed) {
-    g_seed = seed;
-    g_seed2 = (uint64_t)seed << 32 | seed;
-}
-
-static uint64_t splitmix64(uint64_t *state) {
-    uint64_t z = (*state += 0x9e3779b97f4a7c15ULL);
-    z ^= z >> 30;
-    z *= 0xbf58476d1ce4e5b9ULL;
-    z ^= z >> 27;
-    z *= 0x94d049bb133111ebULL;
-    z ^= z >> 31;
-    return z;
-}
-
-static uint64_t simple_hash(const void *key, size_t len, void *ctx) {
-    (void)ctx;
-    uint64_t h = 0xcbf29ce484222325ULL;
-    const uint8_t *p = (const uint8_t *)key;
-    for (size_t i = 0; i < len; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
-    return h;
-}
-
-static uint64_t fixed_hash(const void *key, size_t len, void *ctx) {
-    (void)key; (void)len; (void)ctx;
-    return 42;
-}
-
-static uint64_t hash_one(const void *key, size_t len, void *ctx) {
-    (void)key; (void)len; (void)ctx;
-    return 1;
-}
-
-static uint64_t zero_hash(const void *key, size_t len, void *ctx) {
-    (void)key; (void)len; (void)ctx;
-    return 0;
-}
-
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-#define MODEL_CHECK(cond) do { \
-    if (!(cond)) { \
-        printf("  MODEL FAIL at line %d: %s\n", __LINE__, #cond); \
-        tests_failed++; \
-        return; \
-    } \
-} while(0)
-
-#define PASS(msg) do { printf("  PASS: %s\n", msg); tests_passed++; } while(0)
-#define BUG(msg) do { printf("  BUG: %s\n", msg); tests_failed++; } while(0)
-
-// ============================================================================
-// Test 1: Multi-Table Isolation
-// ============================================================================
+#include "property_utils.h"
 
 static void test_multi_table_isolation(void) {
     printf("\n=== Property: Multi-Table Isolation ===\n");
@@ -757,7 +545,10 @@ static void test_edge_value_combinations(void) {
     ht_upsert(ht, large_key, 256, large_val, 256);
     model_set(m, large_key, 256, large_val, 256);
     
-    MODEL_CHECK(ht_size(ht) == model_size(m));
+    if (ht_size(ht) != 2 || model_size(m) != 2) {
+        printf("  FAIL at init: ht_size=%zu model_size=%zu\n", ht_size(ht), model_size(m));
+        tests_failed++; goto cleanup;
+    }
     
     for (int op = 0; op < 10000; op++) {
         int choice = (int)(splitmix64(&sm_state) % 4);
@@ -765,12 +556,12 @@ static void test_edge_value_combinations(void) {
             size_t vlen = 0;
             const char *f = ht_find(ht, empty_key, 0, &vlen);
             const char *mf = model_find_val(m, empty_key, 0, NULL);
-            MODEL_CHECK((f != NULL) == (mf != NULL));
+            if ((f != NULL) != (mf != NULL)) { tests_failed++; goto cleanup; }
         } else if (choice == 1) {
             size_t vlen = 0;
             const char *f = ht_find(ht, large_key, 256, &vlen);
             const char *mf = model_find_val(m, large_key, 256, NULL);
-            MODEL_CHECK((f != NULL) == (mf != NULL));
+            if ((f != NULL) != (mf != NULL)) { tests_failed++; goto cleanup; }
         } else if (choice == 2) {
             memset(large_val, (char)(op & 0xFF), 256);
             if (ht_upsert(ht, large_key, 256, large_val, 256))

@@ -1,4 +1,5 @@
 #include "draugr/ht_cache_internal.h"
+#include "draugr/arena.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -125,11 +126,18 @@ static bool remove_scan_cb(uint32_t val, void *ctx) {
 }
 
 ht_cache_t *ht_cache_create(const ht_cache_config_t *cfg) {
+    return ht_cache_create_with_arena(cfg, NULL);
+}
+
+ht_cache_t *ht_cache_create_with_arena(const ht_cache_config_t *cfg, struct arena *arena) {
  if (!cfg || cfg->capacity == 0 || cfg->entry_size == 0 || !cfg->hash_fn)
   return NULL;
 
+ void *alloc = (void *)arena;
+
  ht_cache_t *c = calloc(1, sizeof(*c));
  if (!c) return NULL;
+ c->allocator = alloc;
 
  c->capacity = cfg->capacity;
  c->entry_size = cfg->entry_size;
@@ -161,8 +169,9 @@ ht_cache_t *ht_cache_create(const ht_cache_config_t *cfg) {
  size_t off_free_stack = off; off += free_stack_sz;
  size_t block_sz = off;
 
- c->cache_block = calloc(1, block_sz);
- if (!c->cache_block) { ht_cache_destroy(c); return NULL; }
+ c->cache_block = DRAUGR_CALLOC(alloc, 1, block_sz);
+ if (!c->cache_block) { free(c); return NULL; }
+ c->block_sz = block_sz;
 
  c->entries    = c->cache_block + off_entries;
  c->hashes     = (uint64_t *)(c->cache_block + off_hashes);
@@ -191,8 +200,8 @@ ht_cache_t *ht_cache_create(const ht_cache_config_t *cfg) {
   .tomb_threshold = 0.30,
   .zombie_window = 16,
  };
- c->bare = ht_bare_create(&bare_cfg);
- if (!c->bare) { ht_cache_destroy(c); return NULL; }
+ c->bare = ht_bare_create(&bare_cfg, arena);
+ if (!c->bare) { DRAUGR_FREE(alloc, c->cache_block, block_sz); free(c); return NULL; }
 
  return c;
 }
@@ -200,7 +209,7 @@ ht_cache_t *ht_cache_create(const ht_cache_config_t *cfg) {
 void ht_cache_destroy(ht_cache_t *c) {
  if (!c) return;
  ht_bare_destroy(c->bare);
- free(c->cache_block);
+ DRAUGR_FREE(c->allocator, c->cache_block, c->block_sz);
  free(c);
 }
 

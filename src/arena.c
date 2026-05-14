@@ -22,6 +22,15 @@
 #include <unistd.h>
 #include <pthread.h>
 
+#if defined(__SANITIZE_ADDRESS__)
+#  include <sanitizer/asan_interface.h>
+#elif defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    include <sanitizer/asan_interface.h>
+#    define __SANITIZE_ADDRESS__ 1
+#  endif
+#endif
+
 #if defined(__x86_64__) && defined(__AVX2__)
 #include <immintrin.h>
 #elif defined(__aarch64__) || defined(_M_ARM64)
@@ -139,6 +148,9 @@ static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
 					memory_order_relaxed);
 				size_t off = slab_data_offset();
 				void *ptr = (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
+#if defined(__SANITIZE_ADDRESS__)
+				__asan_unpoison_memory_region(ptr, g_slab_sizes[size_class]);
+#endif
 				__builtin_prefetch(ptr, 1, 3);
 				return ptr;
 			}
@@ -169,6 +181,9 @@ static void *slab_alloc_slot(struct arena_slab *slab, int size_class) {
 				int slot = word * 64 + bit;
 				size_t off = slab_data_offset();
 				void *ptr = (uint8_t *)slab + off + slot * g_slab_sizes[size_class];
+#if defined(__SANITIZE_ADDRESS__)
+				__asan_unpoison_memory_region(ptr, g_slab_sizes[size_class]);
+#endif
 				__builtin_prefetch(ptr, 1, 3);
 				return ptr;
 			}
@@ -206,6 +221,10 @@ static bool slab_free_slot(struct arena_slab *slab, void *ptr) {
 		&slab->bitmap[word], &old_bits, new_bits,
 		memory_order_release, memory_order_relaxed));
 	atomic_fetch_sub_explicit(&slab->used_count, 1, memory_order_relaxed);
+
+#if defined(__SANITIZE_ADDRESS__)
+	__asan_poison_memory_region(ptr, g_slab_sizes[slab->size_class]);
+#endif
 
 	uint32_t idx = atomic_fetch_add_explicit(&slab->free_top, 1,
 		memory_order_release);

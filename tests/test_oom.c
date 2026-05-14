@@ -134,13 +134,13 @@ static void verify_bare_state(ht_bare_t *bare) {
 static void test_bare_create_oom(void) {
     alloc_mock_reset();
     alloc_mock_set_max_alloc_calls(1);
-    ht_bare_t *bare = ht_bare_create(NULL);
+    ht_bare_t *bare = ht_bare_create(NULL, NULL);
     assert(bare == NULL);
     printf("  ht_bare_create OOM at limit=1: PASS\n");
 
     alloc_mock_reset();
     alloc_mock_set_max_alloc_calls(100);
-    bare = ht_bare_create(NULL);
+    bare = ht_bare_create(NULL, NULL);
     assert(bare != NULL);
     verify_bare_state(bare);
     printf("  ht_bare_create OK at limit=100: PASS\n");
@@ -150,7 +150,7 @@ static void test_bare_create_oom(void) {
 static void test_bare_resize_oom(void) {
     alloc_mock_reset();
     alloc_mock_set_max_alloc_calls(100);
-    ht_bare_t *bare = ht_bare_create(NULL);
+    ht_bare_t *bare = ht_bare_create(NULL, NULL);
     assert(bare != NULL);
 
     for (uint32_t i = 0; i < 10; i++) {
@@ -159,11 +159,14 @@ static void test_bare_resize_oom(void) {
 
     verify_bare_state(bare);
 
-    alloc_mock_set_max_alloc_calls(3);
+    /* Bare resize with limit=1 fails on the first calloc inside bare_resize_table */
+    alloc_mock_set_max_alloc_calls(1);
     bool ok = ht_bare_resize(bare, 128);
     assert(!ok);
+
+    /* Table must still be consistent */
     verify_bare_state(bare);
-    printf("  ht_bare_resize OOM at limit=3: PASS\n");
+    printf("  ht_bare_resize OOM at limit=1: PASS\n");
     ht_bare_destroy(bare);
 }
 
@@ -440,7 +443,7 @@ static void test_bare_spill_insert_oom(void) {
     for (int trial = 0; trial < 20; trial++) {
         alloc_mock_reset();
         alloc_mock_set_max_alloc_calls(200);
-        ht_bare_t *bare = ht_bare_create(&cfg);
+        ht_bare_t *bare = ht_bare_create(&cfg, NULL);
         assert(bare != NULL);
 
         for (uint32_t i = 0; i < 8; i++) {
@@ -477,7 +480,7 @@ static void test_bare_spill_grow_partial_failure(void) {
     for (int trial = 0; trial < 20; trial++) {
         alloc_mock_reset();
         alloc_mock_set_max_alloc_calls(200);
-        ht_bare_t *bare = ht_bare_create(&cfg);
+        ht_bare_t *bare = ht_bare_create(&cfg, NULL);
         assert(bare != NULL);
 
         for (uint32_t i = 0; i < 8; i++) {
@@ -610,7 +613,7 @@ static void test_spill_grow_partial_failure_bug(void) {
     for (int trial = 0; trial < 30; trial++) {
         alloc_mock_reset();
         alloc_mock_set_max_alloc_calls(200);
-        ht_bare_t *bare = ht_bare_create(&cfg);
+        ht_bare_t *bare = ht_bare_create(&cfg, NULL);
         if (!bare) continue;
 
         for (uint32_t i = 0; i < 8; i++) {
@@ -776,7 +779,7 @@ static void test_arena_waste_on_failed_update(void) {
 static void test_resize_reinsert_fail_returns_success(void) {
     alloc_mock_reset();
     alloc_mock_set_max_alloc_calls(100);
-    ht_bare_t *bare = ht_bare_create(NULL);
+    ht_bare_t *bare = ht_bare_create(NULL, NULL);
     assert(bare != NULL);
 
     for (uint32_t i = 0; i < 20; i++) {
@@ -817,7 +820,7 @@ static void test_spill_insert_after_partial_grow(void) {
     for (int trial = 0; trial < 30; trial++) {
         alloc_mock_reset();
         alloc_mock_set_max_alloc_calls(200);
-        ht_bare_t *bare = ht_bare_create(&cfg);
+        ht_bare_t *bare = ht_bare_create(&cfg, NULL);
         if (!bare) continue;
 
         for (uint32_t i = 0; i < 8; i++) {

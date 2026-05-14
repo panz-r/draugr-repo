@@ -82,7 +82,7 @@ static void test_next_pow2(void) {
 static void test_bare_compute_x(void) {
     printf("Test: bare_compute_x formula...\n");
     ht_config_t cfg = { .initial_capacity = 64 };
-    ht_bare_t *t = ht_bare_create(&cfg);
+    ht_bare_t *t = ht_bare_create(&cfg, NULL);
     assert(t != NULL);
 
     // Empty table: load_factor = 0 → x = 1.0
@@ -123,7 +123,7 @@ static void test_bare_compute_x(void) {
 static void test_bare_spill_remove_val(void) {
     printf("Test: bare_spill_remove_val specific value...\n");
     ht_config_t cfg = { .initial_capacity = 8 };
-    ht_bare_t *t = ht_bare_create(&cfg);
+    ht_bare_t *t = ht_bare_create(&cfg, NULL);
     assert(t != NULL);
 
     // Insert two spill entries with h48=0 (hash 0 and 1 both go to spill)
@@ -158,7 +158,7 @@ static void test_bare_spill_remove_val(void) {
 static void test_bare_verify_ideal_safe(void) {
     printf("Test: bare_verify_ideal_safe...\n");
     ht_config_t cfg = { .initial_capacity = 64, .zombie_window = 0 };
-    ht_bare_t *t = ht_bare_create(&cfg);
+    ht_bare_t *t = ht_bare_create(&cfg, NULL);
     assert(t != NULL);
 
     // Insert 3 entries with fixed hash=42, different values
@@ -186,7 +186,7 @@ static void test_bare_verify_ideal_safe(void) {
 static void test_bare_commit_backward_shift(void) {
     printf("Test: bare_commit_backward_shift...\n");
     ht_config_t cfg = { .initial_capacity = 32, .zombie_window = 0 };
-    ht_bare_t *t = ht_bare_create(&cfg);
+    ht_bare_t *t = ht_bare_create(&cfg, NULL);
     assert(t != NULL);
 
     // Insert colliding entries
@@ -224,7 +224,7 @@ static void test_bare_delete_compact_outcomes(void) {
     // Outcome C: chain too long (> BSHIFT_CAP=16), must tombstone
     {
         ht_config_t cfg = { .initial_capacity = 32, .zombie_window = 0 };
-        ht_bare_t *t = ht_bare_create(&cfg);
+        ht_bare_t *t = ht_bare_create(&cfg, NULL);
         assert(t != NULL);
 
         // Insert 20 colliding entries in main table (all hash to same ideal pos)
@@ -436,7 +436,7 @@ static void test_bare_reinsert_spill(void) {
 static void test_bare_rh_insert_bounded(void) {
     printf("Test: bare_rh_insert core algorithm...\n");
     ht_config_t cfg = { .initial_capacity = 8 };
-    ht_bare_t *t = ht_bare_create(&cfg);
+    ht_bare_t *t = ht_bare_create(&cfg, NULL);
     assert(t != NULL);
 
     // Insert 5 entries - should work without collision handling
@@ -471,7 +471,7 @@ static void test_bare_rh_insert_bounded(void) {
 static void test_bare_spill_grow_insert(void) {
     printf("Test: bare_spill_grow and bare_spill_insert...\n");
     ht_config_t cfg = { .initial_capacity = 8 };
-    ht_bare_t *t = ht_bare_create(&cfg);
+    ht_bare_t *t = ht_bare_create(&cfg, NULL);
     assert(t != NULL);
 
     // Initial spill capacity is 8 (SPILL_INITIAL)
@@ -646,7 +646,7 @@ static void test_spill_lane_at_capacity(void) {
 static void test_bare_spill_find_all(void) {
     printf("Test: bare_spill_find_all...\n");
     ht_config_t cfg = { .initial_capacity = 8 };
-    ht_bare_t *t = ht_bare_create(&cfg);
+    ht_bare_t *t = ht_bare_create(&cfg, NULL);
     assert(t != NULL);
 
     /* Insert entries with hash=0 (spill lane) */

@@ -126,6 +126,7 @@ struct ht_bare {
     size_t spill_cap;
     size_t spill_len;
     bool spill_in_block;
+    void *allocator;
 
     double max_load_factor;
     double min_load_factor;
@@ -152,6 +153,7 @@ struct ht_table {
     uint8_t *table_block;
     size_t entry_count;
     size_t entry_cap;
+    size_t table_block_sz;
     bool entries_in_block;
 
     struct arena *allocator;

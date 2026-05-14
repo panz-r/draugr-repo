@@ -29,6 +29,8 @@ extern "C" {
 
 struct ht_cache {
  ht_bare_t *bare;
+ void      *allocator;
+ size_t     block_sz;
 
  uint8_t *cache_block;
  uint8_t *entries;

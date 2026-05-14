@@ -61,7 +61,7 @@ typedef bool (*ht_dup_callback)(const void *key, size_t key_len,
 // Note: UINT32_MAX (0xFFFFFFFF) is reserved and cannot be stored as a value.
 typedef bool (*ht_bare_callback)(uint32_t val, void *user_ctx);
 
-ht_bare_t *ht_bare_create(const ht_config_t *cfg);
+ht_bare_t *ht_bare_create(const ht_config_t *cfg, struct arena *arena);
 void ht_bare_destroy(ht_bare_t *t);
 void ht_bare_clear(ht_bare_t *t);
 

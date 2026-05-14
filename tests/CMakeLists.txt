@@ -56,6 +56,10 @@ add_executable(test_internal test_internal.c)
 target_link_libraries(test_internal draugr)
 add_test(NAME ht_internal_tests COMMAND test_internal)
 
+add_executable(test_htc test_htc.c)
+target_link_libraries(test_htc draugr)
+add_test(NAME htc_phase1_tests COMMAND test_htc)
+
 # These tests use --wrap to intercept stdlib allocators
 # In DRAUGR_USE_MALLOC mode, --wrap tests still work (they intercept real malloc)
 set(WRAP_TEST_COMMON ../src/ht.c ../src/ht_cache.c ../src/util.c)
@@ -77,14 +81,23 @@ target_link_options(test_bugs PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wrap,rea
 target_link_libraries(test_bugs m)
 add_test(NAME ht_bugs_tests COMMAND test_bugs)
 
-add_executable(test_property test_property.c)
-target_sources(test_property PRIVATE ${WRAP_TEST_COMMON})
-target_include_directories(test_property PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_link_options(test_property PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wrap,realloc,--wrap,free)
-target_link_libraries(test_property m)
-add_test(NAME ht_property_tests COMMAND test_property)
+set(PROPERTY_UTILS property_utils.c)
 
-add_executable(test_property_b test_property_b.c)
+add_executable(test_property_a test_property_a.c ${PROPERTY_UTILS})
+target_sources(test_property_a PRIVATE ${WRAP_TEST_COMMON})
+target_include_directories(test_property_a PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_options(test_property_a PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wrap,realloc,--wrap,free)
+target_link_libraries(test_property_a m)
+add_test(NAME ht_property_tests_a COMMAND test_property_a)
+
+add_executable(test_property_c test_property_c.c ${PROPERTY_UTILS})
+target_sources(test_property_c PRIVATE ${WRAP_TEST_COMMON})
+target_include_directories(test_property_c PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_options(test_property_c PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wrap,realloc,--wrap,free)
+target_link_libraries(test_property_c m)
+add_test(NAME ht_property_tests_c COMMAND test_property_c)
+
+add_executable(test_property_b test_property_b.c ${PROPERTY_UTILS})
 target_sources(test_property_b PRIVATE ${WRAP_TEST_COMMON})
 target_include_directories(test_property_b PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_options(test_property_b PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wrap,realloc,--wrap,free)

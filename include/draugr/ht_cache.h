@@ -9,6 +9,8 @@
 extern "C" {
 #endif
 
+struct arena;
+
 typedef struct ht_cache ht_cache_t;
 
 /* Thread safety: ht_cache_t is NOT thread-safe. All operations require
@@ -31,6 +33,7 @@ typedef struct {
 } ht_cache_config_t;
 
 ht_cache_t *ht_cache_create(const ht_cache_config_t *cfg);
+ht_cache_t *ht_cache_create_with_arena(const ht_cache_config_t *cfg, struct arena *arena);
 void        ht_cache_destroy(ht_cache_t *c);
 void        ht_cache_clear(ht_cache_t *c);
 

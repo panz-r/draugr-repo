@@ -194,7 +194,7 @@ static void test_tombstone_counter_drift_removes(void) {
     };
 
     for (int trial = 0; trial < 20; trial++) {
-        ht_bare_t *bare = ht_bare_create(&cfg);
+        ht_bare_t *bare = ht_bare_create(&cfg, NULL);
         if (!bare) continue;
 
         for (int i = 0; i < 8; i++) {
@@ -235,7 +235,7 @@ static void test_tombstone_counter_drift_compact(void) {
     };
 
     for (int trial = 0; trial < 20; trial++) {
-        ht_bare_t *bare = ht_bare_create(&cfg);
+        ht_bare_t *bare = ht_bare_create(&cfg, NULL);
         if (!bare) continue;
 
         for (int i = 0; i < 6; i++) {
@@ -281,7 +281,7 @@ static void test_zombie_disabled_tombstone_accumulation(void) {
         .zombie_window = 0,
     };
 
-    ht_bare_t *bare = ht_bare_create(&cfg);
+    ht_bare_t *bare = ht_bare_create(&cfg, NULL);
     assert(bare);
 
     for (int i = 0; i < 20; i++) {
@@ -484,7 +484,7 @@ static void test_multi_pass_tombstone_accumulation(void) {
     };
 
     for (int round = 0; round < 5; round++) {
-        ht_bare_t *bare = ht_bare_create(&cfg);
+        ht_bare_t *bare = ht_bare_create(&cfg, NULL);
         if (!bare) continue;
 
         for (int i = 0; i < 8; i++) {
@@ -529,7 +529,7 @@ static void test_long_probe_chain_with_deletes(void) {
     };
 
     for (int trial = 0; trial < 20; trial++) {
-        ht_bare_t *bare = ht_bare_create(&cfg);
+        ht_bare_t *bare = ht_bare_create(&cfg, NULL);
         if (!bare) continue;
 
         for (int i = 0; i < 6; i++) {
