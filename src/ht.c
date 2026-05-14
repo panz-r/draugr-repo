@@ -330,35 +330,6 @@ void bare_delete_compact(ht_bare_t *t, size_t idx) {
 // Bare Internal: Zombie Step
 // ============================================================================
 
-void bare_zombie_step(ht_bare_t *t) {
-    if (t->zombie_window == 0) return;
-
-    double x = bare_compute_x(t);
-    size_t step = (size_t)(x * C_B_DEFAULT);
-    if (step < t->zombie_window) step = t->zombie_window;
-    if (step > t->capacity) step = t->capacity;
-
-    size_t cap_mask = t->capacity - 1;
-
-    for (size_t n = 0; n < step; n++) {
-        size_t idx = t->zombie_cursor;
-        uint64_t hpd = t->hash_pd[idx];
-
-        double prim_spacing = x * C_P_DEFAULT;
-        size_t spacing = (size_t)prim_spacing;
-        if (spacing < 2) spacing = 2;
-        bool is_prim = (idx % spacing == 0);
-
-        if (hpd_tomb(hpd)) {
-            // Non-primitive tombstone: skip
-        } else if (is_prim && hpd_empty(hpd) && t->size > 0) {
-            // Don't place primitive tombstones during zombie scan
-        }
-
-        t->zombie_cursor = (idx + 1) & cap_mask;
-    }
-}
-
 // ============================================================================
 // Bare Internal: Prophylactic Tombstones & Reinsert
 // ============================================================================
@@ -452,7 +423,6 @@ void ht_bare_clear(ht_bare_t *t) {
     t->size = 0;
     t->tombstone_cnt = 0;
     t->spill_len = 0;
-    t->zombie_cursor = 0;
 }
 
 // ============================================================================
@@ -474,14 +444,7 @@ bool ht_bare_insert(ht_bare_t *t, uint64_t hash, uint32_t val) {
         }
     }
 
-    double total = (double)t->size + (double)t->tombstone_cnt;
-    if (total > 0 && (double)t->tombstone_cnt / total > t->tomb_threshold) {
-        for (int i = 0; i < 4; i++) bare_zombie_step(t);
-    }
-
     bool result = bare_rh_insert(t, h48, val);
-
-    if (result) bare_zombie_step(t);
 
     return result;
 }
@@ -711,7 +674,6 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
   t->spill_cap = new_spill_cap;
   t->spill_len = 0;
   t->spill_in_block = false;
-  t->zombie_cursor = 0;
 
   bare_reinsert_main(t, old_hash_pd, old_vals, old_cap);
   bare_reinsert_spill(t, old_spill_hash_pd, old_spill_vals, old_spill_len);
@@ -762,7 +724,6 @@ void ht_bare_compact(ht_bare_t *t) {
   t->spill_cap = new_spill_cap;
   t->spill_len = 0;
   t->spill_in_block = false;
-  t->zombie_cursor = 0;
 
   bare_reinsert_main(t, old_hash_pd, old_vals, old_cap);
   bare_reinsert_spill(t, old_spill_hash_pd, old_spill_vals, old_spill_len);
@@ -992,11 +953,12 @@ static uint32_t alloc_entry(ht_table_t *t, uint16_t hash_hi,
         t->entry_cap = new_cap;
     }
 
-    void *data = kv_alloc(t, key_len + value_len);
+    size_t klen_stor = ht_entry_key_storage(key_len);
+    void *data = kv_alloc(t, klen_stor + value_len);
     if (!data) return VAL_NONE;
     memcpy(data, key, key_len);
     if (value_len > 0) {
-        memcpy((uint8_t *)data + key_len, value, value_len);
+        memcpy((uint8_t *)data + klen_stor, value, value_len);
     }
 
     uint32_t eidx = (uint32_t)t->entry_count++;
@@ -1011,14 +973,15 @@ static bool update_entry_value(ht_table_t *t, uint32_t eidx,
                                const void *key, size_t key_len,
                                const void *value, size_t value_len) {
     ht_entry_t *e = &t->entries[eidx];
+    size_t klen_stor = ht_entry_key_storage(key_len);
     if (value_len == e->val_len) {
-        memcpy(e->kv_ptr + e->key_len, value, value_len);
+        memcpy(e->kv_ptr + klen_stor, value, value_len);
         return true;
     }
-    void *data = kv_alloc(t, key_len + value_len);
+    void *data = kv_alloc(t, klen_stor + value_len);
     if (!data) return false;
     memcpy(data, key, key_len);
-    memcpy((uint8_t *)data + key_len, value, value_len);
+    memcpy((uint8_t *)data + klen_stor, value, value_len);
     if (!t->allocator)
         free(e->kv_ptr);
     e->val_len = (uint32_t)value_len;
@@ -1063,13 +1026,29 @@ struct hl_key_scan_ctx {
     uint32_t *matches;
     size_t match_count;
     size_t match_cap;
+    uint32_t stack_matches[64];
 };
+
+static bool hl_key_scan_cb_grow(struct hl_key_scan_ctx *ctx) {
+    if (ctx->match_count < ctx->match_cap)
+        return true;
+    size_t new_cap = ctx->match_cap * 2;
+    uint32_t *new_matches = realloc(
+        ctx->matches == ctx->stack_matches ? NULL : ctx->matches,
+        new_cap * sizeof(uint32_t));
+    if (!new_matches) return false;
+    if (ctx->matches == ctx->stack_matches)
+        memcpy(new_matches, ctx->stack_matches, ctx->match_count * sizeof(uint32_t));
+    ctx->matches = new_matches;
+    ctx->match_cap = new_cap;
+    return true;
+}
 
 static bool hl_key_scan_cb(uint32_t val, void *user_ctx) {
     struct hl_key_scan_ctx *ctx = user_ctx;
     if (keys_match(ctx->t, val, ctx->hash_hi, ctx->key, ctx->key_len)) {
-        if (ctx->match_count < ctx->match_cap)
-            ctx->matches[ctx->match_count++] = val;
+        if (!hl_key_scan_cb_grow(ctx)) return false;
+        ctx->matches[ctx->match_count++] = val;
     }
     return true;
 }
@@ -1305,20 +1284,23 @@ static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
 
     // Phase 1: Scan for existing entries (UPSERT/UNIQUE only)
     if (mode == INS_UPSERT) {
-        uint32_t matches[64];
         struct hl_key_scan_ctx ctx = {
             .t = t, .hash_hi = hash_hi, .key = key, .key_len = key_len,
-            .matches = matches, .match_count = 0, .match_cap = 64,
+            .matches = ctx.stack_matches, .match_count = 0, .match_cap = 64,
         };
         ht_bare_find_all(&t->bare, hash, hl_key_scan_cb, &ctx);
 
         if (ctx.match_count > 0) {
-            if (!update_entry_value(t, ctx.matches[0], key, key_len, value, value_len))
-                return HT_INSERT_FAILED;
+            bool ok = update_entry_value(t, ctx.matches[0], key, key_len, value, value_len);
+            if (ctx.matches != ctx.stack_matches)
+                free(ctx.matches);
+            if (!ok) return HT_INSERT_FAILED;
             for (size_t i = 1; i < ctx.match_count; i++)
                 ht_bare_remove_val(&t->bare, hash, ctx.matches[i]);
             return HT_INSERT_UPDATE;
         }
+        if (ctx.matches != ctx.stack_matches)
+            free(ctx.matches);
     } else if (mode == INS_UNIQUE) {
         struct hl_kv_scan_ctx ctx = {
             .t = t, .hash_hi = hash_hi, .key = key, .key_len = key_len,
@@ -1341,11 +1323,6 @@ static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
         }
     }
 
-    double total = (double)b->size + (double)b->tombstone_cnt;
-    if (total > 0 && (double)b->tombstone_cnt / total > b->tomb_threshold) {
-        for (int i = 0; i < 4; i++) bare_zombie_step(b);
-    }
-
     uint32_t eidx = alloc_entry(t, hash_hi, key, key_len, value, value_len);
     if (eidx == VAL_NONE) return HT_INSERT_FAILED;
 
@@ -1354,8 +1331,6 @@ static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
         result = bare_spill_insert(b, h48, eidx);
     else
         result = bare_rh_insert(b, h48, eidx);
-
-    if (result) bare_zombie_step(b);
 
     return result ? HT_INSERT_OK : HT_INSERT_FAILED;
 }
@@ -1550,17 +1525,19 @@ size_t ht_remove_with_hash(ht_table_t *t, uint64_t hash,
                             const void *key, size_t key_len) {
     if (!t || !key) return 0;
 
-    uint32_t matches[64];
     struct hl_key_scan_ctx ctx = {
         .t = t, .hash_hi = (uint16_t)(hash >> 48),
         .key = key, .key_len = key_len,
-        .matches = matches, .match_count = 0, .match_cap = 64,
+        .matches = ctx.stack_matches, .match_count = 0, .match_cap = 64,
     };
     ht_bare_find_all(&t->bare, hash, hl_key_scan_cb, &ctx);
 
     size_t removed = ctx.match_count;
     for (size_t i = 0; i < ctx.match_count; i++)
         ht_bare_remove_val(&t->bare, hash, ctx.matches[i]);
+
+    if (ctx.matches != ctx.stack_matches)
+        free(ctx.matches);
 
     if (removed > 0 && t->bare.min_load_factor > 0 && t->bare.size > 0 &&
         (double)t->bare.size / (double)t->bare.capacity < t->bare.min_load_factor &&
@@ -1585,22 +1562,24 @@ size_t ht_remove_kv_with_hash(ht_table_t *t, uint64_t hash,
     if (!t || !key || !value) return 0;
 
     // Collect entries matching key
-    uint32_t key_matches[64];
     struct hl_key_scan_ctx kctx = {
         .t = t, .hash_hi = (uint16_t)(hash >> 48),
         .key = key, .key_len = key_len,
-        .matches = key_matches, .match_count = 0, .match_cap = 64,
+        .matches = kctx.stack_matches, .match_count = 0, .match_cap = 64,
     };
     ht_bare_find_all(&t->bare, hash, hl_key_scan_cb, &kctx);
 
     // Filter by value match and remove
     size_t removed = 0;
     for (size_t i = 0; i < kctx.match_count; i++) {
-        if (vals_match(t, key_matches[i], value, value_len)) {
-            ht_bare_remove_val(&t->bare, hash, key_matches[i]);
+        if (vals_match(t, kctx.matches[i], value, value_len)) {
+            ht_bare_remove_val(&t->bare, hash, kctx.matches[i]);
             removed++;
         }
     }
+
+    if (kctx.matches != kctx.stack_matches)
+        free(kctx.matches);
 
     return removed;
 }
@@ -1617,17 +1596,16 @@ bool ht_remove_kv_one_with_hash(ht_table_t *t, uint64_t hash,
                                 const void *value, size_t value_len) {
     if (!t || !key || !value) return false;
 
-    uint32_t matches[64];
     struct hl_key_scan_ctx ctx = {
         .t = t, .hash_hi = (uint16_t)(hash >> 48),
         .key = key, .key_len = key_len,
-        .matches = matches, .match_count = 0, .match_cap = 64,
+        .matches = ctx.stack_matches, .match_count = 0, .match_cap = 64,
     };
     ht_bare_find_all(&t->bare, hash, hl_key_scan_cb, &ctx);
 
     for (size_t i = 0; i < ctx.match_count; i++) {
-        if (vals_match(t, matches[i], value, value_len)) {
-            ht_bare_remove_val(&t->bare, hash, matches[i]);
+        if (vals_match(t, ctx.matches[i], value, value_len)) {
+            ht_bare_remove_val(&t->bare, hash, ctx.matches[i]);
 
             if (t->bare.min_load_factor > 0 && t->bare.size > 0 &&
                 (double)t->bare.size / (double)t->bare.capacity < t->bare.min_load_factor &&
@@ -1637,10 +1615,14 @@ bool ht_remove_kv_one_with_hash(ht_table_t *t, uint64_t hash,
                     ht_resize(t, new_cap);
             }
 
+            if (ctx.matches != ctx.stack_matches)
+                free(ctx.matches);
             return true;
         }
     }
 
+    if (ctx.matches != ctx.stack_matches)
+        free(ctx.matches);
     return false;
 }
 
@@ -1704,7 +1686,6 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
     tmp_b.spill_vals = new_spill_vals;
     tmp_b.spill_cap = new_spill_cap;
     tmp_b.spill_len = 0;
-    tmp_b.zombie_cursor = 0;
 
     bool ok = true;
     for (size_t i = 0; i < old_cap && ok; i++) {
@@ -1723,10 +1704,11 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
             tmp_entry_cap = grow;
         }
 
-        void *data = kv_alloc(t, e->key_len + e->val_len);
+        size_t klen_stor = ht_entry_key_storage(e->key_len);
+        void *data = kv_alloc(t, klen_stor + e->val_len);
         if (!data) { ok = false; break; }
         memcpy(data, ht_entry_key(e), e->key_len);
-        if (e->val_len > 0) memcpy((uint8_t *)data + e->key_len, ht_entry_val(e), e->val_len);
+        if (e->val_len > 0) memcpy((uint8_t *)data + klen_stor, ht_entry_val(e), e->val_len);
 
         uint32_t new_eidx = (uint32_t)tmp_entry_count++;
         tmp_entries[new_eidx] = *e;
@@ -1754,10 +1736,11 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
             tmp_entry_cap = grow;
         }
 
-        void *data = kv_alloc(t, e->key_len + e->val_len);
+        size_t klen_stor = ht_entry_key_storage(e->key_len);
+        void *data = kv_alloc(t, klen_stor + e->val_len);
         if (!data) { ok = false; break; }
         memcpy(data, ht_entry_key(e), e->key_len);
-        if (e->val_len > 0) memcpy((uint8_t *)data + e->key_len, ht_entry_val(e), e->val_len);
+        if (e->val_len > 0) memcpy((uint8_t *)data + klen_stor, ht_entry_val(e), e->val_len);
 
         uint32_t new_eidx = (uint32_t)tmp_entry_count++;
         tmp_entries[new_eidx] = *e;

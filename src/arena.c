@@ -305,11 +305,55 @@ bool slab_set_contains(struct arena_slab_set *set, void *ptr) {
 /* ══════════════════════════════════════════════════════════════════
    THREAD CACHE
    Per-thread free-list sharding (mimalloc-inspired).
+   Uses pthread_key for truly per-thread caches, linked-list
+   tracked so arena_destroy/arena_clear can flush all.
    ══════════════════════════════════════════════════════════════════ */
 
+struct tcache_node {
+    struct tcache_node *next;
+    struct arena_tcache tc;
+};
+
+static pthread_key_t tcache_key;
+static pthread_once_t tcache_key_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t tcache_list_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct tcache_node *tcache_list;
+
+static void tcache_destroy(void *ptr) {
+    struct tcache_node *node = ptr;
+    if (!node) return;
+    for (int b = 0; b < ARENA_TCACHE_BINS; b++)
+        pthread_mutex_destroy(&node->tc.bins[b].lock);
+    pthread_mutex_lock(&tcache_list_lock);
+    struct tcache_node **pp = &tcache_list;
+    while (*pp) {
+        if (*pp == node) { *pp = node->next; break; }
+        pp = &(*pp)->next;
+    }
+    pthread_mutex_unlock(&tcache_list_lock);
+    free(node);
+}
+
+static void tcache_key_init_once(void) {
+    pthread_key_create(&tcache_key, tcache_destroy);
+}
+
 static struct arena_tcache *tcache_get(struct arena *a) {
-    if (!a->thread_caches || a->tcache_count == 0) return NULL;
-    return &a->thread_caches[0];
+    (void)a;
+    pthread_once(&tcache_key_once, tcache_key_init_once);
+    struct tcache_node *node = pthread_getspecific(tcache_key);
+    if (ARENA_UNLIKELY(!node)) {
+        node = calloc(1, sizeof(*node));
+        if (!node) return NULL;
+        for (int b = 0; b < ARENA_TCACHE_BINS; b++)
+            pthread_mutex_init(&node->tc.bins[b].lock, NULL);
+        pthread_setspecific(tcache_key, node);
+        pthread_mutex_lock(&tcache_list_lock);
+        node->next = tcache_list;
+        tcache_list = node;
+        pthread_mutex_unlock(&tcache_list_lock);
+    }
+    return &node->tc;
 }
 
 static void *tcache_try_get(struct arena *a, int sc) {
@@ -347,17 +391,17 @@ static void tcache_put(struct arena *a, void *ptr, int sc) {
 }
 
 static void tcache_clear(struct arena *a) {
-    if (!a->thread_caches) return;
-    for (size_t n = 0; n < a->tcache_count; n++) {
-        struct arena_tcache *tc = &a->thread_caches[n];
+    (void)a;
+    pthread_mutex_lock(&tcache_list_lock);
+    for (struct tcache_node *n = tcache_list; n; n = n->next) {
         for (int b = 0; b < ARENA_TCACHE_BINS; b++) {
-            struct arena_tcache_bin *bin = &tc->bins[b];
-            pthread_mutex_lock(&bin->lock);
-            bin->count = 0;
-            memset(bin->entries, 0, sizeof(bin->entries));
-            pthread_mutex_unlock(&bin->lock);
+            pthread_mutex_lock(&n->tc.bins[b].lock);
+            n->tc.bins[b].count = 0;
+            memset(n->tc.bins[b].entries, 0, sizeof(n->tc.bins[b].entries));
+            pthread_mutex_unlock(&n->tc.bins[b].lock);
         }
     }
+    pthread_mutex_unlock(&tcache_list_lock);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -390,7 +434,7 @@ static void sys_alloc_track(void *ptr, size_t size) {
     pthread_mutex_unlock(&sys_alloc_lock);
 }
 
-static void sys_alloc_untrack(void *ptr) {
+static void sys_alloc_untrack(const void *ptr) {
     pthread_mutex_lock(&sys_alloc_lock);
     for (size_t i = 0; i < sys_alloc_count; i++) {
         if (sys_alloc_records[i].ptr == ptr) {
@@ -487,17 +531,27 @@ static void *seg_alloc(struct arena_segment *seg, size_t size) {
 			consecutive++;
 			if (consecutive == 1) start_slot = i;
 			if (consecutive >= slots_needed) {
-				for (size_t j = start_slot; j < start_slot + slots_needed; j++) {
+				size_t j;
+				for (j = start_slot; j < start_slot + slots_needed; j++) {
 					unsigned w = (unsigned)(j / 64);
 					unsigned b = (unsigned)(j % 64);
 					uint64_t old_b, new_b;
 					do {
 						old_b = atomic_load_explicit(&bm[w], memory_order_relaxed);
-						if (!(old_b & (1ULL << b))) goto retry_scan;
+						if (!(old_b & (1ULL << b))) {
+							for (size_t k = start_slot; k < j; k++) {
+								unsigned kw = (unsigned)(k / 64);
+								unsigned kb = (unsigned)(k % 64);
+								atomic_fetch_or_explicit(&bm[kw], 1ULL << kb,
+									memory_order_relaxed);
+							}
+							consecutive = 0;
+							goto retry_scan;
+						}
 						new_b = old_b & ~(1ULL << b);
-		} while (!atomic_compare_exchange_strong_explicit(
-			&bm[w], &old_b, new_b,
-			memory_order_relaxed, memory_order_relaxed));
+					} while (!atomic_compare_exchange_strong_explicit(
+						&bm[w], &old_b, new_b,
+						memory_order_relaxed, memory_order_relaxed));
 				}
 
 				uint64_t ctrl = atomic_load_explicit(&seg->hdr.control,
@@ -644,7 +698,6 @@ static void tuner_adapt(struct arena *a) {
     for (int i = 32; i < 64; i++) total_large += t->hist[i];
 
     uint64_t total = t->sample_count;
-    if (total == 0) return;
 
     if (total_small * 100 / total > 70) {
         a->config.warm_threshold = 8;
@@ -678,21 +731,6 @@ struct arena *arena_create(size_t initial_capacity) {
     a->config.enable_prefetch = 1;
     a->config.enable_thread_cache = 1;
     a->config.enable_adaptive_tuning = 1;
-
-    if (a->config.enable_thread_cache) {
-        a->tcache_count = 1;
-        a->thread_caches = calloc(a->tcache_count, sizeof(struct arena_tcache));
-        if (!a->thread_caches) {
-            a->tcache_count = 0;
-            a->config.enable_thread_cache = 0;
-        } else {
-            for (size_t i = 0; i < a->tcache_count; i++) {
-                for (int b = 0; b < ARENA_TCACHE_BINS; b++) {
-                    pthread_mutex_init(&a->thread_caches[i].bins[b].lock, NULL);
-                }
-            }
-        }
-    }
 
 	for (int sc = 0; sc < ARENA_SLAB_SIZES; sc++) {
 		a->arenas[ARENA_FREQ_WARM][sc].u.slabs = calloc(1, sizeof(struct arena_slab_set));
@@ -771,14 +809,6 @@ void arena_destroy(struct arena *a) {
         }
     }
 
-    if (a->thread_caches) {
-        for (size_t i = 0; i < a->tcache_count; i++) {
-            for (int b = 0; b < ARENA_TCACHE_BINS; b++) {
-                pthread_mutex_destroy(&a->thread_caches[i].bins[b].lock);
-            }
-        }
-    }
-    free(a->thread_caches);
     free(a);
 }
 
@@ -861,6 +891,10 @@ void *arena_realloc(struct arena *a, void *ptr, size_t old_size, size_t new_size
         return NULL;
     }
     if (!ptr) return arena_alloc(a, new_size);
+
+    if (old_size <= 128 && new_size <= 128 &&
+        size_to_slab_class(old_size) == size_to_slab_class(new_size))
+        return ptr;
 
     void *new_ptr = arena_alloc(a, new_size);
     if (!new_ptr) return NULL;

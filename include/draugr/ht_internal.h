@@ -93,12 +93,16 @@ typedef struct {
 	uint8_t *kv_ptr;
 } ht_entry_t;
 
+static inline size_t ht_entry_key_storage(size_t key_len) {
+	return (key_len + 7) & ~(size_t)7;
+}
+
 static inline const void *ht_entry_key(const ht_entry_t *e) {
 	return e->kv_ptr;
 }
 
 static inline const void *ht_entry_val(const ht_entry_t *e) {
-	return e->kv_ptr + e->key_len;
+	return e->kv_ptr + ht_entry_key_storage(e->key_len);
 }
 
 // ============================================================================
@@ -124,8 +128,6 @@ struct ht_bare {
     double min_load_factor;
     double tomb_threshold;
     size_t zombie_window;
-
-    size_t zombie_cursor;
 
     bool resizing;
 };
@@ -172,7 +174,6 @@ bool    bare_verify_ideal_safe(const ht_bare_t *t, size_t idx, size_t len);
 void    bare_commit_backward_shift(ht_bare_t *t, size_t idx, size_t len);
 void    bare_delete_compact(ht_bare_t *t, size_t idx);
 
-void    bare_zombie_step(ht_bare_t *t);
 void    bare_place_prophylactic_tombstones(ht_bare_t *t);
 void    bare_reinsert_main(ht_bare_t *t,
                            const uint64_t *old_hash_pd,

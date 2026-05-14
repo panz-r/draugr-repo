@@ -147,9 +147,6 @@ struct arena {
         size_t count;
     } arenas[ARENA_FREQ_COUNT][ARENA_SLAB_SIZES];
 
-    struct arena_tcache *thread_caches;
-    size_t tcache_count;
-
     struct arena_deferred *deferred;
 
     struct arena_epoch_ctl epoch_ctl;
