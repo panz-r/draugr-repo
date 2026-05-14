@@ -77,6 +77,9 @@ static inline uint64_t hpd_pack(uint64_t hash, uint16_t probe_dist) {
 #define SPILL_INITIAL   8
 #define BSHIFT_CAP      16
 
+// Overflow stash capacity (fixed, embedded in ht_bare_t)
+#define HT_OVERFLOW_STASH_CAP 32
+
 // Insert modes (internal)
 #define INS_UPSERT  0
 #define INS_ALWAYS  1
@@ -128,7 +131,13 @@ struct ht_bare {
     double min_load_factor;
     double tomb_threshold;
     size_t zombie_window;
+    size_t max_probe_dist;
 
+    size_t overflow_len;
+    uint64_t overflow_hash_pd[HT_OVERFLOW_STASH_CAP];
+    uint32_t overflow_vals[HT_OVERFLOW_STASH_CAP];
+
+    bool overflow_violated;  // Policy B was triggered; entries may have dist > max_probe_dist
     bool resizing;
 };
 
@@ -168,7 +177,7 @@ size_t  bare_spill_remove(ht_bare_t *t, uint64_t h48);
 bool    bare_spill_remove_val(ht_bare_t *t, uint64_t h48, uint32_t val);
 
 bool    bare_resize_table(ht_bare_t *t);
-bool    bare_rh_insert(ht_bare_t *t, uint64_t h48, uint32_t val);
+bool    bare_rh_insert_bounded(ht_bare_t *t, uint64_t h48, uint32_t val);
 
 bool    bare_verify_ideal_safe(const ht_bare_t *t, size_t idx, size_t len);
 void    bare_commit_backward_shift(ht_bare_t *t, size_t idx, size_t len);

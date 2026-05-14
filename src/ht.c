@@ -39,6 +39,7 @@ static const ht_config_t default_cfg = {
     .min_load_factor = 0.20,
     .tomb_threshold = 0.20,
     .zombie_window = 16,
+    .max_probe_dist = 255,
 };
 
 #define INS_UPSERT 0
@@ -185,7 +186,138 @@ bool bare_spill_remove_val(ht_bare_t *t, uint64_t h48, uint32_t val) {
 // Bare Internal: Robin-Hood Insert (always-add)
 // ============================================================================
 
-bool bare_rh_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
+static bool bare_rh_insert_unbounded(ht_bare_t *t, uint64_t h48, uint32_t val);
+
+static bool overflow_stash_insert(ht_bare_t *t, uint64_t h48, uint32_t val) {
+ if (t->overflow_len >= HT_OVERFLOW_STASH_CAP) return false;
+ t->overflow_hash_pd[t->overflow_len] = hpd_pack(h48, 0);
+ t->overflow_vals[t->overflow_len] = val;
+ t->overflow_len++;
+ t->size++;
+ return true;
+}
+
+static bool overflow_stash_remove_val(ht_bare_t *t, uint64_t h48, uint32_t val) {
+ for (size_t i = 0; i < t->overflow_len; i++) {
+  if (hpd_hash(t->overflow_hash_pd[i]) == h48 && t->overflow_vals[i] == val) {
+   t->overflow_len--;
+   t->overflow_hash_pd[i] = t->overflow_hash_pd[t->overflow_len];
+   t->overflow_vals[i] = t->overflow_vals[t->overflow_len];
+   t->size--;
+   return true;
+  }
+ }
+ return false;
+}
+
+static size_t overflow_stash_remove(ht_bare_t *t, uint64_t h48) {
+ size_t w = 0;
+ for (size_t i = 0; i < t->overflow_len; i++) {
+  if (hpd_hash(t->overflow_hash_pd[i]) == h48) {
+   t->size--;
+   continue;
+  }
+  if (i != w) {
+   t->overflow_hash_pd[w] = t->overflow_hash_pd[i];
+   t->overflow_vals[w] = t->overflow_vals[i];
+  }
+  w++;
+ }
+ size_t removed = t->overflow_len - w;
+ t->overflow_len = w;
+ return removed;
+}
+
+bool bare_rh_insert_bounded(ht_bare_t *t, uint64_t h48, uint32_t val) {
+ size_t cap_mask = t->capacity - 1;
+ size_t ideal = h48 & cap_mask;
+
+ uint32_t cur_val = val;
+ size_t idx = ideal;
+ uint16_t dist = 0;
+
+ while (1) {
+ uint64_t slot_hpd = t->hash_pd[idx];
+
+ if (hpd_available(slot_hpd)) {
+ if (hpd_tomb(slot_hpd)) {
+ bool blocked = false;
+ for (size_t k = 1; k <= BSHIFT_CAP; k++) {
+ size_t chk = (idx + k) & cap_mask;
+ uint64_t chk_hpd = t->hash_pd[chk];
+ if (hpd_empty(chk_hpd)) break;
+ if (hpd_tomb(chk_hpd)) continue;
+ if (hpd_pd(chk_hpd) > dist + (uint16_t)k) {
+ blocked = true;
+ break;
+ }
+ }
+ if (blocked) {
+ idx = (idx + 1) & cap_mask;
+ dist++;
+ continue;
+ }
+  t->tombstone_cnt--;
+  }
+
+  if (t->max_probe_dist > 0 && dist > t->max_probe_dist) {
+   if (!overflow_stash_insert(t, h48, cur_val)) {
+    t->overflow_violated = true;
+    return bare_rh_insert_unbounded(t, h48, cur_val);
+   }
+   return true;
+  }
+
+  t->hash_pd[idx] = hpd_pack(h48, dist);
+  t->vals[idx] = cur_val;
+  t->size++;
+  return true;
+ }
+
+ if (hpd_pd(slot_hpd) < dist) {
+  uint32_t old_val = t->vals[idx];
+
+  t->hash_pd[idx] = hpd_pack(h48, dist);
+  t->vals[idx] = cur_val;
+
+  h48 = hpd_hash(slot_hpd);
+  dist = hpd_pd(slot_hpd) + 1;
+  cur_val = old_val;
+
+   if (t->max_probe_dist > 0 && dist > t->max_probe_dist) {
+    if (!overflow_stash_insert(t, h48, cur_val)) {
+     t->overflow_violated = true;
+     return bare_rh_insert_unbounded(t, h48, cur_val);
+    }
+    return true;
+   }
+
+  idx = (idx + 1) & cap_mask;
+  continue;
+  }
+
+  idx = (idx + 1) & cap_mask;
+  dist++;
+
+  if (t->max_probe_dist > 0 && dist > t->max_probe_dist) {
+   if (!overflow_stash_insert(t, h48, cur_val)) {
+    t->overflow_violated = true;
+    return bare_rh_insert_unbounded(t, h48, cur_val);
+   }
+   return true;
+  }
+
+ if (dist > t->capacity) {
+ if (!bare_resize_table(t)) return false;
+ cap_mask = t->capacity - 1;
+ ideal = h48 & cap_mask;
+ idx = ideal;
+ dist = 0;
+ }
+ }
+}
+
+bool bare_rh_insert_unbounded(ht_bare_t *t, uint64_t h48, uint32_t val) {
  size_t cap_mask = t->capacity - 1;
  size_t ideal = h48 & cap_mask;
 
@@ -355,7 +487,7 @@ void bare_reinsert_main(ht_bare_t *t,
     for (size_t i = 0; i < old_cap; i++) {
         uint64_t hpd = old_hash_pd[i];
         if (!hpd_live(hpd)) continue;
-        bare_rh_insert(t, hpd_hash(hpd), old_vals[i]);
+        bare_rh_insert_bounded(t, hpd_hash(hpd), old_vals[i]);
     }
 }
 
@@ -402,6 +534,7 @@ ht_bare_t *ht_bare_create(const ht_config_t *cfg) {
     t->min_load_factor = (c.min_load_factor >= 0) ? c.min_load_factor : 0.20;
     t->tomb_threshold = (c.tomb_threshold > 0) ? c.tomb_threshold : 0.20;
     t->zombie_window = c.zombie_window;
+    t->max_probe_dist = (c.max_probe_dist > UINT16_MAX) ? UINT16_MAX : c.max_probe_dist;
 
     return t;
 }
@@ -423,6 +556,8 @@ void ht_bare_clear(ht_bare_t *t) {
     t->size = 0;
     t->tombstone_cnt = 0;
     t->spill_len = 0;
+    t->overflow_len = 0;
+    t->overflow_violated = false;
 }
 
 // ============================================================================
@@ -437,16 +572,30 @@ bool ht_bare_insert(ht_bare_t *t, uint64_t hash, uint32_t val) {
     if (h48 < 2)
         return bare_spill_insert(t, h48, val);
 
-    if (!t->resizing && (double)(t->size + 1) / (double)t->capacity > t->max_load_factor) {
+    size_t main_live = t->size - t->spill_len - t->overflow_len;
+
+    // Main-table load-factor resize uses main-table occupancy only
+    if (!t->resizing && (double)(main_live + 1) / (double)t->capacity > t->max_load_factor) {
         if (t->capacity > SIZE_MAX / 2) return false;
-        if (!ht_bare_resize(t, t->capacity * 2)) {
+        if (!ht_bare_resize(t, t->capacity * 2))
             return false;
-        }
+        main_live = t->size - t->spill_len - t->overflow_len;
     }
 
-    bool result = bare_rh_insert(t, h48, val);
+    // Don't preemptively resize for stash-full here — let bare_rh_insert_bounded
+    // handle it via Policy B fallback (unbounded insert). A proactive resize
+    // would loop infinitely: reinserted overflow entries fill the stash again
+    // under tight D_MAX with colliding hashes.
 
-    return result;
+    // Reserve overflow capacity before mutating main table
+    if (t->max_probe_dist > 0 && t->overflow_len == HT_OVERFLOW_STASH_CAP) {
+        if (!ht_bare_resize(t, t->capacity * 2))
+            return false;
+        // Policy B: if still full after resize, bounded insert will
+        // fall through to bare_rh_insert_unbounded as a soft fallback
+    }
+
+    return bare_rh_insert_bounded(t, h48, val);
 }
 
 // ============================================================================
@@ -468,7 +617,7 @@ bool ht_bare_find(const ht_bare_t *t, uint64_t hash, uint32_t *out_val) {
     for (size_t steps = 0; steps <= t->capacity; steps++) {
         uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (hpd_empty(slot_hpd)) return false;
+        if (hpd_empty(slot_hpd)) break;
 
         if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
@@ -476,7 +625,8 @@ bool ht_bare_find(const ht_bare_t *t, uint64_t hash, uint32_t *out_val) {
             continue;
         }
 
-        if (hpd_pd(slot_hpd) < dist) return false;
+        if (hpd_pd(slot_hpd) < dist) break;
+        if (!t->overflow_violated && t->max_probe_dist > 0 && dist > t->max_probe_dist) break;
 
         if (hpd_hash(slot_hpd) == h48) {
             if (out_val) *out_val = t->vals[idx];
@@ -485,6 +635,13 @@ bool ht_bare_find(const ht_bare_t *t, uint64_t hash, uint32_t *out_val) {
 
         idx = (idx + 1) & cap_mask;
         dist++;
+    }
+
+    for (size_t i = 0; i < t->overflow_len; i++) {
+        if (hpd_hash(t->overflow_hash_pd[i]) == h48) {
+            if (out_val) *out_val = t->overflow_vals[i];
+            return true;
+        }
     }
 
     return false;
@@ -508,7 +665,7 @@ void ht_bare_find_all(const ht_bare_t *t, uint64_t hash,
     for (size_t steps = 0; steps <= t->capacity; steps++) {
         uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (hpd_empty(slot_hpd)) return;
+        if (hpd_empty(slot_hpd)) break;
 
         if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
@@ -516,7 +673,8 @@ void ht_bare_find_all(const ht_bare_t *t, uint64_t hash,
             continue;
         }
 
-        if (hpd_pd(slot_hpd) < dist) return;
+        if (hpd_pd(slot_hpd) < dist) break;
+        if (!t->overflow_violated && t->max_probe_dist > 0 && dist > t->max_probe_dist) break;
 
         if (hpd_hash(slot_hpd) == h48) {
             if (!cb(t->vals[idx], user_ctx))
@@ -525,6 +683,13 @@ void ht_bare_find_all(const ht_bare_t *t, uint64_t hash,
 
         idx = (idx + 1) & cap_mask;
         dist++;
+    }
+
+    for (size_t i = 0; i < t->overflow_len; i++) {
+        if (hpd_hash(t->overflow_hash_pd[i]) == h48) {
+            if (!cb(t->overflow_vals[i], user_ctx))
+                return;
+        }
     }
 }
 
@@ -572,6 +737,8 @@ size_t ht_bare_remove(ht_bare_t *t, uint64_t hash) {
         dist++;
     }
 
+    removed += overflow_stash_remove(t, h48);
+
     return removed;
 }
 
@@ -590,7 +757,7 @@ bool ht_bare_remove_val(ht_bare_t *t, uint64_t hash, uint32_t val) {
     for (size_t steps = 0; steps <= t->capacity; steps++) {
         uint64_t slot_hpd = t->hash_pd[idx];
 
-        if (hpd_empty(slot_hpd)) return false;
+        if (hpd_empty(slot_hpd)) break;
 
         if (hpd_tomb(slot_hpd)) {
             idx = (idx + 1) & cap_mask;
@@ -598,7 +765,7 @@ bool ht_bare_remove_val(ht_bare_t *t, uint64_t hash, uint32_t val) {
             continue;
         }
 
-        if (hpd_pd(slot_hpd) < dist) return false;
+        if (hpd_pd(slot_hpd) < dist) break;
 
         if (hpd_hash(slot_hpd) == h48 && t->vals[idx] == val) {
             t->size--;
@@ -613,7 +780,7 @@ bool ht_bare_remove_val(ht_bare_t *t, uint64_t hash, uint32_t val) {
         dist++;
     }
 
-    return false;
+    return overflow_stash_remove_val(t, h48, val);
 }
 
 // ============================================================================
@@ -627,7 +794,8 @@ bool bare_resize_table(ht_bare_t *t) {
 
 bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
     if (!t) return false;
-    if (new_capacity < t->size) return false;
+    size_t main_live_for_resize = t->size - t->spill_len - t->overflow_len;
+    if (new_capacity < main_live_for_resize) return false;
     if (t->resizing) return true;
 
     t->resizing = true;
@@ -648,6 +816,12 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
   uint32_t *old_spill_vals = t->spill_vals;
   uint8_t *old_spill_block = t->spill_block;
   size_t old_spill_len = t->spill_len;
+
+  uint64_t old_overflow_hash[HT_OVERFLOW_STASH_CAP];
+  uint32_t old_overflow_vals[HT_OVERFLOW_STASH_CAP];
+  size_t old_overflow_len = t->overflow_len;
+  memcpy(old_overflow_hash, t->overflow_hash_pd, old_overflow_len * sizeof(uint64_t));
+  memcpy(old_overflow_vals, t->overflow_vals, old_overflow_len * sizeof(uint32_t));
 
   uint8_t *new_main_block = bare_alloc_main_block(new_capacity);
   if (!new_main_block) { t->resizing = false; return false; }
@@ -674,9 +848,15 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
   t->spill_cap = new_spill_cap;
   t->spill_len = 0;
   t->spill_in_block = false;
+  t->overflow_len = 0;
+  t->overflow_violated = false;
 
   bare_reinsert_main(t, old_hash_pd, old_vals, old_cap);
   bare_reinsert_spill(t, old_spill_hash_pd, old_spill_vals, old_spill_len);
+
+  for (size_t i = 0; i < old_overflow_len; i++)
+   bare_rh_insert_bounded(t, hpd_hash(old_overflow_hash[i]), old_overflow_vals[i]);
+
   bare_place_prophylactic_tombstones(t);
 
   free(old_main_block);
@@ -699,6 +879,12 @@ void ht_bare_compact(ht_bare_t *t) {
   uint32_t *old_spill_vals = t->spill_vals;
   uint8_t *old_spill_block = t->spill_block;
   size_t old_spill_len = t->spill_len;
+
+  uint64_t old_overflow_hash[HT_OVERFLOW_STASH_CAP];
+  uint32_t old_overflow_vals[HT_OVERFLOW_STASH_CAP];
+  size_t old_overflow_len = t->overflow_len;
+  memcpy(old_overflow_hash, t->overflow_hash_pd, old_overflow_len * sizeof(uint64_t));
+  memcpy(old_overflow_vals, t->overflow_vals, old_overflow_len * sizeof(uint32_t));
 
   uint8_t *new_main_block = bare_alloc_main_block(old_cap);
   if (!new_main_block) return;
@@ -724,9 +910,15 @@ void ht_bare_compact(ht_bare_t *t) {
   t->spill_cap = new_spill_cap;
   t->spill_len = 0;
   t->spill_in_block = false;
+  t->overflow_len = 0;
+  t->overflow_violated = false;
 
   bare_reinsert_main(t, old_hash_pd, old_vals, old_cap);
   bare_reinsert_spill(t, old_spill_hash_pd, old_spill_vals, old_spill_len);
+
+  for (size_t i = 0; i < old_overflow_len; i++)
+   bare_rh_insert_bounded(t, hpd_hash(old_overflow_hash[i]), old_overflow_vals[i]);
+
   bare_place_prophylactic_tombstones(t);
 
   free(old_main_block);
@@ -759,15 +951,33 @@ bool ht_bare_iter_next(ht_bare_t *t, ht_iter_t *iter,
         }
     }
 
-    size_t spill_idx = iter->idx - t->capacity;
-    while (spill_idx < t->spill_len) {
-        uint32_t sval = t->spill_vals[spill_idx];
-        uint64_t shpd = t->spill_hash_pd[spill_idx];
-        spill_idx++;
-        iter->idx = t->capacity + spill_idx;
-        if (sval != VAL_NONE) {
-            if (out_hash) *out_hash = hpd_hash(shpd);
-            if (out_val) *out_val = sval;
+    size_t spill_off = t->capacity;
+    size_t overflow_off = spill_off + t->spill_len;
+
+    if (iter->idx < overflow_off) {
+        size_t spill_idx = iter->idx - spill_off;
+        while (spill_idx < t->spill_len) {
+            uint32_t sval = t->spill_vals[spill_idx];
+            uint64_t shpd = t->spill_hash_pd[spill_idx];
+            spill_idx++;
+            iter->idx = spill_off + spill_idx;
+            if (sval != VAL_NONE) {
+                if (out_hash) *out_hash = hpd_hash(shpd);
+                if (out_val) *out_val = sval;
+                return true;
+            }
+        }
+    }
+
+    size_t overflow_idx = iter->idx - overflow_off;
+    while (overflow_idx < t->overflow_len) {
+        uint64_t ohpd = t->overflow_hash_pd[overflow_idx];
+        uint32_t oval = t->overflow_vals[overflow_idx];
+        overflow_idx++;
+        iter->idx = overflow_off + overflow_idx;
+        if (oval != VAL_NONE) {
+            if (out_hash) *out_hash = hpd_hash(ohpd);
+            if (out_val) *out_val = oval;
             return true;
         }
     }
@@ -797,6 +1007,7 @@ const char *ht_bare_check_invariants(const ht_bare_t *t) {
     size_t live_count = 0;
     size_t tomb_count = 0;
     size_t spill_live = 0;
+    size_t overflow_live = 0;
 
     for (size_t i = 0; i < t->capacity; i++) {
         uint64_t hpd = t->hash_pd[i];
@@ -825,11 +1036,22 @@ const char *ht_bare_check_invariants(const ht_bare_t *t) {
             spill_live++;
     }
 
-    if (t->size != live_count + spill_live) {
+    overflow_live = t->overflow_len;
+
+    if (t->size != live_count + spill_live + overflow_live) {
         static char buf[256];
         snprintf(buf, sizeof(buf),
-                 "size=%zu but found %zu live (%zu main + %zu spill)",
-                 t->size, live_count + spill_live, live_count, spill_live);
+                 "size=%zu but found %zu live (%zu main + %zu spill + %zu overflow)",
+                 t->size, live_count + spill_live + overflow_live,
+                 live_count, spill_live, overflow_live);
+        return buf;
+    }
+
+    if (t->overflow_len > HT_OVERFLOW_STASH_CAP) {
+        static char buf[256];
+        snprintf(buf, sizeof(buf),
+                 "overflow_len=%zu exceeds HT_OVERFLOW_STASH_CAP=%d",
+                 t->overflow_len, HT_OVERFLOW_STASH_CAP);
         return buf;
     }
 
@@ -905,6 +1127,13 @@ void ht_bare_dump(const ht_bare_t *t, uint64_t hash, size_t count) {
             uint64_t shpd = t->spill_hash_pd[i];
             printf("  spill[%zu]: hash=0x%08" PRIx64 " val=%" PRIu32 "\n",
                    i, hpd_hash(shpd), t->spill_vals[i]);
+        }
+    }
+    if (t->overflow_len > 0) {
+        printf("  Overflow stash (%zu entries):\n", t->overflow_len);
+        for (size_t i = 0; i < t->overflow_len; i++) {
+            printf("  overflow[%zu]: hash=0x%08" PRIx64 " val=%" PRIu32 "\n",
+                   i, hpd_hash(t->overflow_hash_pd[i]), t->overflow_vals[i]);
         }
     }
 }
@@ -1200,6 +1429,7 @@ ht_table_t *ht_create_with_arena(const ht_config_t *cfg,
     b->min_load_factor = (c.min_load_factor >= 0) ? c.min_load_factor : 0.20;
     b->tomb_threshold = (c.tomb_threshold > 0) ? c.tomb_threshold : 0.20;
     b->zombie_window = c.zombie_window;
+    b->max_probe_dist = (c.max_probe_dist > UINT16_MAX) ? UINT16_MAX : c.max_probe_dist;
 
 #ifndef DRAUGR_USE_MALLOC
     if (arena) {
@@ -1313,7 +1543,8 @@ static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
 
     // Phase 2: Insert new entry
     ht_bare_t *b = &t->bare;
-    if (!b->resizing && (double)(b->size + 1) / (double)b->capacity > b->max_load_factor) {
+    size_t main_live = b->size - b->spill_len - b->overflow_len;
+    if (!b->resizing && (double)(main_live + 1) / (double)b->capacity > b->max_load_factor) {
         if (b->capacity > SIZE_MAX / 2 || !ht_resize(t, b->capacity * 2))
             return HT_INSERT_FAILED;
         if (b->size == 0) {
@@ -1331,7 +1562,7 @@ static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
     if (h48 < 2)
         result = bare_spill_insert(b, h48, eidx);
     else
-        result = bare_rh_insert(b, h48, eidx);
+        result = bare_rh_insert_bounded(b, h48, eidx);
 
     return result ? HT_INSERT_OK : HT_INSERT_FAILED;
 }
@@ -1656,6 +1887,12 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
   uint32_t *old_spill_vals = b->spill_vals;
   size_t old_spill_len = b->spill_len;
 
+  uint64_t old_overflow_hash[HT_OVERFLOW_STASH_CAP];
+  uint32_t old_overflow_vals[HT_OVERFLOW_STASH_CAP];
+  size_t old_overflow_len = b->overflow_len;
+  memcpy(old_overflow_hash, b->overflow_hash_pd, old_overflow_len * sizeof(uint64_t));
+  memcpy(old_overflow_vals, b->overflow_vals, old_overflow_len * sizeof(uint32_t));
+
     size_t new_entry_cap = old_entry_cap;
     size_t new_main_sz = bare_main_block_size(new_capacity);
     size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
@@ -1689,6 +1926,8 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
     tmp_b.spill_vals = new_spill_vals;
     tmp_b.spill_cap = new_spill_cap;
     tmp_b.spill_len = 0;
+    tmp_b.overflow_len = 0;
+    tmp_b.overflow_violated = false;
 
     bool ok = true;
     for (size_t i = 0; i < old_cap && ok; i++) {
@@ -1721,7 +1960,7 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
         if (h48 < 2)
             ok = bare_spill_insert(&tmp_b, h48, new_eidx);
         else
-            ok = bare_rh_insert(&tmp_b, h48, new_eidx);
+            ok = bare_rh_insert_bounded(&tmp_b, h48, new_eidx);
     }
 
     for (size_t i = 0; i < old_spill_len && ok; i++) {
@@ -1750,6 +1989,38 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
         tmp_entries[new_eidx].kv_ptr = (uint8_t *)data;
 
         ok = bare_spill_insert(&tmp_b, hpd_hash(old_spill_hash_pd[i]), new_eidx);
+    }
+
+    for (size_t i = 0; i < old_overflow_len && ok; i++) {
+        uint32_t old_eidx = old_overflow_vals[i];
+        const ht_entry_t *e = &old_entries[old_eidx];
+        if (e->key_len == 0) continue;
+
+        if (tmp_entry_count >= tmp_entry_cap) {
+            size_t grow = tmp_entry_cap > SIZE_MAX / 2 ? SIZE_MAX : tmp_entry_cap * 2;
+            ht_entry_t *ne = realloc(tmp_entries, grow * sizeof(ht_entry_t));
+            if (!ne) { ok = false; break; }
+            memset(ne + tmp_entry_cap, 0, (grow - tmp_entry_cap) * sizeof(ht_entry_t));
+            tmp_entries = ne;
+            tmp_entry_cap = grow;
+        }
+
+        uint64_t oh48 = hpd_hash(old_overflow_hash[i]);
+
+        size_t klen_stor = ht_entry_key_storage(e->key_len);
+        void *data = kv_alloc(t, klen_stor + e->val_len);
+        if (!data) { ok = false; break; }
+        memcpy(data, ht_entry_key(e), e->key_len);
+        if (e->val_len > 0) memcpy((uint8_t *)data + klen_stor, ht_entry_val(e), e->val_len);
+
+        uint32_t new_eidx = (uint32_t)tmp_entry_count++;
+        tmp_entries[new_eidx] = *e;
+        tmp_entries[new_eidx].kv_ptr = (uint8_t *)data;
+
+        if (oh48 < 2)
+            ok = bare_spill_insert(&tmp_b, oh48, new_eidx);
+        else
+            ok = bare_rh_insert_bounded(&tmp_b, oh48, new_eidx);
     }
 
 	if (!ok) {
@@ -1787,7 +2058,8 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
 
 bool ht_resize(ht_table_t *t, size_t new_capacity) {
     if (!t) return false;
-    if (new_capacity < t->bare.size) return false;
+    size_t main_live = t->bare.size - t->bare.spill_len - t->bare.overflow_len;
+    if (new_capacity < main_live) return false;
     if (t->bare.resizing) return true;
 
     t->bare.resizing = true;
@@ -1845,6 +2117,7 @@ bool ht_iter_next(ht_table_t *t, ht_iter_t *iter,
 // ============================================================================
 
 void ht_stats(const ht_table_t *t, ht_stats_t *out_stats) {
+    if (!t || !out_stats) return;
     ht_bare_stats(&t->bare, out_stats);
 }
 
@@ -1900,5 +2173,6 @@ void ht_dump(const ht_table_t *t, uint32_t h32, size_t count) {
 // ============================================================================
 
 const char *ht_check_invariants(const ht_table_t *t) {
+    if (!t) return "table is NULL";
     return ht_bare_check_invariants(&t->bare);
 }

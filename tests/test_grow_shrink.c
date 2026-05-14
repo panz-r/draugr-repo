@@ -453,19 +453,19 @@ static void test_grow_with_tomb_threshold(void) {
 
     /* Fill past capacity */
     for (int i = 0; i < 30; i++) {
-        char k[16]; snprintf(k, sizeof(k), "gt%d", i);
+        char k[32]; snprintf(k, sizeof(k), "gt%d", i);
         ht_upsert(t, k, strlen(k), &i, sizeof(i));
     }
 
     /* Delete many to exceed tomb_threshold */
     for (int i = 0; i < 20; i++) {
-        char k[16]; snprintf(k, sizeof(k), "gt%d", i);
+        char k[32]; snprintf(k, sizeof(k), "gt%d", i);
         ht_remove(t, k, strlen(k));
     }
 
     /* Insert more — triggers both growth and tomb_threshold zombie steps */
     for (int i = 30; i < 60; i++) {
-        char k[16]; snprintf(k, sizeof(k), "gt%d", i);
+        char k[32]; snprintf(k, sizeof(k), "gt%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
@@ -474,12 +474,12 @@ static void test_grow_with_tomb_threshold(void) {
 
     /* Verify survivors: gt20-29 + gt30-59 */
     for (int i = 20; i < 60; i++) {
-        char k[16]; snprintf(k, sizeof(k), "gt%d", i);
+        char k[32]; snprintf(k, sizeof(k), "gt%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
     for (int i = 0; i < 20; i++) {
-        char k[16]; snprintf(k, sizeof(k), "gt%d", i);
+        char k[32]; snprintf(k, sizeof(k), "gt%d", i);
         assert(ht_find(t, k, strlen(k), NULL) == NULL);
     }
 
@@ -499,13 +499,13 @@ static void test_shrink_blocked_at_64(void) {
 
     /* Insert 10 entries */
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "sb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "sb%d", i);
         ht_upsert(t, k, strlen(k), &i, sizeof(i));
     }
 
     /* Delete 9 — load = 1/64 = 0.016 < 0.25, but capacity == 64 (NOT > 64) */
     for (int i = 1; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "sb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "sb%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -531,7 +531,7 @@ static void test_shrink_exact_boundary(void) {
     /* Insert 90 to trigger grow to 256 */
     int vals[90];
     for (int i = 0; i < 90; i++) {
-        char k[8]; snprintf(k, sizeof(k), "eb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "eb%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -542,7 +542,7 @@ static void test_shrink_exact_boundary(void) {
 
     /* Delete down to 32 — 32/256 = 0.125 < 0.20, new_cap = 128 >= 64, 128 >= 32*2=64 */
     for (int i = 32; i < 90; i++) {
-        char k[8]; snprintf(k, sizeof(k), "eb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "eb%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -553,7 +553,7 @@ static void test_shrink_exact_boundary(void) {
 
     /* Verify */
     for (int i = 0; i < 32; i++) {
-        char k[8]; snprintf(k, sizeof(k), "eb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "eb%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
@@ -574,36 +574,36 @@ static void test_zombie_cursor_reset_on_growth(void) {
 
     /* Insert and delete to advance zombie cursor */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "zr%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zr%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "zr%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zr%d", i);
         ht_remove(t, k, strlen(k));
     }
     /* A few more inserts to advance zombie cursor past 0 */
     for (int i = 20; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "zr%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zr%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
 
     /* Now trigger growth — zombie_cursor resets to 0 */
     for (int i = 100; i < 150; i++) {
-        char k[16]; snprintf(k, sizeof(k), "zg%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zg%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
 
     /* Verify all entries */
     for (int i = 10; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "zr%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zr%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
     for (int i = 100; i < 150; i++) {
-        char k[16]; snprintf(k, sizeof(k), "zg%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zg%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
@@ -625,12 +625,12 @@ static void test_zombie_all_deleted(void) {
     /* Insert 30, delete all 30 — tombstone ratio = 100% */
     int vals[30];
     for (int i = 0; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ad%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ad%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
     for (int i = 0; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ad%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ad%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -640,21 +640,21 @@ static void test_zombie_all_deleted(void) {
 
     /* Insert new entries — zombie steps with size=0 */
     for (int i = 0; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "an%d", i);
+        char k[32]; snprintf(k, sizeof(k), "an%d", i);
         int v = i + 100;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     /* Verify new entries */
     for (int i = 0; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "an%d", i);
+        char k[32]; snprintf(k, sizeof(k), "an%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i + 100);
     }
 
     /* Old entries gone */
     for (int i = 0; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ad%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ad%d", i);
         assert(ht_find(t, k, strlen(k), NULL) == NULL);
     }
 
@@ -675,7 +675,7 @@ static void test_multiple_auto_shrinks(void) {
     /* Fill to grow to 256 */
     int vals[100];
     for (int i = 0; i < 100; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ms%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ms%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -687,7 +687,7 @@ static void test_multiple_auto_shrinks(void) {
 
     /* Delete down to 10 — should trigger multiple shrinks */
     for (int i = 10; i < 100; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ms%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ms%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -698,7 +698,7 @@ static void test_multiple_auto_shrinks(void) {
     assert(st.capacity < prev_cap);
 
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ms%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ms%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
@@ -716,13 +716,13 @@ static void test_grow_data_integrity(void) {
 
     const char *str_vals[] = { "alpha", "bravo", "charlie", "delta" };
     for (int i = 0; i < 4; i++) {
-        char k[8]; snprintf(k, sizeof(k), "s%d", i);
+        char k[32]; snprintf(k, sizeof(k), "s%d", i);
         ht_upsert(t, k, strlen(k), str_vals[i], strlen(str_vals[i]));
     }
 
     int int_vals[20];
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "i%d", i);
+        char k[32]; snprintf(k, sizeof(k), "i%d", i);
         int_vals[i] = i * 100;
         ht_upsert(t, k, strlen(k), &int_vals[i], sizeof(int));
     }
@@ -736,7 +736,7 @@ static void test_grow_data_integrity(void) {
 
     /* Verify strings byte-exact */
     for (int i = 0; i < 4; i++) {
-        char k[8]; snprintf(k, sizeof(k), "s%d", i);
+        char k[32]; snprintf(k, sizeof(k), "s%d", i);
         size_t vl = 0;
         const char *v = ht_find(t, k, strlen(k), &vl);
         assert(v != NULL && vl == strlen(str_vals[i]));
@@ -745,7 +745,7 @@ static void test_grow_data_integrity(void) {
 
     /* Verify ints */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "i%d", i);
+        char k[32]; snprintf(k, sizeof(k), "i%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 100);
     }
@@ -989,7 +989,7 @@ static void test_shrink_to_minimum(void) {
     /* Insert 100 entries to trigger growth */
     int vals[100];
     for (int i = 0; i < 100; i++) {
-        char k[8]; snprintf(k, sizeof(k), "sm%d", i);
+        char k[32]; snprintf(k, sizeof(k), "sm%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -1001,7 +1001,7 @@ static void test_shrink_to_minimum(void) {
 
     /* Remove all but 2 */
     for (int i = 2; i < 100; i++) {
-        char k[8]; snprintf(k, sizeof(k), "sm%d", i);
+        char k[32]; snprintf(k, sizeof(k), "sm%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1016,7 +1016,7 @@ static void test_shrink_to_minimum(void) {
 
     /* Verify the 2 remaining entries */
     for (int i = 0; i < 2; i++) {
-        char k[8]; snprintf(k, sizeof(k), "sm%d", i);
+        char k[32]; snprintf(k, sizeof(k), "sm%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
@@ -1039,14 +1039,14 @@ static void test_grow_under_heavy_tombstones(void) {
     /* Insert 25 entries */
     int vals[45];
     for (int i = 0; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ht%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ht%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     /* Delete 20 — creating heavy tombstones (20/25 = 80% tombstone ratio) */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ht%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ht%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1057,7 +1057,7 @@ static void test_grow_under_heavy_tombstones(void) {
 
     /* Insert 20 more new entries — growth + tomb cleanup */
     for (int i = 25; i < 45; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ht%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ht%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -1071,13 +1071,13 @@ static void test_grow_under_heavy_tombstones(void) {
 
     /* Verify all 25 remaining: 5 old (ht20-ht24) + 20 new (ht25-ht44) */
     for (int i = 20; i < 45; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ht%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ht%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
     /* Deleted entries must be gone */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ht%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ht%d", i);
         assert(ht_find(t, k, strlen(k), NULL) == NULL);
     }
 
@@ -1126,14 +1126,14 @@ static void test_tombstone_count_accuracy(void) {
 
     int vals[20];
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "tc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "tc%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     /* Delete all 20 one by one, check invariant after each */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "tc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "tc%d", i);
         ht_remove(t, k, strlen(k));
 
         ht_stats_t st;
@@ -1163,12 +1163,12 @@ static void test_compact_all_deleted_reuse(void) {
 
     /* Insert 20, delete all */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "cd%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cd%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "cd%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cd%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1183,7 +1183,7 @@ static void test_compact_all_deleted_reuse(void) {
 
     /* Reuse: insert new entries */
     for (int i = 0; i < 15; i++) {
-        char k[8]; snprintf(k, sizeof(k), "nw%d", i);
+        char k[32]; snprintf(k, sizeof(k), "nw%d", i);
         int v = i * 7;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(int)));
     }
@@ -1194,7 +1194,7 @@ static void test_compact_all_deleted_reuse(void) {
     assert(st.size == 15);
 
     for (int i = 0; i < 15; i++) {
-        char k[8]; snprintf(k, sizeof(k), "nw%d", i);
+        char k[32]; snprintf(k, sizeof(k), "nw%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 7);
     }
@@ -1214,12 +1214,12 @@ static void test_compact_then_collision_insert(void) {
 
     /* Insert 20 entries to fill, then delete 15 to create tombstones */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "cc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cc%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
     for (int i = 0; i < 15; i++) {
-        char k[8]; snprintf(k, sizeof(k), "cc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cc%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1231,7 +1231,7 @@ static void test_compact_then_collision_insert(void) {
     /* Now insert 20 more with a fixed hash (all collide) —
      * they must coexist with prophylactic tombstones */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "cx%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cx%d", i);
         int v = i * 11;
         assert(ht_upsert_with_hash(t, 42, k, strlen(k), &v, sizeof(int)));
     }
@@ -1240,12 +1240,12 @@ static void test_compact_then_collision_insert(void) {
 
     /* Verify both original survivors and new collision entries */
     for (int i = 15; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "cc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cc%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "cx%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cx%d", i);
         const int *v = ht_find_with_hash(t, 42, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 11);
     }
@@ -1264,7 +1264,7 @@ static void test_resize_same_cap_zombie_active(void) {
 
     /* Insert enough to advance zombie cursor */
     for (int i = 0; i < 15; i++) {
-        char k[8]; snprintf(k, sizeof(k), "rz%d", i);
+        char k[32]; snprintf(k, sizeof(k), "rz%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -1281,7 +1281,7 @@ static void test_resize_same_cap_zombie_active(void) {
 
     /* Insert more — zombie continues */
     for (int i = 15; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "rz%d", i);
+        char k[32]; snprintf(k, sizeof(k), "rz%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -1289,7 +1289,7 @@ static void test_resize_same_cap_zombie_active(void) {
     INV_CHECK(t, "test_resize_same_cap_zombie: after more inserts");
 
     for (int i = 0; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "rz%d", i);
+        char k[32]; snprintf(k, sizeof(k), "rz%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
@@ -1309,7 +1309,7 @@ static void test_triple_oscillation(void) {
     for (int round = 0; round < 3; round++) {
         /* Fill to grow */
         for (int i = 0; i < 80; i++) {
-            char k[16]; snprintf(k, sizeof(k), "to%d_%d", round, i);
+            char k[32]; snprintf(k, sizeof(k), "to%d_%d", round, i);
             int v = round * 1000 + i;
             ht_upsert(t, k, strlen(k), &v, sizeof(int));
         }
@@ -1320,7 +1320,7 @@ static void test_triple_oscillation(void) {
 
         /* Drain to shrink */
         for (int i = 0; i < 80; i++) {
-            char k[16]; snprintf(k, sizeof(k), "to%d_%d", round, i);
+            char k[32]; snprintf(k, sizeof(k), "to%d_%d", round, i);
             ht_remove(t, k, strlen(k));
         }
 
@@ -1330,7 +1330,7 @@ static void test_triple_oscillation(void) {
 
     /* Insert permanent entries to verify across oscillations */
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "perm%d", i);
+        char k[32]; snprintf(k, sizeof(k), "perm%d", i);
         int v = i * 99;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -1338,7 +1338,7 @@ static void test_triple_oscillation(void) {
     INV_CHECK(t, "test_triple_oscillation: after oscillations");
 
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "perm%d", i);
+        char k[32]; snprintf(k, sizeof(k), "perm%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 99);
     }
@@ -1356,12 +1356,12 @@ static void test_stats_invariants(void) {
 
     int vals[50];
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "si%d", i);
+        char k[32]; snprintf(k, sizeof(k), "si%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
     for (int i = 0; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "si%d", i * 2);
+        char k[32]; snprintf(k, sizeof(k), "si%d", i * 2);
         ht_remove(t, k, strlen(k));
     }
 

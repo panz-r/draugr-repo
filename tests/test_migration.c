@@ -313,19 +313,19 @@ static int test_migration_spill(void) {
 
     /* Insert spill entries (z-prefix) and normal entries */
     for (int i = 0; i < 15; i++) {
-        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         int v = i * 10;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
     for (int i = 0; i < 30; i++) {
-        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         int v = i * 100;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
 
     /* Trigger multiple resizes */
     for (int i = 50; i < 200; i++) {
-        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         int v = i * 100;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
@@ -334,7 +334,7 @@ static int test_migration_spill(void) {
 
     /* Verify all spill entries survived */
     for (int i = 0; i < 15; i++) {
-        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 10) {
             printf("  FAIL: spill entry z%d missing or wrong\n", i);
@@ -368,18 +368,18 @@ static int test_migration_collision(void) {
 
     /* Insert 100, delete 30, insert 100 more — multiple resizes under collision */
     for (int i = 0; i < 100; i++) {
-        char k[16]; snprintf(k, sizeof(k), "col%d", i);
+        char k[32]; snprintf(k, sizeof(k), "col%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
         present[i] = 1;
     }
     for (int i = 0; i < 100; i += 3) {
-        char k[16]; snprintf(k, sizeof(k), "col%d", i);
+        char k[32]; snprintf(k, sizeof(k), "col%d", i);
         ht_remove(t, k, strlen(k));
         present[i] = 0;
     }
     for (int i = 100; i < 200; i++) {
-        char k[16]; snprintf(k, sizeof(k), "col%d", i);
+        char k[32]; snprintf(k, sizeof(k), "col%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
         present[i] = 1;
@@ -389,7 +389,7 @@ static int test_migration_collision(void) {
 
     /* Verify all present entries */
     for (int i = 0; i < 200; i++) {
-        char k[16]; snprintf(k, sizeof(k), "col%d", i);
+        char k[32]; snprintf(k, sizeof(k), "col%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (present[i]) {
             if (v == NULL || *v != i) {
@@ -427,20 +427,20 @@ static int test_migration_zombie(void) {
 
     /* Heavy insert/delete interleaving with zombie running */
     for (int i = 0; i < 200; i++) {
-        char k[16]; snprintf(k, sizeof(k), "mz%d", i);
+        char k[32]; snprintf(k, sizeof(k), "mz%d", i);
         int v = i * 5;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
         present[i] = 1;
     }
     /* Delete many to create tombstones */
     for (int i = 0; i < 200; i += 2) {
-        char k[16]; snprintf(k, sizeof(k), "mz%d", i);
+        char k[32]; snprintf(k, sizeof(k), "mz%d", i);
         ht_remove(t, k, strlen(k));
         present[i] = 0;
     }
     /* Insert more — zombie steps fire on each insert */
     for (int i = 200; i < 300; i++) {
-        char k[16]; snprintf(k, sizeof(k), "mz%d", i);
+        char k[32]; snprintf(k, sizeof(k), "mz%d", i);
         int v = i * 5;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
         present[i] = 1;
@@ -450,7 +450,7 @@ static int test_migration_zombie(void) {
 
     /* Verify all */
     for (int i = 0; i < 300; i++) {
-        char k[16]; snprintf(k, sizeof(k), "mz%d", i);
+        char k[32]; snprintf(k, sizeof(k), "mz%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (present[i]) {
             if (v == NULL || *v != i * 5) {
@@ -483,7 +483,7 @@ static int test_migration_auto_shrink(void) {
     /* Insert 100 — 100 > 128*0.75=96, triggers growth beyond 128 */
     int vals[100];
     for (int i = 0; i < 100; i++) {
-        char k[16]; snprintf(k, sizeof(k), "as%d", i);
+        char k[32]; snprintf(k, sizeof(k), "as%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -494,7 +494,7 @@ static int test_migration_auto_shrink(void) {
 
     /* Delete 80 — load drops, triggers auto-shrink */
     for (int i = 0; i < 80; i++) {
-        char k[16]; snprintf(k, sizeof(k), "as%d", i);
+        char k[32]; snprintf(k, sizeof(k), "as%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -505,7 +505,7 @@ static int test_migration_auto_shrink(void) {
 
     /* Verify survivors */
     for (int i = 80; i < 100; i++) {
-        char k[16]; snprintf(k, sizeof(k), "as%d", i);
+        char k[32]; snprintf(k, sizeof(k), "as%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i) {
             printf("  FAIL: as%d missing after auto-shrink\n", i);
@@ -542,20 +542,20 @@ static int test_migration_string_integrity(void) {
 
     /* Insert 20 string-valued entries */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "w%d", i);
+        char k[32]; snprintf(k, sizeof(k), "w%d", i);
         ht_upsert(t, k, strlen(k), values[i], strlen(values[i]));
     }
 
     /* Insert 60 ints to trigger multiple resizes */
     for (int i = 0; i < 60; i++) {
-        char k[8]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         int v = i * 7;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     /* Delete half the ints */
     for (int i = 0; i < 60; i += 2) {
-        char k[8]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -563,7 +563,7 @@ static int test_migration_string_integrity(void) {
 
     /* Verify all 20 strings byte-exact */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "w%d", i);
+        char k[32]; snprintf(k, sizeof(k), "w%d", i);
         size_t vl = 0;
         const char *v = ht_find(t, k, strlen(k), &vl);
         if (v == NULL || vl != strlen(values[i]) || memcmp(v, values[i], vl) != 0) {
@@ -668,14 +668,14 @@ static int test_migration_heterogeneous_values(void) {
     ht_upsert(t, "byte2", 5, &one_byte, 1);
     ht_upsert(t, "int64", 5, &eight_byte, sizeof(int64_t));
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "big%d", i);
+        char k[32]; snprintf(k, sizeof(k), "big%d", i);
         ht_upsert(t, k, strlen(k), big_buf[i], 100);
     }
     ht_upsert(t, "empty", 5, &empty_val, 0);
 
     /* Trigger growth by inserting many more entries */
     for (int i = 0; i < 80; i++) {
-        char k[16]; snprintf(k, sizeof(k), "grow%d", i);
+        char k[32]; snprintf(k, sizeof(k), "grow%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -708,7 +708,7 @@ static int test_migration_heterogeneous_values(void) {
     }
     /* 100-byte strings */
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "big%d", i);
+        char k[32]; snprintf(k, sizeof(k), "big%d", i);
         size_t vl = 0;
         const char *v = ht_find(t, k, strlen(k), &vl);
         if (v == NULL || vl != 100 || memcmp(v, big_buf[i], 100) != 0) {
@@ -745,14 +745,14 @@ static int test_migration_many_deletes_before(void) {
 
     /* Insert 100 entries */
     for (int i = 0; i < 100; i++) {
-        char k[16]; snprintf(k, sizeof(k), "del%d", i);
+        char k[32]; snprintf(k, sizeof(k), "del%d", i);
         int v = i * 13;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     /* Delete 80 of them */
     for (int i = 0; i < 80; i++) {
-        char k[16]; snprintf(k, sizeof(k), "del%d", i);
+        char k[32]; snprintf(k, sizeof(k), "del%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -763,7 +763,7 @@ static int test_migration_many_deletes_before(void) {
 
     /* Verify remaining 20 entries (del80..del99) */
     for (int i = 80; i < 100; i++) {
-        char k[16]; snprintf(k, sizeof(k), "del%d", i);
+        char k[32]; snprintf(k, sizeof(k), "del%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 13) {
             printf("  FAIL: del%d missing or wrong after compact (got %d)\n",
@@ -774,7 +774,7 @@ static int test_migration_many_deletes_before(void) {
 
     /* Verify deleted entries are gone */
     for (int i = 0; i < 80; i++) {
-        char k[16]; snprintf(k, sizeof(k), "del%d", i);
+        char k[32]; snprintf(k, sizeof(k), "del%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v != NULL) {
             printf("  FAIL: deleted del%d still present\n", i);
@@ -1017,7 +1017,7 @@ static int test_migration_shrink_grow_oscillation(void) {
     for (int cycle = 0; cycle < 5; cycle++) {
         /* Fill to trigger growth */
         for (int i = 0; i < 100; i++) {
-            char k[16]; snprintf(k, sizeof(k), "sg%d_%d", cycle, i);
+            char k[32]; snprintf(k, sizeof(k), "sg%d_%d", cycle, i);
             int v = cycle * 1000 + i;
             ht_upsert(t, k, strlen(k), &v, sizeof(int));
         }
@@ -1030,7 +1030,7 @@ static int test_migration_shrink_grow_oscillation(void) {
 
         /* Delete most to trigger shrink */
         for (int i = 0; i < 100; i++) {
-            char k[16]; snprintf(k, sizeof(k), "sg%d_%d", cycle, i);
+            char k[32]; snprintf(k, sizeof(k), "sg%d_%d", cycle, i);
             ht_remove(t, k, strlen(k));
         }
 
@@ -1038,7 +1038,7 @@ static int test_migration_shrink_grow_oscillation(void) {
         assert(st.size < 100);
 
         /* Insert a few survivors to verify */
-        char k[16]; snprintf(k, sizeof(k), "keep%d", cycle);
+        char k[32]; snprintf(k, sizeof(k), "keep%d", cycle);
         int v = cycle;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -1047,7 +1047,7 @@ static int test_migration_shrink_grow_oscillation(void) {
 
     /* Verify all keep entries survived the oscillations */
     for (int cycle = 0; cycle < 5; cycle++) {
-        char k[16]; snprintf(k, sizeof(k), "keep%d", cycle);
+        char k[32]; snprintf(k, sizeof(k), "keep%d", cycle);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != cycle) {
             printf("  FAIL: keep%d lost after oscillation\n", cycle);
@@ -1075,12 +1075,12 @@ static int test_migration_spill_auto_shrink(void) {
     /* Insert 10 spill entries (z-prefix) and 40 normal entries */
     int spill_vals[10], norm_vals[40];
     for (int i = 0; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         spill_vals[i] = i * 10;
         ht_upsert(t, k, strlen(k), &spill_vals[i], sizeof(int));
     }
     for (int i = 0; i < 40; i++) {
-        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         norm_vals[i] = i * 100;
         ht_upsert(t, k, strlen(k), &norm_vals[i], sizeof(int));
     }
@@ -1091,7 +1091,7 @@ static int test_migration_spill_auto_shrink(void) {
 
     /* Delete 40 normal entries — triggers auto-shrink */
     for (int i = 0; i < 40; i++) {
-        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1102,7 +1102,7 @@ static int test_migration_spill_auto_shrink(void) {
 
     /* All spill entries must survive the shrink */
     for (int i = 0; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 10) {
             printf("  FAIL: spill z%d lost after auto-shrink\n", i);
@@ -1130,14 +1130,14 @@ static int test_migration_tomb_threshold_burst(void) {
 
     /* Insert 50 entries */
     for (int i = 0; i < 50; i++) {
-        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "tb%d", i);
         int v = i * 3;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
 
     /* Delete 40 — tombstone ratio skyrockets past 0.15 */
     for (int i = 0; i < 40; i++) {
-        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "tb%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1145,7 +1145,7 @@ static int test_migration_tomb_threshold_burst(void) {
 
     /* Insert 10 more — tomb_threshold triggers extra zombie steps */
     for (int i = 50; i < 60; i++) {
-        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "tb%d", i);
         int v = i * 5;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -1154,7 +1154,7 @@ static int test_migration_tomb_threshold_burst(void) {
 
     /* Verify survivors: tb40-49 (original) and tb50-59 (new) */
     for (int i = 40; i < 60; i++) {
-        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "tb%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         int expected = (i < 50) ? i * 3 : i * 5;
         if (v == NULL || *v != expected) {
@@ -1164,7 +1164,7 @@ static int test_migration_tomb_threshold_burst(void) {
         }
     }
     for (int i = 0; i < 40; i++) {
-        char k[16]; snprintf(k, sizeof(k), "tb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "tb%d", i);
         assert(ht_find(t, k, strlen(k), NULL) == NULL);
     }
 
@@ -1187,16 +1187,16 @@ static int test_migration_compact_during_zombie(void) {
 
     /* Insert 40, delete 30, insert 20 — zombie steps active */
     for (int i = 0; i < 40; i++) {
-        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cd%d", i);
         int v = i * 7;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
     for (int i = 0; i < 30; i++) {
-        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cd%d", i);
         ht_remove(t, k, strlen(k));
     }
     for (int i = 40; i < 60; i++) {
-        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cd%d", i);
         int v = i * 9;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -1210,7 +1210,7 @@ static int test_migration_compact_during_zombie(void) {
 
     /* Verify all 30 survivors */
     for (int i = 30; i < 60; i++) {
-        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cd%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         int expected = (i < 40) ? i * 7 : i * 9;
         if (v == NULL || *v != expected) {
@@ -1221,7 +1221,7 @@ static int test_migration_compact_during_zombie(void) {
 
     /* Continue inserting — zombie should work after compact reset */
     for (int i = 60; i < 80; i++) {
-        char k[16]; snprintf(k, sizeof(k), "cd%d", i);
+        char k[32]; snprintf(k, sizeof(k), "cd%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -1247,12 +1247,12 @@ static int test_migration_resize_exact_fit(void) {
 
     /* Insert 20, delete 12, leaves 8 */
     for (int i = 0; i < 20; i++) {
-        char k[16]; snprintf(k, sizeof(k), "ef%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ef%d", i);
         int v = i * 11;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
     for (int i = 0; i < 12; i++) {
-        char k[16]; snprintf(k, sizeof(k), "ef%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ef%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1271,7 +1271,7 @@ static int test_migration_resize_exact_fit(void) {
 
     /* All 8 must be findable at 100% load factor */
     for (int i = 12; i < 20; i++) {
-        char k[16]; snprintf(k, sizeof(k), "ef%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ef%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 11) {
             printf("  FAIL: ef%d lost at exact fit\n", i);
@@ -1309,12 +1309,12 @@ static int test_migration_spill_remove_after_resize(void) {
     /* Insert 10 spill (z-prefix) + 50 normal */
     int spill_vals[10], norm_vals[50];
     for (int i = 0; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         spill_vals[i] = i * 10;
         ht_upsert(t, k, strlen(k), &spill_vals[i], sizeof(int));
     }
     for (int i = 0; i < 50; i++) {
-        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         norm_vals[i] = i * 100;
         ht_upsert(t, k, strlen(k), &norm_vals[i], sizeof(int));
     }
@@ -1323,7 +1323,7 @@ static int test_migration_spill_remove_after_resize(void) {
 
     /* Remove 5 spill entries after resize */
     for (int i = 0; i < 5; i++) {
-        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         assert(ht_remove(t, k, strlen(k)));
     }
 
@@ -1331,7 +1331,7 @@ static int test_migration_spill_remove_after_resize(void) {
 
     /* Verify remaining spill entries */
     for (int i = 5; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 10) {
             printf("  FAIL: spill z%d lost after resize+remove\n", i);
@@ -1340,7 +1340,7 @@ static int test_migration_spill_remove_after_resize(void) {
     }
     /* Verify normal entries unaffected */
     for (int i = 0; i < 50; i++) {
-        char k[16]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 100);
     }
@@ -1364,12 +1364,12 @@ static int test_migration_delete_all_rebuild(void) {
 
     /* Phase 1: Fill and delete all */
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "p1%d", i);
+        char k[32]; snprintf(k, sizeof(k), "p1%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "p1%d", i);
+        char k[32]; snprintf(k, sizeof(k), "p1%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1381,7 +1381,7 @@ static int test_migration_delete_all_rebuild(void) {
 
     /* Phase 2: Rebuild with new keys */
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "p2%d", i);
+        char k[32]; snprintf(k, sizeof(k), "p2%d", i);
         int v = i * 3;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -1393,11 +1393,11 @@ static int test_migration_delete_all_rebuild(void) {
 
     /* Old keys gone, new keys correct */
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "p1%d", i);
+        char k[32]; snprintf(k, sizeof(k), "p1%d", i);
         assert(ht_find(t, k, strlen(k), NULL) == NULL);
     }
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "p2%d", i);
+        char k[32]; snprintf(k, sizeof(k), "p2%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 3) {
             printf("  FAIL: p2%d lost after rebuild\n", i);
@@ -1469,13 +1469,13 @@ static int test_migration_inc_remove_collision(void) {
 
     /* Inc 10 colliding keys */
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ir%d", i);
         ht_inc(t, k, strlen(k), i * 10);
     }
 
     /* Remove even keys */
     for (int i = 0; i < 10; i += 2) {
-        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ir%d", i);
         assert(ht_remove(t, k, strlen(k)));
     }
 
@@ -1483,14 +1483,14 @@ static int test_migration_inc_remove_collision(void) {
 
     /* Inc odd keys again */
     for (int i = 1; i < 10; i += 2) {
-        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ir%d", i);
         int64_t r = ht_inc(t, k, strlen(k), 1);
         assert(r == i * 10 + 1);
     }
 
     /* Inc deleted keys — should create fresh entries */
     for (int i = 0; i < 10; i += 2) {
-        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ir%d", i);
         int64_t r = ht_inc(t, k, strlen(k), 99);
         assert(r == 99);
     }
@@ -1499,7 +1499,7 @@ static int test_migration_inc_remove_collision(void) {
 
     /* Final verify */
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ir%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ir%d", i);
         const int64_t *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL);
         int64_t expected = (i % 2 == 0) ? 99 : i * 10 + 1;

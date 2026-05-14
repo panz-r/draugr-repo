@@ -46,6 +46,7 @@ typedef struct {
     double min_load_factor;    // Shrink when below (default 0.20, 0 disables)
     double tomb_threshold;     // Trigger rebuild when tombstone ratio exceeds (default 0.20)
     size_t zombie_window;      // Slots per zombie rebuild step (0 = disable, default 16)
+    size_t max_probe_dist;     // Max probe distance before overflow stash (0 = no limit, default 255)
 } ht_config_t;
 
 typedef bool (*ht_dup_callback)(const void *key, size_t key_len,

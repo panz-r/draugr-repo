@@ -263,7 +263,7 @@ static void test_bare_place_prophylactic_tombstones(void) {
 
     // Insert enough entries to trigger prophylactic tombstones
     for (int i = 0; i < 50; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -406,7 +406,7 @@ static void test_bare_reinsert_spill(void) {
 
     // Insert entries with hash=0 (spill lane)
     for (int i = 0; i < 8; i++) {
-        char key[8]; snprintf(key, sizeof(key), "z%d", i);
+        char key[32]; snprintf(key, sizeof(key), "z%d", i);
         int val = i * 11;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -420,7 +420,7 @@ static void test_bare_reinsert_spill(void) {
 
     // Verify all still accessible
     for (int i = 0; i < 8; i++) {
-        char key[8]; snprintf(key, sizeof(key), "z%d", i);
+        char key[32]; snprintf(key, sizeof(key), "z%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         assert(v != NULL && *v == i * 11);
     }
@@ -433,7 +433,7 @@ static void test_bare_reinsert_spill(void) {
 // bare_rh_insert test — core Robin-Hood insert algorithm
 // ============================================================================
 
-static void test_bare_rh_insert(void) {
+static void test_bare_rh_insert_bounded(void) {
     printf("Test: bare_rh_insert core algorithm...\n");
     ht_config_t cfg = { .initial_capacity = 8 };
     ht_bare_t *t = ht_bare_create(&cfg);
@@ -441,7 +441,7 @@ static void test_bare_rh_insert(void) {
 
     // Insert 5 entries - should work without collision handling
     for (int i = 0; i < 5; i++) {
-        bool ok = bare_rh_insert(t, (uint64_t)(i + 1) << 48 | (i + 1), i);
+        bool ok = bare_rh_insert_bounded(t, (uint64_t)(i + 1) << 48 | (i + 1), i);
         assert(ok);
     }
     assert(t->size == 5);
@@ -449,7 +449,7 @@ static void test_bare_rh_insert(void) {
     // Insert more to trigger resize consideration
     // Fill to near capacity
     for (int i = 5; i < 7; i++) {
-        bool ok = bare_rh_insert(t, (uint64_t)(i + 1) << 48 | (i + 1), i);
+        bool ok = bare_rh_insert_bounded(t, (uint64_t)(i + 1) << 48 | (i + 1), i);
         assert(ok);
     }
 
@@ -527,7 +527,7 @@ static void test_grow_arena_comprehensive(void) {
     }
 
     for (int i = 0; i < 10; i++) {
-        char key[16]; snprintf(key, sizeof(key), "key%d", i);
+        char key[32]; snprintf(key, sizeof(key), "key%d", i);
         size_t val_size = 100 * (i + 1);
         size_t out_len = 0;
         const char *found = ht_find(t, key, strlen(key), &out_len);
@@ -693,7 +693,7 @@ int main(void) {
     test_bare_reinsert_spill();
 
     /* New: comprehensive coverage gaps */
-    test_bare_rh_insert();
+    test_bare_rh_insert_bounded();
     test_bare_spill_grow_insert();
     test_grow_arena_comprehensive();
     test_lru_evict();

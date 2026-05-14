@@ -299,12 +299,12 @@ static int test_spill_stress(void) {
         int action = rand() % 3;
 
         if (action == 0) {
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             int val = k;
             ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action == 1) {
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             if (present[k]) {
                 const int *v = ht_find(t, key, strlen(key), NULL);
                 assert(v != NULL && *v == k);
@@ -312,7 +312,7 @@ static int test_spill_stress(void) {
                 assert(ht_find(t, key, strlen(key), NULL) == NULL);
             }
         } else {
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             size_t removed = ht_remove(t, key, strlen(key));
             if (present[k]) assert(removed);
             else assert(!removed);
@@ -321,7 +321,7 @@ static int test_spill_stress(void) {
     }
 
     for (int i = 0; i < SSTRESS_N; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         if (present[i]) assert(v != NULL && *v == i);
         else assert(v == NULL);
@@ -528,7 +528,7 @@ static int test_clear_reuse(void) {
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
 
     for (int i = 0; i < 10; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -543,12 +543,12 @@ static int test_clear_reuse(void) {
     assert(st.tombstone_cnt == 0);
 
     for (int i = 0; i < 10; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         assert(ht_find(t, key, strlen(key), NULL) == NULL);
     }
 
     for (int i = 0; i < 20; i++) {
-        char key[16]; snprintf(key, sizeof(key), "new%d", i);
+        char key[32]; snprintf(key, sizeof(key), "new%d", i);
         int val = i * 10;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -557,7 +557,7 @@ static int test_clear_reuse(void) {
     assert(st.size == 20);
 
     for (int i = 0; i < 20; i++) {
-        char key[16]; snprintf(key, sizeof(key), "new%d", i);
+        char key[32]; snprintf(key, sizeof(key), "new%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         assert(v != NULL && *v == i * 10);
     }
@@ -630,13 +630,13 @@ static int test_iter_tombstones(void) {
     ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
 
     for (int i = 0; i < 10; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     for (int i = 0; i < 10; i += 2) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         ht_remove(t, key, strlen(key));
     }
 
@@ -653,7 +653,7 @@ static int test_iter_tombstones(void) {
     size_t klen, vlen;
     while (ht_iter_next(t, &iter, &key, &klen, &val, &vlen)) {
         const char *k = (const char *)key;
-        char buf[16];
+        char buf[32];
         assert(klen >= 2 && klen < sizeof(buf));
         memcpy(buf, k + 1, klen - 1);
         buf[klen - 1] = '\0';
@@ -717,7 +717,7 @@ static int test_iter_after_clear(void) {
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
 
     for (int i = 0; i < 5; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -817,25 +817,25 @@ static int test_prophylactic_tombstones(void) {
     ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
 
     for (int i = 0; i < 20; i++) {
-        char key[16]; snprintf(key, sizeof(key), "key%d", i);
+        char key[32]; snprintf(key, sizeof(key), "key%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     for (int i = 0; i < 20; i++) {
-        char key[16]; snprintf(key, sizeof(key), "key%d", i);
+        char key[32]; snprintf(key, sizeof(key), "key%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         assert(v != NULL && *v == i);
     }
 
     for (int i = 20; i < 30; i++) {
-        char key[16]; snprintf(key, sizeof(key), "key%d", i);
+        char key[32]; snprintf(key, sizeof(key), "key%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
 
     for (int i = 0; i < 30; i++) {
-        char key[16]; snprintf(key, sizeof(key), "key%d", i);
+        char key[32]; snprintf(key, sizeof(key), "key%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         assert(v != NULL && *v == i);
     }
@@ -935,7 +935,7 @@ static int test_resize_same_cap(void) {
     ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
 
     for (int i = 0; i < 10; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -951,7 +951,7 @@ static int test_resize_same_cap(void) {
     assert(st_after.capacity == st_before.capacity);
 
     for (int i = 0; i < 10; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         assert(v != NULL && *v == i);
     }
@@ -971,7 +971,7 @@ static int test_resize_below_size(void) {
     ht_table_t *t = ht_create(&cfg, fnv1a_hash, NULL, NULL);
 
     for (int i = 0; i < 20; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -988,7 +988,7 @@ static int test_resize_below_size(void) {
     ht_stats(t, &st_after);
     assert(st_after.size == 20);
     for (int i = 0; i < 20; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         assert(ht_find(t, key, strlen(key), NULL) != NULL);
     }
 
@@ -1015,7 +1015,7 @@ static int test_stats_consistency(void) {
     assert(st.tombstone_ratio == 0.0);
 
     for (int i = 0; i < 12; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -1088,13 +1088,13 @@ static int test_long_sequence_normal(void) {
 
         if (action < 40) {
             // Insert
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             int val = k * 7;
             ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action < 75) {
             // Find
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             const int *v = ht_find(t, key, strlen(key), NULL);
             if (present[k]) {
                 assert(v != NULL && *v == k * 7);
@@ -1103,7 +1103,7 @@ static int test_long_sequence_normal(void) {
             }
         } else if (action < 95) {
             // Remove
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             size_t result = ht_remove(t, key, strlen(key));
             if (present[k]) assert(result);
             else assert(!result);
@@ -1116,7 +1116,7 @@ static int test_long_sequence_normal(void) {
 
     // Final verify
     for (int i = 0; i < LN_N; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         if (present[i]) assert(v != NULL && *v == i * 7);
         else assert(v == NULL);
@@ -1153,17 +1153,17 @@ static int test_long_sequence_collision(void) {
         int action = rand() % 100;
 
         if (action < 40) {
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             int val = k * 3;
             ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
         } else if (action < 75) {
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             const int *v = ht_find(t, key, strlen(key), NULL);
             if (present[k]) assert(v != NULL && *v == k * 3);
             else assert(v == NULL);
         } else if (action < 95) {
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             size_t result = ht_remove(t, key, strlen(key));
             assert(result == !!present[k]);
             present[k] = 0;
@@ -1173,7 +1173,7 @@ static int test_long_sequence_collision(void) {
     }
 
     for (int i = 0; i < LC_N; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         if (present[i]) assert(v != NULL && *v == i * 3);
         else assert(v == NULL);
@@ -1198,7 +1198,7 @@ static int test_update_preserves_others(void) {
     ht_table_t *t = ht_create(NULL, fnv1a_hash, NULL, NULL);
 
     for (int i = 0; i < 20; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -1209,7 +1209,7 @@ static int test_update_preserves_others(void) {
 
     // All other entries still correct
     for (int i = 0; i < 20; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         assert(v != NULL);
         if (i == 10) assert(*v == 9999);
@@ -1236,7 +1236,7 @@ static int test_resize_up_down(void) {
 
     // Fill up → triggers auto-resize
     for (int i = 0; i < 100; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
     }
@@ -1256,14 +1256,14 @@ static int test_resize_up_down(void) {
     assert(st1.size == 100);
 
     for (int i = 0; i < 100; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         assert(v != NULL && *v == i);
     }
 
     // Remove most entries
     for (int i = 0; i < 90; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         ht_remove(t, key, strlen(key));
     }
 
@@ -1277,12 +1277,12 @@ static int test_resize_up_down(void) {
     assert(st2.capacity == 64);
 
     for (int i = 90; i < 100; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         assert(v != NULL && *v == i);
     }
     for (int i = 0; i < 90; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         assert(ht_find(t, key, strlen(key), NULL) == NULL);
     }
 
@@ -1308,7 +1308,7 @@ static int test_compact_churn(void) {
     srand(3003);
     // Phase 1: Fill
     for (int i = 0; i < CHURN_N; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         int val = i;
         ht_upsert(t, key, strlen(key), &val, sizeof(val));
         present[i] = 1;
@@ -1319,12 +1319,12 @@ static int test_compact_churn(void) {
     for (int op = 0; op < 16000; op++) {
         int k = rand() % CHURN_N;
         if (rand() % 2 == 0 && present[k]) {
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             ht_remove(t, key, strlen(key));
             present[k] = 0;
             present_count--;
         } else if (!present[k]) {
-            char key[16]; snprintf(key, sizeof(key), "k%d", k);
+            char key[32]; snprintf(key, sizeof(key), "k%d", k);
             int val = k;
             ht_upsert(t, key, strlen(key), &val, sizeof(val));
             present[k] = 1;
@@ -1343,7 +1343,7 @@ static int test_compact_churn(void) {
 
     // Verify all
     for (int i = 0; i < CHURN_N; i++) {
-        char key[16]; snprintf(key, sizeof(key), "k%d", i);
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         if (present[i]) assert(v != NULL && *v == i);
         else assert(v == NULL);
@@ -1477,7 +1477,7 @@ static int test_resize_non_pow2(void) {
 
     /* Insert some entries */
     for (int i = 0; i < 5; i++) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         int v = i;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(v)));
     }
@@ -1495,7 +1495,7 @@ static int test_resize_non_pow2(void) {
 
     /* All entries still findable */
     for (int i = 0; i < 5; i++) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
@@ -1545,7 +1545,7 @@ static int test_find_all_spill(void) {
 
     int vals[5];
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         vals[i] = i * 10;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
@@ -1625,7 +1625,7 @@ static int test_spill_grow(void) {
     /* Insert 25 entries all with hash=0 — forces table to grow */
     int vals[25];
     for (int i = 0; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "g%d", i);
+        char k[32]; snprintf(k, sizeof(k), "g%d", i);
         vals[i] = i * 7;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
@@ -1637,19 +1637,19 @@ static int test_spill_grow(void) {
 
     /* Verify all */
     for (int i = 0; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "g%d", i);
+        char k[32]; snprintf(k, sizeof(k), "g%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 7);
     }
 
     /* Remove half, verify remainder */
     for (int i = 0; i < 25; i += 2) {
-        char k[8]; snprintf(k, sizeof(k), "g%d", i);
+        char k[32]; snprintf(k, sizeof(k), "g%d", i);
         assert(ht_remove(t, k, strlen(k)));
     }
 
     for (int i = 0; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "g%d", i);
+        char k[32]; snprintf(k, sizeof(k), "g%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (i % 2 == 0) assert(v == NULL);
         else assert(v != NULL && *v == i * 7);
@@ -1704,14 +1704,14 @@ static int test_spill_middle_remove(void) {
 
     int vals[20];
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "s%d", i);
+        char k[32]; snprintf(k, sizeof(k), "s%d", i);
         vals[i] = i * 5;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     /* Remove entries 5, 10, 15 from the middle */
     for (int idx = 5; idx < 20; idx += 5) {
-        char k[8]; snprintf(k, sizeof(k), "s%d", idx);
+        char k[32]; snprintf(k, sizeof(k), "s%d", idx);
         assert(ht_remove(t, k, strlen(k)));
     }
 
@@ -1721,7 +1721,7 @@ static int test_spill_middle_remove(void) {
 
     /* Verify all 20: removed ones return NULL, rest have correct values */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "s%d", i);
+        char k[32]; snprintf(k, sizeof(k), "s%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (i == 5 || i == 10 || i == 15) {
             assert(v == NULL);
@@ -1777,7 +1777,7 @@ static int test_max_load_factor_zero(void) {
     /* Default is 0.75 — with capacity 16, grow at 12 entries */
     int vals[20];
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ml%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ml%d", i);
         vals[i] = i;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
@@ -1789,7 +1789,7 @@ static int test_max_load_factor_zero(void) {
 
     /* Verify all */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ml%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ml%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
@@ -1812,32 +1812,32 @@ static int test_zombie_window_oversized(void) {
 
     /* Insert 30 entries — zombie step clamped to capacity */
     for (int i = 0; i < 30; i++) {
-        char k[16]; snprintf(k, sizeof(k), "zo%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zo%d", i);
         int v = i;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(v)));
     }
 
     /* Delete 20 — zombie cursor advances through entire table each step */
     for (int i = 0; i < 20; i++) {
-        char k[16]; snprintf(k, sizeof(k), "zo%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zo%d", i);
         assert(ht_remove(t, k, strlen(k)));
     }
 
     /* Insert 10 more to trigger zombie steps */
     for (int i = 0; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "zn%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zn%d", i);
         int v = i + 100;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(v)));
     }
 
     /* Verify survivors: zo20-29 and zn0-9 */
     for (int i = 20; i < 30; i++) {
-        char k[16]; snprintf(k, sizeof(k), "zo%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zo%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
     for (int i = 0; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "zn%d", i);
+        char k[32]; snprintf(k, sizeof(k), "zn%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i + 100);
     }
@@ -1860,12 +1860,12 @@ static int test_iter_only_prophylactic(void) {
 
     /* Insert 10 entries, then delete all, then compact */
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ip%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ip%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(v));
     }
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ip%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ip%d", i);
         ht_remove(t, k, strlen(k));
     }
     ht_compact(t);
@@ -1903,7 +1903,7 @@ static int test_auto_shrink_disabled(void) {
     /* Fill to trigger grow */
     int vals[50];
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "as%d", i);
+        char k[32]; snprintf(k, sizeof(k), "as%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -1915,7 +1915,7 @@ static int test_auto_shrink_disabled(void) {
 
     /* Delete all but 1 — should NOT shrink */
     for (int i = 1; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "as%d", i);
+        char k[32]; snprintf(k, sizeof(k), "as%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -1946,12 +1946,12 @@ static int test_spill_multi_resize(void) {
     /* Insert spill entries (z-prefix → hash=0) and normal entries */
     int spill_vals[5], norm_vals[10];
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         spill_vals[i] = i * 10;
         ht_upsert(t, k, strlen(k), &spill_vals[i], sizeof(int));
     }
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         norm_vals[i] = i * 100;
         ht_upsert(t, k, strlen(k), &norm_vals[i], sizeof(int));
     }
@@ -1964,12 +1964,12 @@ static int test_spill_multi_resize(void) {
 
     /* Verify all spill and normal entries survived */
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "z%d", i);
+        char k[32]; snprintf(k, sizeof(k), "z%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 10);
     }
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "n%d", i);
+        char k[32]; snprintf(k, sizeof(k), "n%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 100);
     }
@@ -2045,7 +2045,7 @@ static int test_double_compact(void) {
 
     int vals[10];
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "dc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "dc%d", i);
         vals[i] = i * 7;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -2073,7 +2073,7 @@ static int test_double_compact(void) {
 
     /* All entries still correct */
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "dc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "dc%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (i == 0 || i == 5)
             assert(v == NULL);
@@ -2100,14 +2100,14 @@ static int test_robin_hood_invariant(void) {
     /* Insert 30 entries with some collisions */
     int vals[30];
     for (int i = 0; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "rh%d", i);
+        char k[32]; snprintf(k, sizeof(k), "rh%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
 
     /* Delete 10 to create tombstones and trigger compaction */
     for (int i = 0; i < 30; i += 3) {
-        char k[8]; snprintf(k, sizeof(k), "rh%d", i);
+        char k[32]; snprintf(k, sizeof(k), "rh%d", i);
         ht_remove(t, k, strlen(k));
     }
 
@@ -2120,7 +2120,7 @@ static int test_robin_hood_invariant(void) {
     ht_stats(t, &st);
     size_t found = 0;
     for (int i = 0; i < 30; i++) {
-        char k[8]; snprintf(k, sizeof(k), "rh%d", i);
+        char k[32]; snprintf(k, sizeof(k), "rh%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (i % 3 == 0) {
             assert(v == NULL);
@@ -2150,14 +2150,14 @@ static int test_insert_with_hash_same_hash(void) {
     /* All keys get hash=42 via explicit hash parameter */
     int vals[50];
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "hs%d", i);
+        char k[32]; snprintf(k, sizeof(k), "hs%d", i);
         vals[i] = i * 11;
         assert(ht_upsert_with_hash(t, 42, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     /* Each key individually findable via find_with_hash */
     for (int i = 0; i < 50; i++) {
-        char k[8]; snprintf(k, sizeof(k), "hs%d", i);
+        char k[32]; snprintf(k, sizeof(k), "hs%d", i);
         const int *v = ht_find_with_hash(t, 42, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 11);
     }
@@ -2214,7 +2214,7 @@ static int test_iter_all_null_outputs(void) {
 
     int vals[5];
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "in%d", i);
+        char k[32]; snprintf(k, sizeof(k), "in%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -2305,7 +2305,7 @@ static int test_resize_prophylactic(void) {
 
     /* Insert entries */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "rp%d", i);
+        char k[32]; snprintf(k, sizeof(k), "rp%d", i);
         int v = i;
         ht_upsert(t, k, strlen(k), &v, sizeof(int));
     }
@@ -2323,7 +2323,7 @@ static int test_resize_prophylactic(void) {
 
     /* All entries findable */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "rp%d", i);
+        char k[32]; snprintf(k, sizeof(k), "rp%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i);
     }
@@ -2399,14 +2399,14 @@ static int test_clear_arena_reuse(void) {
     /* Reinsert with different keys — should reuse arena */
     int vals[20];
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "nw%d", i);
+        char k[32]; snprintf(k, sizeof(k), "nw%d", i);
         vals[i] = i * 3;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     /* Verify — no stale data from before clear */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "nw%d", i);
+        char k[32]; snprintf(k, sizeof(k), "nw%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v != NULL && *v == i * 3);
     }
@@ -2433,7 +2433,7 @@ static int test_iter_spill_only(void) {
     /* Insert only spill-lane entries */
     int vals[5];
     for (int i = 0; i < 5; i++) {
-        char k[8]; snprintf(k, sizeof(k), "so%d", i);
+        char k[32]; snprintf(k, sizeof(k), "so%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -2467,7 +2467,7 @@ static int test_spill_find_all_early_stop(void) {
     /* Insert 10 spill entries */
     int vals[10];
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "se%d", i);
+        char k[32]; snprintf(k, sizeof(k), "se%d", i);
         vals[i] = i;
         ht_upsert(t, k, strlen(k), &vals[i], sizeof(int));
     }
@@ -2533,7 +2533,7 @@ static int test_long_chain_delete_head(void) {
 
     int vals[25];
     for (int i = 0; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "lc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "lc%d", i);
         vals[i] = i * 3;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
@@ -2545,7 +2545,7 @@ static int test_long_chain_delete_head(void) {
 
     /* All 24 remaining entries must be findable */
     for (int i = 1; i < 25; i++) {
-        char k[8]; snprintf(k, sizeof(k), "lc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "lc%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 3) {
             printf("  FAIL: lc%d lost after head delete\n", i);
@@ -2576,14 +2576,14 @@ static int test_delete_with_interleaved_tombs(void) {
     /* Insert 15 colliding keys */
     int vals[15];
     for (int i = 0; i < 15; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ti%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ti%d", i);
         vals[i] = i * 7;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
 
     /* Delete every other to create interleaved tombstones */
     for (int i = 0; i < 15; i += 2) {
-        char k[8]; snprintf(k, sizeof(k), "ti%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ti%d", i);
         assert(ht_remove(t, k, strlen(k)));
     }
 
@@ -2596,7 +2596,7 @@ static int test_delete_with_interleaved_tombs(void) {
 
     /* Verify remaining entries */
     for (int i = 0; i < 15; i++) {
-        char k[8]; snprintf(k, sizeof(k), "ti%d", i);
+        char k[32]; snprintf(k, sizeof(k), "ti%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (i % 2 == 0 || i == 3) {
             assert(v == NULL);
@@ -2626,7 +2626,7 @@ static int test_insert_at_prophylactic_positions(void) {
 
     /* Insert some entries to trigger resize with prophylactic tombstones */
     for (int i = 0; i < 20; i++) {
-        char k[8]; snprintf(k, sizeof(k), "pp%d", i);
+        char k[32]; snprintf(k, sizeof(k), "pp%d", i);
         int v = i;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(int)));
     }
@@ -2638,7 +2638,7 @@ static int test_insert_at_prophylactic_positions(void) {
 
     /* Now insert many more — some must land at prophylactic positions */
     for (int i = 20; i < 60; i++) {
-        char k[8]; snprintf(k, sizeof(k), "pp%d", i);
+        char k[32]; snprintf(k, sizeof(k), "pp%d", i);
         int v = i * 2;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(int)));
     }
@@ -2647,7 +2647,7 @@ static int test_insert_at_prophylactic_positions(void) {
 
     /* Verify all 60 entries */
     for (int i = 0; i < 60; i++) {
-        char k[8]; snprintf(k, sizeof(k), "pp%d", i);
+        char k[32]; snprintf(k, sizeof(k), "pp%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         int expected = (i < 20) ? i : i * 2;
         if (v == NULL || *v != expected) {
@@ -2675,7 +2675,7 @@ static int test_inc_tombstoned_key(void) {
 
     /* Insert 8 colliding keys */
     for (int i = 0; i < 8; i++) {
-        char k[8]; snprintf(k, sizeof(k), "it%d", i);
+        char k[32]; snprintf(k, sizeof(k), "it%d", i);
         int v = i * 10;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(int)));
     }
@@ -2704,7 +2704,7 @@ static int test_inc_tombstoned_key(void) {
     /* Others: still int (4 bytes) */
     for (int i = 0; i < 8; i++) {
         if (i == 4) continue;
-        char k[8]; snprintf(k, sizeof(k), "it%d", i);
+        char k[32]; snprintf(k, sizeof(k), "it%d", i);
         size_t vl = 0;
         const int *v = ht_find(t, k, strlen(k), &vl);
         if (v == NULL || vl != sizeof(int) || *v != i * 10) {
@@ -2741,7 +2741,7 @@ static int test_collision_churn_rapid(void) {
 
     for (int op = 0; op < 2000; op++) {
         int k = rand() % CC_N;
-        char key[8]; snprintf(key, sizeof(key), "cr%d", k);
+        char key[32]; snprintf(key, sizeof(key), "cr%d", k);
 
         if (present[k]) {
             assert(ht_remove(t, key, strlen(key)));
@@ -2759,7 +2759,7 @@ static int test_collision_churn_rapid(void) {
 
     /* Final verify */
     for (int i = 0; i < CC_N; i++) {
-        char key[8]; snprintf(key, sizeof(key), "cr%d", i);
+        char key[32]; snprintf(key, sizeof(key), "cr%d", i);
         const int *v = ht_find(t, key, strlen(key), NULL);
         if (present[i]) {
             if (v == NULL || *v != i * 13) {
@@ -2826,7 +2826,7 @@ static int test_find_all_after_backshift(void) {
     /* Insert 8 colliding keys */
     int vals[8];
     for (int i = 0; i < 8; i++) {
-        char k[8]; snprintf(k, sizeof(k), "fb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "fb%d", i);
         vals[i] = i * 5;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
@@ -2843,7 +2843,7 @@ static int test_find_all_after_backshift(void) {
 
     /* Verify each survivor individually */
     for (int i = 1; i < 8; i++) {
-        char k[8]; snprintf(k, sizeof(k), "fb%d", i);
+        char k[32]; snprintf(k, sizeof(k), "fb%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 5) {
             printf("  FAIL: fb%d lost\n", i);
@@ -2871,7 +2871,7 @@ static int test_delete_at_bshift_cap_boundary(void) {
 
     int vals[17];
     for (int i = 0; i < 17; i++) {
-        char k[8]; snprintf(k, sizeof(k), "bc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "bc%d", i);
         vals[i] = i * 11;
         assert(ht_upsert(t, k, strlen(k), &vals[i], sizeof(int)));
     }
@@ -2883,7 +2883,7 @@ static int test_delete_at_bshift_cap_boundary(void) {
 
     /* All 16 remaining must be findable */
     for (int i = 1; i < 17; i++) {
-        char k[8]; snprintf(k, sizeof(k), "bc%d", i);
+        char k[32]; snprintf(k, sizeof(k), "bc%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 11) {
             printf("  FAIL: bc%d lost at BSHIFT_CAP boundary\n", i);
@@ -2912,7 +2912,7 @@ static int test_delete_tail_find_head(void) {
 
     /* Insert 10 colliding keys */
     for (int i = 0; i < 10; i++) {
-        char k[8]; snprintf(k, sizeof(k), "dt%d", i);
+        char k[32]; snprintf(k, sizeof(k), "dt%d", i);
         int v = i * 9;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(int)));
     }
@@ -2925,7 +2925,7 @@ static int test_delete_tail_find_head(void) {
 
     /* All first 8 must be findable — early termination must not skip them */
     for (int i = 0; i < 8; i++) {
-        char k[8]; snprintf(k, sizeof(k), "dt%d", i);
+        char k[32]; snprintf(k, sizeof(k), "dt%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         if (v == NULL || *v != i * 9) {
             printf("  FAIL: dt%d lost after tail delete\n", i);
@@ -3020,7 +3020,7 @@ static int test_spill_remove_all_reinsert(void) {
     assert(t != NULL);
 
     for (int i = 0; i < 8; i++) {
-        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         int v = i * 3;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(v)));
     }
@@ -3030,7 +3030,7 @@ static int test_spill_remove_all_reinsert(void) {
     assert(st.size == 8);
 
     for (int i = 0; i < 8; i++) {
-        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         assert(ht_remove(t, k, strlen(k)));
     }
 
@@ -3038,7 +3038,7 @@ static int test_spill_remove_all_reinsert(void) {
     assert(st.size == 0);
 
     for (int i = 0; i < 8; i++) {
-        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         int v = i * 7;
         assert(ht_upsert(t, k, strlen(k), &v, sizeof(v)));
     }
@@ -3047,9 +3047,341 @@ static int test_spill_remove_all_reinsert(void) {
     assert(st.size == 8);
 
     for (int i = 0; i < 8; i++) {
-        char k[8]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         const int *v = ht_find(t, k, strlen(k), NULL);
         assert(v && *v == i * 7);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// Overflow Stash Tests (77-83)
+// ============================================================================
+
+static int test_overflow_basic(void) {
+    printf("Test: overflow stash basic...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 10; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i * 10;
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)) >= 0);
+    }
+
+    ht_stats_t st;
+    ht_stats(t, &st);
+    assert(st.size == 10);
+
+    for (int i = 0; i < 10; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i * 10);
+    }
+    INV_CHECK(t, "test_overflow_basic: after insert");
+
+    ht_remove(t, "k3", 2);
+    ht_remove(t, "k7", 2);
+
+    for (int i = 0; i < 10; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        if (i == 3 || i == 7) assert(v == NULL);
+        else assert(v != NULL && *v == i * 10);
+    }
+    INV_CHECK(t, "test_overflow_basic: after remove");
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_fill_and_fallback(void) {
+    printf("Test: overflow stash fill + Policy B fallback...\n");
+    ht_config_t cfg = { .initial_capacity = 64, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 40; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i;
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)) >= 0);
+    }
+    INV_CHECK(t, "test_overflow_fill: after 40 inserts");
+
+    for (int i = 0; i < 40; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_remove_val(void) {
+    printf("Test: overflow stash remove_val...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i;
+        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)) > 0);
+    }
+    INV_CHECK(t, "test_overflow_remove_val: after insert");
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i;
+        assert(ht_remove_kv_one(t, key, strlen(key), &val, sizeof(val)));
+    }
+    assert(ht_size(t) == 0);
+    INV_CHECK(t, "test_overflow_remove_val: after all removed");
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_find_all(void) {
+    printf("Test: overflow stash find_all across main + stash...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 8; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i * 7;
+        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)) > 0);
+    }
+
+    for (int i = 0; i < 8; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i * 7);
+    }
+
+    g_collect_count = 0;
+    ht_find_key_all(t, "k5", 2, collect_val_cb, NULL);
+    assert(g_collect_count == 1);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_resize(void) {
+    printf("Test: overflow stash entries survive resize...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i * 7;
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)) >= 0);
+    }
+
+    ht_resize(t, 128);
+    INV_CHECK(t, "test_overflow_resize: after resize");
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i * 7);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_max_probe_dist_zero(void) {
+    printf("Test: overflow stash disabled (max_probe_dist=0)...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 0 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i;
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)) >= 0);
+    }
+    INV_CHECK(t, "test_overflow_disabled: after insert");
+    assert(ht_size(t) == 20);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_spill_mixed(void) {
+    printf("Test: overflow + spill (h48<2) coexistence...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, selective_zero_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "z%d", i);
+        int val = i * 3;
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)) >= 0);
+    }
+    for (int i = 0; i < 10; i++) {
+        char key[32]; snprintf(key, sizeof(key), "n%d", i);
+        int val = i * 5;
+        assert(ht_upsert(t, key, strlen(key), &val, sizeof(val)) >= 0);
+    }
+    INV_CHECK(t, "test_overflow_spill_mixed: after insert");
+    assert(ht_size(t) == 30);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "z%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i * 3);
+    }
+    for (int i = 0; i < 10; i++) {
+        char key[32]; snprintf(key, sizeof(key), "n%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i * 5);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+// ============================================================================
+// Overflow Stash Tests (84-88)
+// ============================================================================
+
+static int test_overflow_iter(void) {
+    printf("Test: overflow stash iterator visits overflow entries...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i;
+        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)) > 0);
+    }
+
+    ht_iter_t it = ht_iter_begin(t);
+    int count = 0;
+    const void *k; size_t kl; const void *v; size_t vl;
+    while (ht_iter_next(t, &it, &k, &kl, &v, &vl)) count++;
+    assert(count == 20);
+    INV_CHECK(t, "test_overflow_iter: after iterate");
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_compact(void) {
+    printf("Test: overflow stash entries survive compact...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i * 11;
+        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)) > 0);
+    }
+
+    ht_compact(t);
+    INV_CHECK(t, "test_overflow_compact: after compact");
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i * 11);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_tombstone(void) {
+    printf("Test: overflow stash with main-table tombstones...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i;
+        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)) > 0);
+    }
+
+    assert(ht_remove(t, "k0", 2) == 1);
+    assert(ht_remove(t, "k1", 2) == 1);
+    assert(ht_remove(t, "k2", 2) == 1);
+    INV_CHECK(t, "test_overflow_tombstone: after 3 removes");
+
+    for (int i = 3; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i);
+    }
+    assert(ht_find(t, "k0", 2, NULL) == NULL);
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_large_max_probe_dist(void) {
+    printf("Test: overflow stash with large max_probe_dist...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 200 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i * 3;
+        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)) > 0);
+    }
+
+    INV_CHECK(t, "test_overflow_large_mpd: after insert");
+    assert(ht_size(t) == 20);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i * 3);
+    }
+
+    ht_destroy(t);
+    printf("  PASS\n");
+    return 0;
+}
+
+static int test_overflow_remove_all(void) {
+    printf("Test: overflow stash remove all (main+overflow)...\n");
+    ht_config_t cfg = { .initial_capacity = 16, .max_load_factor = 0.75, .max_probe_dist = 3 };
+    ht_table_t *t = ht_create(&cfg, fixed_hash, NULL, NULL);
+
+    for (int i = 0; i < 20; i++) {
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        int val = i;
+        assert(ht_insert(t, key, strlen(key), &val, sizeof(val)) > 0);
+    }
+
+    size_t removed = ht_remove(t, "k5", 2);
+    assert(removed == 1);
+    INV_CHECK(t, "test_overflow_remove_all: after remove");
+    assert(ht_find(t, "k5", 2, NULL) == NULL);
+
+    for (int i = 0; i < 20; i++) {
+        if (i == 5) continue;
+        char key[32]; snprintf(key, sizeof(key), "k%d", i);
+        const int *v = ht_find(t, key, strlen(key), NULL);
+        assert(v != NULL && *v == i);
     }
 
     ht_destroy(t);
@@ -3180,9 +3512,25 @@ int main(void) {
     fails += test_inc_with_hash_normal_hash();
     fails += test_spill_remove_all_reinsert();
 
+    // Overflow stash tests (77-83)
+    fails += test_overflow_basic();
+    fails += test_overflow_fill_and_fallback();
+    fails += test_overflow_remove_val();
+    fails += test_overflow_find_all();
+    fails += test_overflow_resize();
+    fails += test_overflow_max_probe_dist_zero();
+    fails += test_overflow_spill_mixed();
+
+    // Overflow stash tests (84-88)
+    fails += test_overflow_iter();
+    fails += test_overflow_compact();
+    fails += test_overflow_tombstone();
+    fails += test_overflow_large_max_probe_dist();
+    fails += test_overflow_remove_all();
+
     printf("\n");
     if (fails == 0) {
-        printf("All edge case A tests passed! (70/70)\n");
+        printf("All edge case A tests passed! (82/82)\n");
     } else {
         printf("%d test(s) FAILED!\n", fails);
     }

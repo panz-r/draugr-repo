@@ -170,7 +170,7 @@ static void test_ht_clear_nonempty(void) {
     printf("\n  [ht_clear] On non-empty table...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 50; i++) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         insert_test_kv(t, k, i);
     }
     ht_clear(t);
@@ -188,12 +188,12 @@ static void test_ht_clear_with_tombstones(void) {
     printf("\n  [ht_clear] After removals (with tombstones)...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 20; i++) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         insert_test_kv(t, k, i);
     }
     // Remove half to create tombstones
     for (int i = 0; i < 20; i += 2) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         ht_remove(t, k, strlen(k));
     }
     ht_stats_t st_before;
@@ -1002,7 +1002,7 @@ static void test_ht_resize_grow(void) {
     printf("\n  [ht_resize] Grow table...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 30; i++) {
-        char k[16]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         insert_test_kv(t, k, i);
     }
     ht_stats_t st_before;
@@ -1020,7 +1020,7 @@ static void test_ht_resize_shrink(void) {
     printf("\n  [ht_resize] Shrink table...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         insert_test_kv(t, k, i);
     }
     bool ok = ht_resize(t, 64);
@@ -1049,11 +1049,11 @@ static void test_ht_compact_basic(void) {
     printf("\n  [ht_compact] Basic...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 20; i++) {
-        char k[16]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         insert_test_kv(t, k, i);
     }
     for (int i = 0; i < 10; i += 2) {
-        char k[16]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         ht_remove(t, k, strlen(k));
     }
     ht_stats_t st_before;
@@ -1081,16 +1081,16 @@ static void test_ht_compact_preserves_entries(void) {
     printf("\n  [ht_compact] Preserves all entries...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 15; i++) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         insert_test_kv(t, k, i * 10);
     }
     for (int i = 0; i < 5; i++) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         ht_remove(t, k, strlen(k));
     }
     ht_compact(t);
     for (int i = 5; i < 15; i++) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         const void *v = ht_find(t, k, strlen(k), NULL);
         ASSERT_NOT_NULL(v, "Entry should still exist after compact");
     }
@@ -1118,7 +1118,7 @@ static void test_ht_iter_nonempty(void) {
     printf("\n  [ht_iter] Non-empty table...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 5; i++) {
-        char k[16]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         insert_test_kv(t, k, i);
     }
     ht_iter_t iter = ht_iter_begin(t);
@@ -1237,7 +1237,7 @@ static void test_ht_check_invariants_valid(void) {
     printf("\n  [ht_check_invariants] Valid table...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "key%d", i);
+        char k[32]; snprintf(k, sizeof(k), "key%d", i);
         insert_test_kv(t, k, i);
     }
     const char *err = ht_check_invariants(t);
@@ -1259,15 +1259,15 @@ static void test_ht_check_invariants_after_operations(void) {
     printf("\n  [ht_check_invariants] After mixed ops...\n");
     ht_table_t *t = create_default_ht();
     for (int i = 0; i < 20; i++) {
-        char k[16]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         insert_test_kv(t, k, i);
     }
     for (int i = 0; i < 10; i++) {
-        char k[16]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         ht_remove(t, k, strlen(k));
     }
     for (int i = 20; i < 25; i++) {
-        char k[16]; snprintf(k, sizeof(k), "k%d", i);
+        char k[32]; snprintf(k, sizeof(k), "k%d", i);
         insert_test_kv(t, k, i);
     }
     const char *err = ht_check_invariants(t);
