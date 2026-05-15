@@ -233,9 +233,13 @@ typedef struct {
 } htc_stats_t;
 
 #define HTC_STAT_INC(s) __atomic_fetch_add(&s, 1, __ATOMIC_RELAXED)
+
+/** Print all stats counters to stdout (requires HTC_STATS). */
+void htc_stats_print(const htc_table_t *t);
 #else
 typedef int htc_stats_t;
 #define HTC_STAT_INC(s) ((void)0)
+static inline void htc_stats_print(const htc_table_t *t) { (void)t; }
 #endif
 
 struct htc_table {

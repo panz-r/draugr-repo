@@ -1407,6 +1407,35 @@ cuckoo_filter_t *htc_get_filter(const htc_table_t *t) {
     return t ? t->filter : NULL;
 }
 
+#ifdef HTC_STATS
+void htc_stats_print(const htc_table_t *t) {
+    if (!t) return;
+    const htc_stats_t *s = &t->stats;
+    printf("htc stats:\n");
+    printf("  find_primary_hit    %lu\n", __atomic_load_n(&s->find_primary_hit, __ATOMIC_RELAXED));
+    printf("  find_secondary_hit  %lu\n", __atomic_load_n(&s->find_secondary_hit, __ATOMIC_RELAXED));
+    printf("  find_stash_hit      %lu\n", __atomic_load_n(&s->find_stash_hit, __ATOMIC_RELAXED));
+    printf("  find_oldgen_hit     %lu\n", __atomic_load_n(&s->find_oldgen_hit, __ATOMIC_RELAXED));
+    printf("  find_negative       %lu\n", __atomic_load_n(&s->find_negative, __ATOMIC_RELAXED));
+    printf("  secondary_skipped   %lu\n", __atomic_load_n(&s->secondary_skipped, __ATOMIC_RELAXED));
+    printf("  secondary_checked   %lu\n", __atomic_load_n(&s->secondary_checked, __ATOMIC_RELAXED));
+    printf("  seq_retries         %lu\n", __atomic_load_n(&s->seq_retries, __ATOMIC_RELAXED));
+    printf("  bfs_attempts        %lu\n", __atomic_load_n(&s->bfs_attempts, __ATOMIC_RELAXED));
+    printf("  bfs_success         %lu\n", __atomic_load_n(&s->bfs_success, __ATOMIC_RELAXED));
+    printf("  bfs_no_path         %lu\n", __atomic_load_n(&s->bfs_no_path, __ATOMIC_RELAXED));
+    printf("  stash_insert        %lu\n", __atomic_load_n(&s->stash_insert, __ATOMIC_RELAXED));
+    printf("  stash_grow          %lu\n", __atomic_load_n(&s->stash_grow, __ATOMIC_RELAXED));
+    printf("  stash_full          %lu\n", __atomic_load_n(&s->stash_full, __ATOMIC_RELAXED));
+    printf("  front_cache_hit     %lu\n", __atomic_load_n(&s->front_cache_hit, __ATOMIC_RELAXED));
+    printf("  front_cache_miss    %lu\n", __atomic_load_n(&s->front_cache_miss, __ATOMIC_RELAXED));
+    printf("  grow_started        %lu\n", __atomic_load_n(&s->grow_started, __ATOMIC_RELAXED));
+    printf("  grow_copied_buckets %lu\n", __atomic_load_n(&s->grow_copied_bucket_entries, __ATOMIC_RELAXED));
+    printf("  grow_copied_stashes %lu\n", __atomic_load_n(&s->grow_copied_stash_entries, __ATOMIC_RELAXED));
+    printf("  writer_retry_chg    %lu\n", __atomic_load_n(&s->writer_retry_gen_changed, __ATOMIC_RELAXED));
+    printf("  writer_retry_frz    %lu\n", __atomic_load_n(&s->writer_retry_gen_frozen, __ATOMIC_RELAXED));
+}
+#endif
+
 /* =========================================================================
  * Public API — insert / upsert / update / find / remove / size
  * ========================================================================= */
