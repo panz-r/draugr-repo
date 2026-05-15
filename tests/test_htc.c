@@ -449,8 +449,8 @@ static void test_arena_alloc_free(void) {
     htc_arena_free(&ha, idx1);
     htc_arena_free(&ha, idx2);
 
-    free(ha.records);
     free(ha.free_idx);
+    free(ha.records);
     PASS();
 }
 
@@ -476,8 +476,8 @@ static void test_stash_overflow(void) {
     htc_stash_remove_at(&s, 0);
     assert(s.size == 31);
 
-    free(ha.records);
     free(ha.free_idx);
+    free(ha.records);
     free(s.slots);
     PASS();
 }

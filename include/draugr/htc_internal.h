@@ -126,6 +126,7 @@ typedef struct {
 typedef struct __attribute__((aligned(64))) {
     htc_spinlock_t  lock;
     htc_stash_t     stash;
+    htc_arena_t     arena;          /* per-shard record allocator */
     uint32_t        bucket_begin;
     uint32_t        bucket_count;
     _Atomic uint8_t migrated;
@@ -136,6 +137,7 @@ _Static_assert(sizeof(htc_shard_t) % 64 == 0, "htc_shard_t size must be a multip
 /* ─── Retire node for deferred epoch-based free ──────────── */
 typedef struct htc_retire_node {
     uint32_t                    arena_idx;
+    uint32_t                    shard_id;   /* which shard's arena owns this */
     uint64_t                    retire_epoch;
     struct htc_retire_node     *next;
 } htc_retire_node_t;
@@ -187,9 +189,9 @@ typedef struct htc_table_gen {
     _Atomic uint32_t   state;
     htc_bucket_t      *buckets;
     htc_bucket_meta_t *meta;
-    htc_arena_t       *arena;
+    htc_arena_t       *arena;      /* per-shard arena access via htc_shard_arena() */
     htc_shard_t       *shards;
-    uint64_t          *migrated_bitmap;  /* per-chunk migrated flags */
+    uint64_t          *migrated_bitmap;
     uint32_t           bucket_mask;
     uint32_t           num_buckets;
     uint32_t           shard_count;
@@ -197,9 +199,17 @@ typedef struct htc_table_gen {
     struct htc_table_gen *old;
 } htc_table_gen_t;
 
-/* Returns the chunk index for a bucket */
+/* Returns the arena for a given bucket's shard */
 static inline uint32_t htc_chunk_of(uint32_t bucket_id) {
     return bucket_id >> HTC_CHUNK_SHIFT;
+}
+
+static inline uint32_t htc_shard_of(uint32_t bucket_id, uint32_t shard_count) {
+    return bucket_id % shard_count;
+}
+
+static inline htc_arena_t *htc_shard_arena(htc_shard_t *shards, uint32_t bucket, uint32_t sc) {
+    return &shards[htc_shard_of(bucket, sc)].arena;
 }
 
 /* ─── Performance counters (optional, gated by HTC_STATS) ─── */
@@ -246,7 +256,7 @@ struct htc_table {
     /* Phase 1: core cuckoo data */
     htc_bucket_t      *buckets;
     htc_bucket_meta_t *meta;
-    htc_arena_t       *arena;
+    htc_arena_t       *arena;      /* global record arena */
     htc_stash_t        stash;
     void    *allocator;
 
@@ -436,10 +446,6 @@ void    htc_epoch_unpin(htc_epoch_ctl_t *ep);
  * Shard locking helpers (Phase 2)
  * Always acquire shard locks in ascending shard ID.
  * ============================================================================ */
-
-static inline uint32_t htc_shard_of(uint32_t bucket_id, uint32_t shard_count) {
-    return bucket_id % shard_count;
-}
 
 static inline void htc_lock_shards(htc_shard_t *shards,
                                     uint32_t a, uint32_t b) {
