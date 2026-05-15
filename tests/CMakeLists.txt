@@ -87,6 +87,15 @@ add_executable(test_amq_property test_amq_property.c)
 target_link_libraries(test_amq_property draugr m)
 add_test(NAME amq_property_tests COMMAND test_amq_property)
 
+# htc_kv high-level key-value wrapper
+add_executable(test_htc_kv test_htc_kv.c)
+target_link_libraries(test_htc_kv draugr m)
+add_test(NAME htc_kv_tests COMMAND test_htc_kv)
+
+add_executable(test_htc_kv_property test_htc_kv_property.c)
+target_link_libraries(test_htc_kv_property draugr m)
+add_test(NAME htc_kv_property_tests COMMAND test_htc_kv_property)
+
 # These tests use --wrap to intercept stdlib allocators
 # In DRAUGR_USE_MALLOC mode, --wrap tests still work (they intercept real malloc)
 set(WRAP_TEST_COMMON ../src/ht.c ../src/ht_cache.c ../src/util.c)

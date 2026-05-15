@@ -180,11 +180,56 @@ int main(int argc, char **argv) {
     }
     double t_elapsed = now_us() - t_start;
 
-    /* Results */
+    /* Results — tab-separated data line */
     const char *mix_name = "read";
     if (opt_mix == 'b') mix_name = "bal";
     else if (opt_mix == 'w') mix_name = "write";
     else if (opt_mix == 'n') mix_name = "neg";
+
+    /* Battery 13 Q29: reproducibility manifest */
+    fprintf(stderr, "=== bench_htc manifest ===\n");
+    fprintf(stderr, "threads %d\n", opt_threads);
+    fprintf(stderr, "mix %s\n", mix_name);
+    fprintf(stderr, "filter %d\n", opt_filter);
+    fprintf(stderr, "load %.2f\n", opt_load);
+    fprintf(stderr, "key_dist %c\n", opt_key);
+    fprintf(stderr, "buckets_initial %d\n", opt_buckets);
+    fprintf(stderr, "ops_per_thread %d\n", opt_ops);
+    fprintf(stderr, "warmup %d\n", opt_mix != 'w' ? (int)((double)opt_buckets * 8 * opt_load * 0.5) : 0);
+    fprintf(stderr, "front_cache %s\n", "disabled");
+    fprintf(stderr, "stats %s\n",
+#ifdef HTC_STATS
+            "enabled"
+#else
+            "disabled"
+#endif
+           );
+    fprintf(stderr, "debug %s\n",
+#ifdef HTC_DEBUG
+            "enabled"
+#else
+            "disabled"
+#endif
+           );
+#if defined(__clang__)
+    fprintf(stderr, "compiler clang\n");
+    fprintf(stderr, "compiler_version %d.%d\n", __clang_major__, __clang_minor__);
+#elif defined(__GNUC__) || defined(__GNUG__)
+    fprintf(stderr, "compiler gcc\n");
+    fprintf(stderr, "compiler_version %d.%d\n", __GNUC__, __GNUC_MINOR__);
+#else
+    fprintf(stderr, "compiler unknown\n");
+#endif
+#if defined(__aarch64__)
+    fprintf(stderr, "arch aarch64\n");
+#elif defined(__x86_64__) || defined(__amd64__)
+    fprintf(stderr, "arch x86_64\n");
+#else
+    fprintf(stderr, "arch unknown\n");
+#endif
+    fprintf(stderr, "elapsed_us %.0f\n", t_elapsed);
+    fprintf(stderr, "total_ops %.0f\n", total_ops);
+    fprintf(stderr, "final_size %zu\n", htc_size(t));
 
     printf("threads\tmix\tfilter\tload\tops/sec\tus/op\tsize\n");
     printf("%d\t%s\t%d\t%.2f\t%.0f\t%.1f\t%zu\n",

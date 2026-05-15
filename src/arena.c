@@ -33,7 +33,7 @@
 
 #if defined(__x86_64__) && defined(__AVX2__)
 #include <immintrin.h>
-#elif defined(__aarch64__) || defined(_M_ARM64)
+#elif (defined(__aarch64__) || defined(_M_ARM64)) && !defined(__CBMC__)
 #include <arm_neon.h>
 #endif
 
