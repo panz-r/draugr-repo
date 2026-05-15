@@ -892,22 +892,142 @@ static bool commit_path_locked(htc_table_t *t, ht_cuckoo_path_t *path,
     return true;
 }
 
+/* ─── LFBCH-style lock-free BFS commit (§23) ─────────────────
+ * Commits a BFS displacement path without holding shard locks.
+ * Uses per-bucket seq guards + CAS on destination slots for
+ * mutual exclusion. Falls back to locked commit on CAS failure.
+ *
+ * Returns true on success, false if rollback needed (caller must
+ * re-acquire shard locks and use commit_path_locked). */
+static bool commit_path_lfbch(htc_table_t *t, ht_cuckoo_path_t *path,
+                              uint64_t *expected_src,
+                              uint64_t new_slot_word)
+{
+    /* Vacancy-backward: moves[0] writes to the originally empty slot.
+     * Each subsequent move writes to the slot freed by the previous move.
+     * The new entry writes to the slot freed by the last move. */
+
+    /* Phase 1: CAS-claim all destination slots and clear all source slots.
+     * If any CAS fails, roll back completed moves and return false. */
+    for (uint8_t i = 0; i < path->move_count; i++) {
+        ht_move_t *m = &path->moves[i];
+        /* Load current source slot word — expected_src is not yet populated
+         * (it gets filled by validate_path_locked in the locked fallback). */
+        uint64_t src_word = __atomic_load_n(
+            &t->buckets[m->from_bucket].slot[m->from_slot], __ATOMIC_ACQUIRE);
+        expected_src[i] = src_word;
+
+        htc_record_t *r = htc_arena_ptr(t->arena, htc_slot_index(src_word));
+        uint32_t p = (uint32_t)(r->full_hash & t->bucket_mask);
+        bool in_sec = (m->to_bucket != p);
+        uint16_t etag = htc_tag16(r->full_hash);
+        uint64_t dst_word = htc_slot_pack(htc_slot_index(src_word), etag,
+                                           HTC_STATE_LIVE, in_sec);
+
+        /* Claim destination slot with CAS (fails if another writer took it) */
+        uint64_t exp = htc_slot_empty_word();
+        if (!htc_atomic_cas(&t->buckets[m->to_bucket].slot[m->to_slot],
+                            &exp, dst_word,
+                            __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+            /* Rollback: reverse all completed moves */
+            for (int8_t j = (int8_t)i - 1; j >= 0; j--) {
+                ht_move_t *rj = &path->moves[j];
+                uint64_t rj_src = expected_src[j];
+                /* Restore source (clear destination, restore source) */
+                __atomic_store_n(&t->buckets[rj->from_bucket].slot[rj->from_slot],
+                                 rj_src, __ATOMIC_RELEASE);
+                __atomic_store_n(&t->buckets[rj->to_bucket].slot[rj->to_slot],
+                                 htc_slot_empty_word(), __ATOMIC_RELEASE);
+            }
+            return false;
+        }
+
+        /* Seq-guard source clear so readers don't see the entry in both places */
+        htc_seq_guard_t src_guard = htc_bucket_seq_begin(&t->meta[m->from_bucket]);
+        __atomic_store_n(&t->buckets[m->from_bucket].slot[m->from_slot],
+                         htc_slot_empty_word(), __ATOMIC_RELEASE);
+        htc_bucket_seq_end(&t->meta[m->from_bucket], src_guard);
+    }
+
+    /* Place the new entry into the final vacancy slot */
+    {
+        uint64_t exp = htc_slot_empty_word();
+        if (!htc_atomic_cas(&t->buckets[path->insert_bucket].slot[path->insert_slot],
+                            &exp, new_slot_word,
+                            __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+            /* Rollback all moves */
+            for (int8_t j = (int8_t)path->move_count - 1; j >= 0; j--) {
+                ht_move_t *rj = &path->moves[j];
+                uint64_t rj_src = expected_src[j];
+                __atomic_store_n(&t->buckets[rj->from_bucket].slot[rj->from_slot],
+                                 rj_src, __ATOMIC_RELEASE);
+                __atomic_store_n(&t->buckets[rj->to_bucket].slot[rj->to_slot],
+                                 htc_slot_empty_word(), __ATOMIC_RELEASE);
+            }
+            return false;
+        }
+    }
+
+    /* Phase 2: ctrl updates (no rollback needed — slots are committed) */
+    for (uint8_t i = 0; i < path->move_count; i++) {
+        ht_move_t *m = &path->moves[i];
+        uint64_t src_word = expected_src[i];
+        htc_record_t *r = htc_arena_ptr(t->arena, htc_slot_index(src_word));
+        uint16_t etag = htc_tag16(r->full_hash);
+        uint8_t ep8 = htc_partial8(etag);
+        htc_ctrl_set(&t->meta[m->to_bucket], m->to_slot, ep8);
+        htc_ctrl_clear(&t->meta[m->from_bucket], m->from_slot);
+    }
+    {
+        htc_record_t *nr = htc_arena_ptr(t->arena, htc_slot_index(new_slot_word));
+        uint8_t np8 = htc_partial8(htc_tag16(nr->full_hash));
+        htc_ctrl_set(&t->meta[path->insert_bucket], path->insert_slot, np8);
+    }
+
+    /* Phase 3: remap updates */
+    for (uint8_t i = 0; i < path->move_count; i++) {
+        ht_move_t *m = &path->moves[i];
+        uint64_t src_word = expected_src[i];
+        htc_record_t *r = htc_arena_ptr(t->arena, htc_slot_index(src_word));
+        uint32_t p = (uint32_t)(r->full_hash & t->bucket_mask);
+        bool in_sec = (m->to_bucket != p);
+        bool was_in_sec = htc_slot_in_secondary(src_word);
+        uint16_t etag = htc_tag16(r->full_hash);
+        if (was_in_sec && !in_sec)
+            htc_remap_dec(&t->meta[p]);
+        else if (!was_in_sec && in_sec)
+            htc_remap_inc(&t->meta[p], etag);
+    }
+    {
+        htc_record_t *nr = htc_arena_ptr(t->arena, htc_slot_index(new_slot_word));
+        uint16_t ntag = htc_tag16(nr->full_hash);
+        bool nin_sec = (path->insert_bucket != (uint32_t)(nr->full_hash & t->bucket_mask));
+        if (nin_sec)
+            htc_remap_inc(&t->meta[(uint32_t)(nr->full_hash & t->bucket_mask)], ntag);
+    }
+    return true;
+}
+
 /* =========================================================================
  * Internal helpers — placement & rehash
  * ========================================================================= */
 
-static bool htc_place_entry(htc_table_t *t, uint64_t h, uint64_t slot_word,
+static bool htc_place_entry(htc_table_t *t, htc_table_gen_t *gen,
+                            uint64_t h, uint64_t slot_word,
                             htc_stash_t *stash_override)
 {
     uint16_t tag     = htc_tag16(h);
     uint8_t  partial = htc_partial8(tag);
-    uint32_t b1      = (uint32_t)(h & t->bucket_mask);
-    uint32_t b2      = htc_alt_bucket(b1, h, tag) & t->bucket_mask;
+    uint32_t b1      = (uint32_t)(h & (gen ? gen->bucket_mask : t->bucket_mask));
+    uint32_t b2      = htc_alt_bucket(b1, h, tag) & (gen ? gen->bucket_mask : t->bucket_mask);
+
+    htc_bucket_t      *buckets = gen ? gen->buckets : t->buckets;
+    htc_bucket_meta_t *meta    = gen ? gen->meta : t->meta;
 
     /* try primary — CAS-based slot claim */
     {
-        htc_bucket_t *bk = &t->buckets[b1];
-        htc_bucket_meta_t *m = &t->meta[b1];
+        htc_bucket_t *bk = &buckets[b1];
+        htc_bucket_meta_t *m = &meta[b1];
         uint64_t ctrl = htc_ctrl_load(m);
         uint64_t em   = htc_match8(ctrl, 0);
         while (em) {
@@ -925,8 +1045,8 @@ static bool htc_place_entry(htc_table_t *t, uint64_t h, uint64_t slot_word,
 
     /* try secondary — CAS-based */
     {
-        htc_bucket_t *bk = &t->buckets[b2];
-        htc_bucket_meta_t *m = &t->meta[b2];
+        htc_bucket_t *bk = &buckets[b2];
+        htc_bucket_meta_t *m = &meta[b2];
         uint64_t ctrl = htc_ctrl_load(m);
         uint64_t em   = htc_match8(ctrl, 0);
         while (em) {
@@ -936,7 +1056,7 @@ static bool htc_place_entry(htc_table_t *t, uint64_t h, uint64_t slot_word,
             if (htc_atomic_cas(&bk->slot[si], &exp, nw,
                                __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
                 htc_ctrl_set(m, si, partial);
-                htc_remap_inc(&t->meta[b1], tag);
+                htc_remap_inc(&meta[b1], tag);
                 return true;
             }
             em = htc_clear_candidate(em, si);
@@ -950,7 +1070,7 @@ static bool htc_place_entry(htc_table_t *t, uint64_t h, uint64_t slot_word,
 
 static bool htc_rehash_place(htc_table_t *t, uint64_t h, uint64_t slot_word)
 {
-    return htc_place_entry(t, h, slot_word, NULL);
+    return htc_place_entry(t, NULL, h, slot_word, NULL);
 }
 
 bool htc_grow(htc_table_t *t)
@@ -1440,7 +1560,16 @@ bool htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
                 if (t->shard_count < bfs_max_shards * 2)
                     bfs_max_shards = t->shard_count;
                 if (all_n <= bfs_max_shards) {
-                    /* Unlock s1/s2, then lock ALL shards in sorted order */
+                    uint64_t expected_src[HTC_BFS_MAX_PATH] = {0};
+
+                    /* LFBCH commit (§23): per-move CAS + seq guards.
+                     * If it fails (CAS race), fall back to locked protocol. */
+                    if (commit_path_lfbch(t, &bfs_path, expected_src, slot_word)) {
+                        HTC_STAT_INC(t->stats.bfs_success);
+                        goto insert_done;
+                    }
+
+                    /* Locked protocol */
                     if (t->shards) {
                         htc_unlock_shards(t->shards, s1, s2);
                         for (uint8_t i = 0; i < all_n; i++)
@@ -1454,7 +1583,6 @@ bool htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
                             htc_spin_lock(&t->shards[all_sids[i]].lock);
                     }
 
-                    uint64_t expected_src[HTC_BFS_MAX_PATH] = {0};
                     if (validate_path_locked(t, &bfs_path, expected_src)) {
                         HTC_STAT_INC(t->stats.bfs_success);
                         commit_path_locked(t, &bfs_path, expected_src, slot_word);
@@ -1595,7 +1723,7 @@ bool htc_upsert(htc_table_t *t, uint64_t hash, uint64_t value)
 
         uint64_t slot_word = htc_slot_pack(idx, tag, HTC_STATE_LIVE, 0);
 
-        if (!htc_place_entry(t, hash, slot_word, NULL)) {
+        if (!htc_place_entry(t, gen, hash, slot_word, NULL)) {
             htc_arena_free(t->arena, idx);
             return false;
         }
