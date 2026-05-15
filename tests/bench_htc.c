@@ -147,7 +147,8 @@ int main(int argc, char **argv) {
     cuckoo_filter_t *cf = NULL;
     if (opt_filter) {
         cf = cuckoo_filter_create((size_t)opt_threads * opt_ops, 4, 10, 200);
-        htc_set_filter(t, cf);
+        htc_amq_filter_t amq = htc_amq_cuckoo(cf);
+        htc_set_filter(t, &amq);
     }
 
     /* Warmup: pre-fill to target load */

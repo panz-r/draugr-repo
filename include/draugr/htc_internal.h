@@ -261,7 +261,8 @@ struct htc_table {
     htc_spinlock_t     grow_lock;
 
     /* Optional AMQ filter for negative lookup acceleration (§25) */
-    struct cuckoo_filter *filter;
+    htc_amq_filter_t   amq_filter;
+    int                have_amq_filter;
 
 #ifdef HTC_STATS
     htc_stats_t        stats;

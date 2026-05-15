@@ -64,6 +64,29 @@ add_test(NAME htc_phase1_tests COMMAND test_htc)
 add_executable(bench_htc bench_htc.c)
 target_link_libraries(bench_htc draugr m)
 
+# Filter tests
+add_executable(test_bloom test_bloom.c)
+target_link_libraries(test_bloom draugr m)
+add_test(NAME bloom_filter_tests COMMAND test_bloom)
+
+add_executable(test_vacuum test_vacuum.c)
+target_link_libraries(test_vacuum draugr m)
+add_test(NAME vacuum_filter_tests COMMAND test_vacuum)
+
+add_executable(test_amq test_amq.c)
+target_link_libraries(test_amq draugr m)
+add_test(NAME amq_filter_tests COMMAND test_amq)
+
+# Concurrent filter test
+add_executable(test_htc_filter test_htc_filter.c)
+target_link_libraries(test_htc_filter draugr m)
+add_test(NAME htc_filter_tests COMMAND test_htc_filter)
+
+# Property-based AMQ filter tests
+add_executable(test_amq_property test_amq_property.c)
+target_link_libraries(test_amq_property draugr m)
+add_test(NAME amq_property_tests COMMAND test_amq_property)
+
 # These tests use --wrap to intercept stdlib allocators
 # In DRAUGR_USE_MALLOC mode, --wrap tests still work (they intercept real malloc)
 set(WRAP_TEST_COMMON ../src/ht.c ../src/ht_cache.c ../src/util.c)
