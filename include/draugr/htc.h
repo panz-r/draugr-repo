@@ -17,7 +17,10 @@ typedef struct {
     uint32_t initial_buckets;
     double   max_load_factor;
     uint32_t shard_count;       /* default 128, 0 = use default */
+    uint32_t flags;             /* bitfield: 1 = disable front cache */
 } htc_config_t;
+
+#define HTC_CFG_DISABLE_FRONT_CACHE 1u
 
 htc_table_t *htc_create(const htc_config_t *cfg);
 htc_table_t *htc_create_with_arena(const htc_config_t *cfg, struct arena *arena);

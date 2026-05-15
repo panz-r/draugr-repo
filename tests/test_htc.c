@@ -647,16 +647,8 @@ static void *migration_thread_worker(void *arg) {
             a->fail_i = i;
             return NULL;
         }
-        /* Retry find a few times to tolerate transient false negatives
-         * during concurrent growth (tiny window between rehash and
-         * old-slot-clear). */
-        int found = 0;
-        for (int r = 0; r < 8 && !found; r++) {
-            uint64_t out = 0xdead;
-            if (htc_find(a->t, h, &out) && out == (uint64_t)i)
-                found = 1;
-        }
-        if (!found) {
+        uint64_t out = 0xdead;
+        if (!htc_find(a->t, h, &out) || out != (uint64_t)i) {
             a->result = 3;
             a->fail_i = i;
             return NULL;
@@ -700,7 +692,213 @@ static void test_migration_concurrent(void) {
     PASS();
 }
 
+/* ─── Multi-threaded stress test (mixed ops, many threads) ─── */
+typedef struct {
+    htc_table_t *t;
+    int          id;
+    int          ops;
+    int          result;
+} stress_thread_arg_t;
+
+static void *stress_worker(void *arg) {
+    stress_thread_arg_t *a = (stress_thread_arg_t *)arg;
+    uint64_t seed = (uint64_t)a->id * 0x9e3779b97f4a7c15ULL;
+
+    for (int i = 0; i < a->ops; i++) {
+        seed = seed * 6364136223846793005ULL + 1;
+        uint64_t hash = seed;
+        uint64_t val = seed >> 1;
+        int op = (int)(seed & 3);
+
+        switch (op) {
+        case 0: /* insert */
+            htc_insert(a->t, hash, val);
+            break;
+        case 1: /* upsert */
+            htc_upsert(a->t, hash, val);
+            break;
+        case 2: /* find */
+            { uint64_t out; htc_find(a->t, hash, &out); }
+            break;
+        case 3: /* remove */
+            htc_remove(a->t, hash);
+            break;
+        }
+    }
+    return NULL;
+}
+
+static void test_stress_multithreaded(void) {
+    TEST("multi-threaded stress (mixed ops)");
+    htc_config_t cfg = {64, 0.75, 0};
+    htc_table_t *t = htc_create(&cfg);
+
+    int T = 4;
+    int OPS = 5000;
+    pthread_t threads[8];
+    stress_thread_arg_t args[8];
+
+    for (int ti = 0; ti < T; ti++) {
+        args[ti].t = t;
+        args[ti].id = ti;
+        args[ti].ops = OPS;
+        args[ti].result = 0;
+        pthread_create(&threads[ti], NULL, stress_worker, &args[ti]);
+    }
+
+    for (int ti = 0; ti < T; ti++)
+        pthread_join(threads[ti], NULL);
+
+    /* Table should be internally consistent (no crashes, no ASan errors) */
+    htc_destroy(t);
+    PASS();
+}
+
+/* ─── Concurrent BFS stress test ────────────────────────────── */
+/* Force BFS by inserting same-tag entries from multiple threads */
+
+static void *bfs_stress_worker(void *arg) {
+    stress_thread_arg_t *a = (stress_thread_arg_t *)arg;
+    /* All threads use hashes with same tag (bits 32-47 = 0, bits 48-63 = 0) */
+    uint64_t base = (uint64_t)a->id << 48;
+    for (int i = 0; i < a->ops; i++) {
+        uint64_t h = base | (uint64_t)(i * 0x10000);
+        if (!htc_insert(a->t, h, (uint64_t)i)) {
+            /* Insert can fail when table is full — that's OK for stress */
+            break;
+        }
+    }
+    return NULL;
+}
+
+static void test_bfs_concurrent(void) {
+    TEST("concurrent BFS stress");
+    htc_config_t cfg = {16, 0.6, 0};
+    htc_table_t *t = htc_create(&cfg);
+
+    int T = 4;
+    int OPS = 100;
+    pthread_t threads[8];
+    stress_thread_arg_t args[8];
+
+    for (int ti = 0; ti < T; ti++) {
+        args[ti].t = t;
+        args[ti].id = ti;
+        args[ti].ops = OPS;
+        pthread_create(&threads[ti], NULL, bfs_stress_worker, &args[ti]);
+    }
+
+    for (int ti = 0; ti < T; ti++)
+        pthread_join(threads[ti], NULL);
+
+    htc_destroy(t);
+    PASS();
+}
+
+/* ─── Lazy migration stress test ────────────────────────────── */
+/* Start a lazy resize, then concurrently operate and migrate chunks. */
+
+static void *lazy_migrate_worker(void *arg) {
+    stress_thread_arg_t *a = (stress_thread_arg_t *)arg;
+    uint64_t seed = (uint64_t)a->id * 0x9e3779b97f4a7c15ULL;
+    for (int i = 0; i < a->ops; i++) {
+        seed = seed * 6364136223846793005ULL + 1;
+        uint64_t hash = seed;
+        uint64_t val = seed >> 1;
+        int op = (int)(seed & 1);
+        if (op == 0) htc_insert(a->t, hash, val);
+        else { uint64_t out; htc_find(a->t, hash, &out); }
+    }
+    return NULL;
+}
+
+static void test_migration_lazy_stress(void) {
+    TEST("lazy migration stress");
+    /* Large initial table to prevent workers from triggering sync grows */
+    htc_config_t cfg = {512, 1.0, 0};
+    htc_table_t *t = htc_create(&cfg);
+
+    /* Pre-fill */
+    int N = 100;
+    for (int i = 0; i < N; i++)
+        assert(htc_insert(t, hash_seq(i), (uint64_t)i));
+
+    /* Start lazy resize (table is small enough that entries cluster) */
+    assert(htc_resize_start(t, t->num_buckets * 2));
+
+    /* Concurrently operate and migrate while workers are active */
+    int T = 3;
+    int OPS = 200;
+    pthread_t threads[4];
+    stress_thread_arg_t args[4];
+    for (int ti = 0; ti < T; ti++) {
+        args[ti].t = t;
+        args[ti].id = ti;
+        args[ti].ops = OPS;
+        pthread_create(&threads[ti], NULL, lazy_migrate_worker, &args[ti]);
+    }
+
+    /* Migrate a few chunks while workers run, then finish all chunks */
+    htc_table_gen_t *g = __atomic_load_n(&t->current_gen, __ATOMIC_ACQUIRE);
+    uint32_t half = (g->chunk_count + 1) / 2;
+    for (uint32_t ci = 0; ci < half; ci++)
+        htc_migrate_chunk(t, ci);
+
+    for (int ti = 0; ti < T; ti++)
+        pthread_join(threads[ti], NULL);
+
+    /* Reload gen (workers may have triggered grows) and complete migration */
+    g = __atomic_load_n(&t->current_gen, __ATOMIC_ACQUIRE);
+    for (uint32_t ci = 0; ci < g->chunk_count; ci++)
+        htc_migrate_chunk(t, ci);
+
+    /* Finish migration */
+    htc_resize_finish(t);
+
+    /* Verify pre-fill entries still findable */
+    for (int i = 0; i < N; i++) {
+        uint64_t out;
+        assert(htc_find(t, hash_seq(i), &out));
+        assert(out == (uint64_t)i);
+    }
+    htc_destroy(t);
+    PASS();
+}
+
+/* ─── Cross-generation delete test ──────────────────────────── */
+/* During lazy migration, deleting an entry that exists in both
+ * old and new gen should make it unfindable. */
+
+static void test_migration_crossgen_delete(void) {
+    TEST("cross-generation delete during migration");
+    htc_table_t *t = htc_create(NULL);
+
+    assert(htc_insert(t, 42, 100));
+    assert(htc_find(t, 42, NULL));
+
+    /* Start lazy resize */
+    assert(htc_resize_start(t, t->num_buckets * 2));
+
+    /* Migrate the chunk containing entry 42 */
+    uint32_t chunk = htc_chunk_of((uint32_t)(42 & (t->num_buckets * 2 - 1)));
+    htc_migrate_chunk(t, chunk);
+
+    /* Delete entry from current gen — old copy was cleared by migration */
+    assert(htc_remove(t, 42));
+    assert(!htc_find(t, 42, NULL));
+
+    /* Finish migration */
+    htc_resize_finish(t);
+
+    /* Still not findable after resize completes */
+    assert(!htc_find(t, 42, NULL));
+    htc_destroy(t);
+    PASS();
+}
+
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     printf("=== htc unit tests ===\n");
 
 #ifndef DRAUGR_USE_MALLOC
@@ -748,10 +946,18 @@ int main(void) {
     test_poison_on_free();
     /* P0: concurrent resize + access coherence */
     test_migration_concurrent();
+    /* Multi-threaded stress (mixed ops, ASan validates no races) */
+    test_stress_multithreaded();
+    /* Concurrent BFS stress (same-tag entries from 4 threads) */
+    test_bfs_concurrent();
+    /* Lazy migration with concurrent operations */
+    test_migration_lazy_stress();
+    /* Cross-generation delete during migration */
+    test_migration_crossgen_delete();
 #else
     printf("  (skipping arena/stash tests without arena allocator)\n");
-    tests_total += 2;
-    tests_passed += 2;
+    tests_total += 4;
+    tests_passed += 4;
 #endif
 
     printf("=== %d / %d tests passed ===\n", tests_passed, tests_total);

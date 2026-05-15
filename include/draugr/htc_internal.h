@@ -7,6 +7,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -113,8 +117,9 @@ typedef struct {
     uint32_t          capacity;
     uint32_t          size;
     void             *allocator;
-    uint16_t          full_events;  /* consecutive full-on-insert (under lock) */
-    uint16_t          empty_epochs; /* consecutive empty maintenance epochs */
+    uint16_t          full_events;
+    uint16_t          empty_epochs;
+    htc_spinlock_t    lock;
 } htc_stash_t;
 
 /* ─── Shard: one per shard, covers a range of buckets ───── */
@@ -172,7 +177,14 @@ extern _Thread_local htc_front_cache_t htc_thread_cache;
 #define HTC_CHUNK_SIZE     (1U << HTC_CHUNK_SHIFT)
 #define HTC_CHUNK_MASK     (HTC_CHUNK_SIZE - 1)
 
+typedef enum {
+    HTC_GEN_ACTIVE   = 0,  /* writers may commit */
+    HTC_GEN_FREEZING = 1,  /* resize in progress; new writers must retry */
+    HTC_GEN_OLD      = 2,  /* read-only fallback */
+} htc_gen_state_t;
+
 typedef struct htc_table_gen {
+    _Atomic uint32_t   state;
     htc_bucket_t      *buckets;
     htc_bucket_meta_t *meta;
     htc_arena_t       *arena;
@@ -211,6 +223,13 @@ typedef struct {
     _Atomic uint64_t remap_saturations;
     _Atomic uint64_t front_cache_hit;
     _Atomic uint64_t front_cache_miss;
+    _Atomic uint64_t grow_started;
+    _Atomic uint64_t grow_copied_bucket_entries;
+    _Atomic uint64_t grow_copied_stash_entries;
+    _Atomic uint64_t writer_retry_gen_changed;
+    _Atomic uint64_t writer_retry_gen_frozen;
+    _Atomic uint64_t attempted_write_to_frozen_gen;
+    _Atomic uint64_t attempted_write_to_old_gen;
 } htc_stats_t;
 
 #define HTC_STAT_INC(s) __atomic_fetch_add(&s, 1, __ATOMIC_RELAXED)
@@ -232,6 +251,7 @@ struct htc_table {
     htc_epoch_ctl_t   *epoch;
     _Atomic(htc_table_gen_t *) current_gen;
     uint32_t           shard_count;
+    uint32_t           flags;             /* from htc_config_t */
 
     /* Grow serialization */
     htc_spinlock_t     grow_lock;
@@ -284,10 +304,20 @@ static inline uint32_t htc_alt_bucket(uint32_t b1, uint64_t h, uint16_t tag) {
 }
 
 static inline uint64_t htc_match8(uint64_t ctrl, uint8_t p) {
+#if defined(__aarch64__)
+    /* NEON: vceq returns 0xFF per matching byte. Mask to 0x80 to match
+     * the SWAR convention used by htc_ctz_candidate / htc_clear_candidate. */
+    uint8x8_t vctrl = vcreate_u8(ctrl);
+    uint8x8_t vpat  = vdup_n_u8(p);
+    uint8x8_t veq   = vceq_u8(vctrl, vpat);
+    return vget_lane_u64(vreinterpret_u64_u8(veq), 0) & 0x8080808080808080ULL;
+#else
+    /* SWAR fallback for non-ARM targets */
     uint64_t rep = 0x0101010101010101ULL * p;
     uint64_t x   = ctrl ^ rep;
     uint64_t z   = (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
     return z;
+#endif
 }
 
 static inline unsigned htc_ctz_candidate(uint64_t mask) {
