@@ -256,6 +256,9 @@ struct htc_table {
     /* Grow serialization */
     htc_spinlock_t     grow_lock;
 
+    /* Optional AMQ filter for negative lookup acceleration (§25) */
+    struct cuckoo_filter *filter;
+
 #ifdef HTC_STATS
     htc_stats_t        stats;
 #endif

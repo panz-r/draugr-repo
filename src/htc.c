@@ -1275,6 +1275,16 @@ void htc_clear(htc_table_t *t)
     memset(t->buckets, 0, (size_t)t->num_buckets * sizeof(htc_bucket_t));
     memset(t->meta, 0, (size_t)t->num_buckets * sizeof(htc_bucket_meta_t));
     __atomic_store_n(&t->size, 0, __ATOMIC_RELAXED);
+    if (t->filter) cuckoo_filter_reset(t->filter);
+}
+
+/* ─── AMQ filter (spec §25) ────────────────────────────────── */
+void htc_set_filter(htc_table_t *t, cuckoo_filter_t *cf) {
+    if (t) t->filter = cf;
+}
+
+cuckoo_filter_t *htc_get_filter(const htc_table_t *t) {
+    return t ? t->filter : NULL;
 }
 
 /* =========================================================================
@@ -1509,6 +1519,7 @@ retry_nowait:
 
 insert_done:
     __atomic_fetch_add(&t->size, 1, __ATOMIC_RELAXED);
+    if (t->filter) cuckoo_filter_insert(t->filter, hash);
 
     if (t->shards) htc_unlock_shards(t->shards, s1, s2);
 
@@ -1671,6 +1682,13 @@ bool htc_find(const htc_table_t *t_, uint64_t hash, uint64_t *out_value)
     /* Pin epoch before any arena record access (including front cache) */
     htc_epoch_pin(t->epoch);
 
+    /* AMQ filter (spec §25): if the filter says not present, skip lookup */
+    if (t->filter && !cuckoo_filter_lookup(t->filter, hash)) {
+        htc_epoch_unpin(t->epoch);
+        HTC_STAT_INC(t->stats.find_negative);
+        return false;
+    }
+
     /* Phase 8: check front cache under epoch protection (unless disabled) */
     if (out_value && !(t->flags & HTC_CFG_DISABLE_FRONT_CACHE)) {
         uint64_t cv = 0;
@@ -1804,6 +1822,7 @@ bool htc_remove(htc_table_t *t, uint64_t hash)
             htc_bucket_seq_end(&gen->meta[b1], gs);
             htc_remap_dec(&gen->meta[b1]);
             htc_front_cache_remove(&htc_thread_cache, hash);
+            if (t->filter) cuckoo_filter_delete(t->filter, hash);
             htc_epoch_retire(t->epoch, t->arena, idx);
             __atomic_fetch_sub(&t->size, 1, __ATOMIC_RELAXED);
             if (t->shards) htc_unlock_shards(t->shards, s1, s2);
@@ -1828,6 +1847,7 @@ bool htc_remove(htc_table_t *t, uint64_t hash)
             htc_bucket_seq_end(&gen->meta[b2], gs);
             htc_remap_dec(&gen->meta[b1]);
             htc_front_cache_remove(&htc_thread_cache, hash);
+            if (t->filter) cuckoo_filter_delete(t->filter, hash);
             htc_epoch_retire(t->epoch, t->arena, idx);
             __atomic_fetch_sub(&t->size, 1, __ATOMIC_RELAXED);
             if (t->shards) htc_unlock_shards(t->shards, s1, s2);
@@ -1852,6 +1872,7 @@ bool htc_remove(htc_table_t *t, uint64_t hash)
             htc_stash_remove_at(found, (unsigned)si);
             htc_stash_maintain(found);
             htc_front_cache_remove(&htc_thread_cache, hash);
+            if (t->filter) cuckoo_filter_delete(t->filter, hash);
             htc_epoch_retire(t->epoch, t->arena, idx);
             __atomic_fetch_sub(&t->size, 1, __ATOMIC_RELAXED);
             if (t->shards) htc_unlock_shards(t->shards, s1, s2);

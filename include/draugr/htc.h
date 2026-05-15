@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "draugr/cuckoo_filter.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,6 +38,12 @@ bool htc_find(const htc_table_t *t, uint64_t hash, uint64_t *out_value);
 bool htc_remove(htc_table_t *t, uint64_t hash);
 
 size_t htc_size(const htc_table_t *t);
+
+/* Optional AMQ filter (spec §25). Attach a cuckoo filter for negative
+ * lookup acceleration. The filter is NOT owned by the table — caller
+ * must destroy it after htc_destroy. */
+void htc_set_filter(htc_table_t *t, cuckoo_filter_t *cf);
+cuckoo_filter_t *htc_get_filter(const htc_table_t *t);
 
 #ifdef __cplusplus
 }
