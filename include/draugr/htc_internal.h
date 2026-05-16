@@ -57,6 +57,7 @@ typedef struct __attribute__((aligned(64))) {
 
 _Static_assert(sizeof(htc_bucket_t) == 64,      "htc_bucket_t must be 64 bytes");
 _Static_assert(__alignof__(htc_bucket_t) == 64,  "htc_bucket_t must be 64B aligned");
+_Static_assert(sizeof(htc_record_t) == 32,      "htc_record_t must be 32 bytes for cache density");
 
 typedef struct __attribute__((aligned(16))) {
     _Atomic uint64_t ctrl_tags;
@@ -358,6 +359,8 @@ typedef struct htc_arena_block {
     struct htc_arena_block *next;
     htc_record_t            recs[HTC_ARENA_BLOCK_SIZE];
 } htc_arena_block_t;
+_Static_assert(sizeof(htc_arena_block_t) == 8 + HTC_ARENA_BLOCK_SIZE * sizeof(htc_record_t),
+               "htc_arena_block_t layout changed");
 
 typedef struct {
     _Atomic(htc_arena_block_t *) head;  /* first block in linked list */
@@ -368,6 +371,7 @@ typedef struct {
     void                           *allocator;
     htc_spinlock_t                  lock;
 } htc_arena_t;
+_Static_assert(sizeof(htc_arena_t) == 48, "htc_arena_t layout changed; review packing");
 
 /* Stash: per-shard overflow, fixed at HTC_STASH_MAX entries.
  * Uses an embedded array so lock-free readers never see a dangling
@@ -377,12 +381,14 @@ typedef struct {
 #define HTC_STASH_MAX     32
 
 typedef struct {
-    _Atomic uint64_t slots[HTC_STASH_MAX];
-    uint32_t          size;
-    void             *allocator;
-    uint16_t          full_events;
+    _Atomic uint64_t slots[HTC_STASH_MAX];  /* 32 * 8 = 256 bytes */
+    _Atomic uint32_t live_count;             /* 4 bytes: fast empty-stash skip in find */
+    uint32_t          size;                  /* 4 bytes */
+    void             *allocator;             /* 8 bytes */
+    uint16_t          full_events;           /* 4 bytes (with empty_epochs) */
     uint16_t          empty_epochs;
 } htc_stash_t;
+_Static_assert(sizeof(htc_stash_t) == 280, "htc_stash_t layout changed; review packing");
 
 /* ─── Shard: one per shard, covers a range of buckets ───── */
 typedef struct __attribute__((aligned(64))) {
@@ -415,11 +421,13 @@ typedef struct htc_retire_gen {
 } htc_retire_gen_t;
 
 typedef struct {
-    _Atomic uint64_t                  global_epoch;
-    _Atomic uint64_t                  thread_epoch[HTC_EPOCH_MAX_THREADS];
+    _Atomic uint64_t                  global_epoch;       /* offset 0, hot: every pin/advance */
+    uint8_t                           _pad_ep[56];        /* pad to 64 to isolate from thread_epoch */
+    _Atomic uint64_t                  thread_epoch[HTC_EPOCH_MAX_THREADS];  /* offset 64, per-thread writes */
     _Atomic(htc_retire_node_t *)      retire_head;
     _Atomic(htc_retire_gen_t *)       retire_gen_head;
 } htc_epoch_ctl_t;
+_Static_assert(offsetof(htc_epoch_ctl_t, thread_epoch) == 64, "thread_epoch must start on its own cache line");
 
 /* ─── Seq guard for optimistic bucket reads ──────────────── */
 typedef struct {
@@ -442,6 +450,7 @@ typedef struct {
     uint8_t     valid;
     uint8_t     _pad[3];
 } htc_front_cache_entry_t;
+_Static_assert(sizeof(htc_front_cache_entry_t) == 40, "front cache entry struct layout changed; review packing");
 
 typedef struct {
     htc_front_cache_entry_t entries[HTC_FRONT_CACHE_ENTRIES];
@@ -497,11 +506,13 @@ size_t   htc_debug_live_count(const htc_table_t *t);
 uint32_t htc_debug_verify_all(const htc_table_t *t);  /* composite: ctrl+remap+dup+placement */
 bool     htc_debug_slow_find(const htc_table_t *t, uint64_t hash,
                               uint64_t *out_value);    /* independent of ctrl/remap/cache hints */
-void     htc_debug_explain_hash(const htc_table_t *t, uint64_t hash);  /* diagnostic dump */
-void     htc_debug_explain_epoch(const htc_table_t *t);  /* epoch blocker diagnostic */
-void     htc_debug_explain_miss(const htc_table_t *t, uint64_t hash);  /* negative miss certificate (Battery 27 §26) */
-uint32_t htc_debug_check_transient(const htc_table_t *t);  /* transient-state verifier (Battery 27 §20-21) */
 uint64_t htc_debug_checksum(const htc_table_t *t);  /* logical checksum (layout-independent) */
+#ifndef NDEBUG
+void     htc_debug_explain_hash(const htc_table_t *t, uint64_t hash);  /* diagnostic dump, noop in release */
+void     htc_debug_explain_epoch(const htc_table_t *t);  /* epoch blocker diagnostic, noop in release */
+void     htc_debug_explain_miss(const htc_table_t *t, uint64_t hash);  /* negative miss certificate, noop in release */
+uint32_t htc_debug_check_transient(const htc_table_t *t);  /* transient-state verifier, noop in release */
+#endif
 htc_table_t *htc_debug_rebuild(const htc_table_t *t, uint32_t flags);  /* canonical rebuild */
 
 /* ─── Performance counters (optional, gated by HTC_STATS) ─── */

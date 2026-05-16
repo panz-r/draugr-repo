@@ -6,7 +6,7 @@
  *   -n N        operations per thread (default 100000)
  *   -b N        initial buckets (default 64)
  *   -l FLOAT    max load factor (default 0.75)
- *   -m MIX      operation mix: read, balanced, write, neg (default balanced)
+  *   -m MIX      operation mix: read, balanced, write, neg, pureneg, mixednogrow (default balanced)
  *   -k DIST     key distribution: seq, random (default seq)
  *   -f          enable cuckoo filter (default off)
  *   -c FLOAT    negative lookup fraction for 'neg' mix (default 0.5)
@@ -15,12 +15,13 @@
  */
 
 #include "draugr/htc.h"
-#include "draugr/cuckoo_filter.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include <unistd.h>
 #include <pthread.h>
+#include <time.h>
+#include <sys/time.h>
 
 /* ─── Configuration ─────────────────────────────────────────── */
 static int    opt_threads    = 1;
@@ -106,6 +107,43 @@ static void worker_neg(worker_t *w) {
     }
 }
 
+/* Pure negative find microbench: table pre-filled, no inserts during test.
+ * Uses hashes guaranteed to be absent (high range) for negative lookups. */
+static void worker_pure_neg(worker_t *w) {
+    uint64_t base = (uint64_t)w->id * 10000000ULL + 100000000ULL;
+    for (int i = 0; i < w->ops; i++) {
+        uint64_t h = base + (opt_key == 'r' ? xorshift64(&w->seed) : (uint64_t)i);
+        uint64_t out;
+        htc_find(w->t, h, &out);
+    }
+}
+
+/* Mixed no-grow benchmark: table pre-sized with slack, no growth during timed
+ * section.  ~80% successful find, ~15% negative find, ~5% insert/remove.
+ * Uses a separate hash range for inserts to stay within slack capacity. */
+static void worker_mixed_nogrow(worker_t *w) {
+    uint64_t insert_base = (uint64_t)w->id * 1000000ULL + 200000000ULL;
+    uint64_t find_base   = (uint64_t)w->id * 1000000ULL;
+    int      insert_pos  = 0;
+    for (int i = 0; i < w->ops; i++) {
+        int r = (int)(xorshift64(&w->seed) & 63);  /* 0..63 */
+        if (r < 5) {
+            /* 5/64 ≈ 8% insert or remove */
+            uint64_t h = insert_base + (uint64_t)(insert_pos++);
+            if (r < 3)
+                htc_insert(w->t, h, h >> 1);
+            else
+                htc_remove(w->t, h);
+        } else {
+            uint64_t h = find_base + (uint64_t)((xorshift64(&w->seed)) % (uint64_t)w->ops);
+            if (h < insert_base)
+                h += insert_base;
+            uint64_t out;
+            htc_find(w->t, h, &out);
+        }
+    }
+}
+
 static void *worker_run(void *arg) {
     worker_t *w = (worker_t *)arg;
     w->seed = (uint64_t)w->id * 0x9e3779b97f4a7c15ULL + 1;
@@ -115,6 +153,8 @@ static void *worker_run(void *arg) {
     case 'b': worker_balanced(w); break;
     case 'w': worker_write(w); break;
     case 'n': worker_neg(w); break;
+    case 'p': worker_pure_neg(w); break;
+    case 'g': worker_mixed_nogrow(w); break;
     }
     w->elapsed = now_us() - t0;
     return NULL;
@@ -185,8 +225,31 @@ int main(int argc, char **argv) {
     if (opt_mix == 'b') mix_name = "bal";
     else if (opt_mix == 'w') mix_name = "write";
     else if (opt_mix == 'n') mix_name = "neg";
+    else if (opt_mix == 'p') mix_name = "pureneg";
+    else if (opt_mix == 'g') mix_name = "mixednogrow";
 
-    /* Battery 13 Q29: reproducibility manifest */
+    /* Battery 13 Q29, Battery 28 §29: reproducibility manifest */
+    {
+        FILE *git_f = popen("git rev-parse HEAD 2>/dev/null", "r");
+        char git_commit[48] = "unknown";
+        if (git_f) {
+            if (fgets(git_commit, sizeof(git_commit), git_f)) {
+                size_t ln = strlen(git_commit);
+                if (ln > 0 && git_commit[ln-1] == '\n') git_commit[ln-1] = '\0';
+            }
+            pclose(git_f);
+        }
+        fprintf(stderr, "git_commit %s\n", git_commit);
+    }
+    {
+        time_t now = time(NULL);
+        char date_buf[32];
+        struct tm *tm_ptr = localtime(&now);
+        if (tm_ptr) {
+            strftime(date_buf, sizeof(date_buf), "%Y-%m-%d %H:%M:%S %z", tm_ptr);
+            fprintf(stderr, "date %s\n", date_buf);
+        }
+    }
     fprintf(stderr, "=== bench_htc manifest ===\n");
     fprintf(stderr, "threads %d\n", opt_threads);
     fprintf(stderr, "mix %s\n", mix_name);

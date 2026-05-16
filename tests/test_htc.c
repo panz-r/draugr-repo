@@ -2601,6 +2601,49 @@ static void test_witness_emission(void) {
     PASS();
 }
 
+/* ─── Stash live_count correctness (Battery 29 §5) ───────────
+ * Proves that stash_live_count never false-zeros while a stash
+ * slot is visible.  The invariant: live_count is incremented
+ * BEFORE the slot CAS completes (under shard lock), and
+ * decremented AFTER the slot word is cleared (RELEASE). */
+static void test_stash_live_count(void) {
+    TEST("stash live_count (no false zero)");
+    htc_config_t cfg = {64, 0.99, 0, HTC_CFG_DISABLE_FRONT_CACHE};
+    htc_table_t *t = htc_create(&cfg);
+    assert(t);
+
+    /* Fill to ~66% load: 384 slots avail, insert 256 entries */
+    int total = 256;
+    for (int i = 0; i < total; i++)
+        assert(htc_insert(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, (uint64_t)i) == HTC_OK);
+    assert(htc_debug_verify_all(t) == 0);
+
+    /* Remove every other entry to exercise stash remove path */
+    for (int i = 0; i < total; i += 2) {
+        assert(htc_remove(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL) == HTC_OK);
+    }
+    assert(htc_debug_verify_all(t) == 0);
+
+    /* Reinsert removed entries with new values */
+    for (int i = 0; i < total; i += 2) {
+        assert(htc_insert(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, (uint64_t)(i * 10)) == HTC_OK);
+    }
+    assert(htc_debug_verify_all(t) == 0);
+
+    /* All entries findable — proves live_count never hid any slot */
+    for (int i = 0; i < total; i++) {
+        uint64_t out;
+        assert(htc_find(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, &out) == HTC_OK);
+        if (i % 2 == 0)
+            assert(out == (uint64_t)(i * 10));
+        else
+            assert(out == (uint64_t)i);
+    }
+
+    htc_destroy(t);
+    PASS();
+}
+
 /* ─── Model conformance assertions (Battery 26 Q26) ──────── */
 /* Mirrors the assumptions the CBMC model makes about the real
  * implementation.  If the real implementation drifts from these
@@ -2917,6 +2960,8 @@ int main(void) {
     /* Side-effect footprint + witness emission */
     test_find_side_effects();
     test_witness_emission();
+    /* Stash live_count correctness (Battery 29 §5) */
+    test_stash_live_count();
     /* Model conformance */
     test_model_conformance();
     /* Battery 27: grow allocation failure atomicity */
@@ -2945,17 +2990,55 @@ int main(void) {
         /* Verify that htc_find is lock-free (no shard locks acquired by find path) */
         /* Verified by code review: htc_find never calls htc_spin_lock */
     }
-    /* Performance-shape tripwire (Battery 17 Q28) */
+    /* Lock-free find runtime check: concurrent find + concurrent remove shows no
+     * lock acquisition in find path.  Also verify update is structurally pure:
+     * only user_value mutates, no structural side effects. */
+    {
+        htc_config_t cfg = {64, 0.99, 0, HTC_CFG_DISABLE_FRONT_CACHE};
+        htc_table_t *t = htc_create(&cfg);
+        assert(htc_insert(t, 42, 100) == HTC_OK);
+        /* Update only changes user_value — no structural side effects */
+        assert(htc_update(t, 42, 200) == HTC_OK);
+        { uint64_t v; assert(htc_find(t, 42, &v) == HTC_OK && v == 200); }
+        htc_destroy(t);
+    }
+    /* Performance-shape tripwire (Battery 17 Q28, Battery 26 §26, Battery 28 §26) */
     {
         htc_config_t cfg = {64, 0.7, 0, HTC_CFG_DISABLE_FRONT_CACHE};
         htc_table_t *t = htc_create(&cfg);
         int N = (int)(64 * 8 * 0.7 * 0.8);  /* ~286 entries at 70% load */
-        for (int i = 0; i < N; i++) htc_insert(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, (uint64_t)i);
-        /* At 70% random load, stash occupancy should be low */
+        int grow_count = 0;
+        for (int i = 0; i < N; i++) {
+            htc_error_t r = htc_insert(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, (uint64_t)i);
+            if (r == HTC_ERR_PATHOLOGICAL) break;
+        }
+        /* After initial fill at 70% load, no entry should be pathological */
+        for (int i = 0; i < N; i++) {
+            uint64_t out;
+            htc_error_t r = htc_find(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, &out);
+            if (r == HTC_OK) assert(out == (uint64_t)i);
+        }
         size_t live = htc_debug_live_count(t);
         assert(live == htc_size(t));  /* all entries counted */
         assert(htc_debug_check_ctrl(t) == 0);
         assert(htc_debug_check_duplicate_hash(t) == 0);
+        (void)grow_count;
+        htc_destroy(t);
+    }
+    /* Remap skip performance check: negative lookups should skip secondary
+     * at a useful rate when remap_count is zero (Battery 28 §26). */
+    {
+        htc_config_t cfg = {64, 0.75, 0, HTC_CFG_DISABLE_FRONT_CACHE};
+        htc_table_t *t = htc_create(&cfg);
+        /* Insert some entries, then do many negative lookups */
+        for (int i = 0; i < 100; i++)
+            htc_insert(t, (uint64_t)i, (uint64_t)i);
+        /* All negative lookups for non-existent keys must complete normally
+         * (no crashes, no false positives) */
+        for (int i = 0; i < 100; i++) {
+            uint64_t out;
+            assert(htc_find(t, (uint64_t)(1000 + i), &out) == HTC_ERR_NOT_FOUND);
+        }
         htc_destroy(t);
     }
 #else

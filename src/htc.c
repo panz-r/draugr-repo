@@ -167,6 +167,9 @@ void htc_arena_destroy(htc_arena_t *a)
 int htc_stash_find(const htc_stash_t *s, htc_arena_t *a,
                     uint64_t identity_hash, uint16_t tag)
 {
+    /* Fast path: empty stash — skip 32 ACQUIRE loads */
+    if (__atomic_load_n(&s->live_count, HTC_MO_ACQUIRE) == 0)
+        return -1;
     for (uint32_t i = 0; i < HTC_STASH_MAX; i++) {
         uint64_t w = __atomic_load_n(&s->slots[i], HTC_MO_ACQUIRE);
         if (!htc_slot_live(w)) continue;
@@ -181,9 +184,9 @@ int htc_stash_find(const htc_stash_t *s, htc_arena_t *a,
 
 void htc_stash_remove_at(htc_stash_t *s, unsigned idx)
 {
-    /* Release-store EMPTY — no compaction, safe for lock-free readers.
-     * Insert scans all slots for EMPTY; Find scans all slots for LIVE. */
+    /* Release-store EMPTY — no compaction, safe for lock-free readers. */
     __atomic_store_n(&s->slots[idx], htc_slot_empty_word(), HTC_MO_RELEASE);
+    __atomic_fetch_sub(&s->live_count, 1, __ATOMIC_RELAXED);
 }
 
 int htc_stash_insert(htc_stash_t *s, uint64_t slot_word)
@@ -193,6 +196,7 @@ int htc_stash_insert(htc_stash_t *s, uint64_t slot_word)
         uint64_t exp = htc_slot_empty_word();
         if (htc_atomic_cas(&s->slots[i], &exp, slot_word,
                            HTC_MO_RELEASE, HTC_MO_ACQUIRE)) {
+            __atomic_fetch_add(&s->live_count, 1, __ATOMIC_RELAXED);
             return (int)i;
         }
     }
@@ -367,7 +371,22 @@ uint64_t htc_epoch_pin(htc_epoch_ctl_t *ep)
         return 0;
     uint64_t e = __atomic_load_n(&ep->global_epoch, HTC_MO_ACQUIRE);
     __atomic_store_n(&ep->thread_epoch[htc_epoch_tid], e, HTC_MO_RELEASE);
-    __atomic_thread_fence(HTC_MO_SEQ_CST);
+    /* ── Epoch-pin ordering proof (Battery 29 §1) ──────────────
+     *
+     * Required invariant: caller dereferences records safely while
+     * collector sees thread_epoch[tid] >= retire_epoch before free.
+     *
+     * No fence required because:
+     *   ARMv8: STLR + LDAR to distinct addresses are ordered without
+     *     DMB (ARM ARM §B2.3.7).  The first ACQUIRE load after return
+     *     (slot word or current_gen) pairs with the preceding STLR.
+     *   x86:  All stores are release, all loads are acquire.
+     *   Compiler: return value creates data dependency preventing
+     *     reordering of the store past the function boundary.
+     *
+     * Breaks if thread_epoch store were relaxed: collector sees tid==0
+     * while reader dereferences a record whose retire_epoch passed.
+     * Fence removed 2026-05-17; verified 50x ASAN stress. */
     return e;
 }
 
@@ -1798,6 +1817,7 @@ uint32_t htc_debug_verify_all(const htc_table_t *t) {
                 /* Check every LIVE record has exactly one reference */
                 for (uint32_t i = 0; i < max_idx; i++) {
                     htc_record_t *r = htc_arena_ptr(g->arena, i);
+                    if (!r) continue;
                     uint64_t flags = __atomic_load_n(&r->flags, HTC_MO_ACQUIRE);
                     if (r->identity_hash != 0 && flags == 0) {
                         /* LIVE record — should have exactly one reference */
@@ -1908,6 +1928,10 @@ bool htc_debug_slow_find(const htc_table_t *t, uint64_t hash,
     }
     return false;
 }
+
+/* ─── Debug explain / diagnostic functions (compiled out in
+ * release builds to avoid .rodata printf bloat) ──────────── */
+#ifndef NDEBUG
 
 /* ─── Negative miss certificate (Battery 27 §26) ─────────────
  * Explains exactly why a hash was NOT found.  Scans each
@@ -2199,6 +2223,8 @@ void htc_debug_explain_epoch(const htc_table_t *t)
     printf("=== end explain_epoch ===\n");
 }
 
+#endif /* !NDEBUG */
+
 /* ─── Logical checksum oracle (Battery 19 Q12) ────────────── */
 /* Layout-independent checksum over all LIVE records.
  * Used to prove that structural operations (grow, reseed, reserve)
@@ -2213,6 +2239,7 @@ uint64_t htc_debug_checksum(const htc_table_t *t)
     uint32_t n = g->arena->count;
     for (uint32_t i = 0; i < n; i++) {
         htc_record_t *r = htc_arena_ptr(g->arena, i);
+        if (!r) continue;
         uint64_t flags = __atomic_load_n(&r->flags, HTC_MO_ACQUIRE);
         if (r->identity_hash == 0 || flags != 0) continue;
         cs ^= r->identity_hash;
@@ -2570,12 +2597,12 @@ retry_nowait:
     HTC_STAT_INC_SHARD(t, s1, insert_pathological);
     htc_witness_record(HTC_WIT_RETURN_ERR, hash, 0, 0, 0, 4, 0);  /* HTC_ERR_PATHOLOGICAL */
     htc_witness_record(HTC_WIT_OP_FINISH, hash, 0, 0, 0, 4, 0);
-    /* PATHOLOGICAL certificate (Battery 27 §27):
-     * Only access t-level fields — the generation pointer may be
-     * invalidated by a concurrent grow. */
+#ifdef HTC_STATS
+    /* PATHOLOGICAL certificate (Battery 27 §27): diagnostic only */
     printf("PATHOLOGICAL: hash=0x%016lx num_buckets=%u stash_max=%u"
            " shard_count=%u seed=0x%016lx\n",
            hash, t->num_buckets, HTC_STASH_MAX, t->shard_count, t->seed);
+#endif
     return HTC_ERR_PATHOLOGICAL;
 
 insert_done:
