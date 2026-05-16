@@ -64,6 +64,57 @@ add_test(NAME htc_phase1_tests COMMAND test_htc)
 add_executable(bench_htc bench_htc.c)
 target_link_libraries(bench_htc draugr m)
 
+# ─── CBMC formal verification (Battery 25-26) ───────────────────
+# Requires: cbmc (https://www.cbmc.org/)
+#
+# Run all CBMC models:
+#   cmake --build . --target htc-cbmc
+#
+# Or invoke CBMC directly:
+#   cbmc -D__CBMC__ --unwind 10 --bounds-check --pointer-check \
+#         ${CMAKE_SOURCE_DIR}/tests/cbmc_htc_extended.c --function main
+
+add_custom_target(htc-cbmc
+    COMMAND cbmc -D__CBMC__ --unwind 10 --bounds-check --pointer-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_htc_extended.c --function main
+    COMMENT "Running CBMC bounded verification on htc extended model"
+    USES_TERMINAL
+)
+
+add_custom_target(htc-cbmc-concurrent
+    COMMAND cbmc -D__CBMC__ --unwind 14 --bounds-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_htc_concurrent.c --function main
+    COMMENT "Running CBMC on two-thread concurrency model"
+    USES_TERMINAL
+)
+add_custom_target(htc-cbmc-core
+    COMMAND cbmc -D__CBMC__ --unwind 4 --bounds-check --pointer-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_cuckoo_model.c --function main
+    COMMENT "Running CBMC on core cuckoo model"
+    USES_TERMINAL
+)
+
+add_custom_target(htc-cbmc-mutation-skip-stash
+    COMMAND cbmc -D__CBMC__ -DMUTATION_SKIP_STASH --unwind 6 --bounds-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_htc_extended.c --function main
+    COMMENT "CBMC mutation test: skip stash (expect counterexample)"
+    USES_TERMINAL
+)
+
+add_custom_target(htc-cbmc-mutation-allow-dup
+    COMMAND cbmc -D__CBMC__ -DMUTATION_ALLOW_DUPLICATE --unwind 6 --bounds-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_htc_extended.c --function main
+    COMMENT "CBMC mutation test: allow duplicate (expect counterexample)"
+    USES_TERMINAL
+)
+
+add_custom_target(htc-cbmc-mutation-remap
+    COMMAND cbmc -D__CBMC__ -DMUTATION_FORGET_REMAP_INC --unwind 6 --bounds-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_htc_extended.c --function main
+    COMMENT "CBMC mutation test: forget remap_inc (expect counterexample)"
+    USES_TERMINAL
+)
+
 # Filter tests
 add_executable(test_bloom test_bloom.c)
 target_link_libraries(test_bloom draugr m)

@@ -137,6 +137,32 @@ typedef enum {
  *    identity_hash, not placement.
  * ──────────────────────────────────────────────────────────────────
  *
+ * ─── CBMC formal verification scope (Battery 26-27) ────────────
+ * CBMC 6.9 bounded model checking at unwind 6-14 covers:
+ *
+ *   Verified in model:
+ *     M1: sequential cuckoo core (2 buckets × 2 slots)
+ *     M2: + stash (max 1)
+ *     M3: + in_secondary / location awareness
+ *     M4: + remap_count skip (fast_find == full_scan_find)
+ *     M5: + delete flags (flags=DELETED as linearization point)
+ *     M6: + grow/reseed as abstract-map-preserving transformation
+ *     M7: + failure atomicity (failed ops leave abstract state unchanged)
+ *     M8: + boundedness (find scans ≤ 2 buckets + 1 stash)
+ *     C1: two-thread concurrency (insert||find, remove||find, insert||insert)
+ *     C2: remove/find race: find never returns DELETED
+ *
+ *   NOT verified in CBMC (covered by other methods):
+ *     Epochs/reclamation        → ASan + stress + deterministic tests
+ *     Front cache               → non-authoritative per spec §12
+ *     Grow/reseed failure paths → failure-atomicity tests + --wrap
+ *     Complex concurrency       → stress tests + TSAN
+ *     BFS displacement          → bounded per config, tested via stress
+ *     Ctrl tags                 → seq protocol (see htc_internal.h)
+ *
+ *   Full model fidelity matrix in tests/cbmc_htc_extended.c.
+ *   Model mutation tests confirm properties catch known-bad variants.
+ *
  * ─── Progress guarantees (Battery 21 Q26) ────────────────────────
  *
  *   find:         lock-free (no shard locks, no allocation).

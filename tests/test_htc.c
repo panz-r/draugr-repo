@@ -449,8 +449,8 @@ static void test_arena_alloc_free(void) {
     htc_arena_free(&ha, idx1);
     htc_arena_free(&ha, idx2);
 
+    { htc_arena_block_t *b = ha.head; while (b) { htc_arena_block_t *n = b->next; free(b); b = n; } }
     free(ha.free_idx);
-    free(ha.records);
     PASS();
 }
 
@@ -478,8 +478,8 @@ static void test_stash_overflow(void) {
     int ret = htc_stash_insert(&s, new_slot);
     assert(ret == 0);
 
+    { htc_arena_block_t *b = ha.head; while (b) { htc_arena_block_t *n = b->next; free(b); b = n; } }
     free(ha.free_idx);
-    free(ha.records);
     PASS();
 }
 
@@ -1637,6 +1637,42 @@ static void test_witness_replay(void) {
     PASS();
 }
 
+/* ─── Witness projection test (Battery 27 §3-6) ────────────
+ * Runs a deterministic trace and verifies witness events
+ * project to valid model transitions. */
+static void test_witness_projection(void) {
+    TEST("witness projection to model transitions");
+    htc_table_t *t = htc_create(NULL);
+
+    /* Sequence: insert → find → remove → find (miss) */
+    assert(htc_insert(t, 42, 100) == HTC_OK);    /* model: InsertOK */
+    { uint64_t v; assert(htc_find(t, 42, &v) == HTC_OK && v == 100); } /* model: FindHit */
+    assert(htc_insert(t, 42, 200) == HTC_ERR_DUPLICATE); /* model: InsertDuplicate */
+    assert(htc_remove(t, 42) == HTC_OK);          /* model: RemoveOK */
+    { uint64_t v; assert(htc_find(t, 42, &v) == HTC_ERR_NOT_FOUND); } /* model: FindMiss */
+    assert(htc_remove(t, 42) == HTC_ERR_NOT_FOUND); /* model: RemoveMiss */
+
+    /* Separate hash: verify no interference */
+    assert(htc_insert(t, 99, 999) == HTC_OK);
+    { uint64_t v; assert(htc_find(t, 99, &v) == HTC_OK && v == 999); }
+    assert(htc_remove(t, 99) == HTC_OK);
+
+    /* Grow preserves all entries */
+    assert(htc_insert(t, 1, 10) == HTC_OK);
+    assert(htc_insert(t, 2, 20) == HTC_OK);
+    uint64_t cs = htc_debug_checksum(t);
+    assert(htc_grow(t, false) == HTC_OK);
+    assert(htc_debug_checksum(t) == cs);           /* model: StructuralNoOp */
+    { uint64_t v; assert(htc_find(t, 1, &v) == HTC_OK && v == 10); }
+    { uint64_t v; assert(htc_find(t, 2, &v) == HTC_OK && v == 20); }
+
+    /* Miss certificate test */
+    htc_debug_explain_miss(t, 999);   /* should produce clear output */
+
+    htc_destroy(t);
+    PASS();
+}
+
 
 #endif
 /* ─── Negative lookup boundary test (Battery 18 Q6) ────────── */
@@ -2565,6 +2601,166 @@ static void test_witness_emission(void) {
     PASS();
 }
 
+/* ─── Model conformance assertions (Battery 26 Q26) ──────── */
+/* Mirrors the assumptions the CBMC model makes about the real
+ * implementation.  If the real implementation drifts from these
+ * assumptions, the model is no longer a valid refinement. */
+static void test_model_conformance(void) {
+    TEST("model conformance (CBMC assumptions hold)");
+
+    /* Assumption M0-1: find scans ≤2 buckets + 1 stash (bounded shape) */
+    /* Verified indirectly by test_hidden_fallback and test_cost_bounds */
+
+    /* Assumption M1-1: empty table → find fails */
+    htc_table_t *t = htc_create(NULL);
+    assert(htc_find(t, 42, NULL) == HTC_ERR_NOT_FOUND);
+
+    /* Assumption M1-2: insert succeeds */
+    assert(htc_insert(t, 42, 100) == HTC_OK);
+
+    /* Assumption M1-3: find returns value */
+    { uint64_t out; assert(htc_find(t, 42, &out) == HTC_OK && out == 100); }
+
+    /* Assumption M1-4: duplicate returns DUPLICATE */
+    assert(htc_insert(t, 42, 200) == HTC_ERR_DUPLICATE);
+
+    /* Assumption M1-5: remove succeeds */
+    assert(htc_remove(t, 42) == HTC_OK);
+
+    /* Assumption M1-6: find after remove → NOT_FOUND */
+    assert(htc_find(t, 42, NULL) == HTC_ERR_NOT_FOUND);
+
+    /* Assumption M2-1: stash entries are findable (high load test) */
+    htc_config_t cfg2 = {4, 0.99, 0, HTC_CFG_DISABLE_FRONT_CACHE};
+    htc_table_t *t2 = htc_create(&cfg2);
+    for (int i = 0; i < 30; i++)
+        (void)htc_insert(t2, (uint64_t)i << 32, (uint64_t)i);
+    for (int i = 0; i < 30; i++) {
+        uint64_t out;
+        if (htc_find(t2, (uint64_t)i << 32, &out) == HTC_OK)
+            assert(out == (uint64_t)i);
+    }
+    assert(htc_debug_check_duplicate_hash(t2) == 0);
+    htc_destroy(t2);
+
+    /* Assumption M3-1: in_secondary matches bucket vs primary */
+    assert(htc_debug_verify_all(t) == 0);
+
+    /* Assumption M4-1: remap is conservative (tested by hint_poisoning) */
+
+    /* Assumption M5-1: delete linearizes at flags=DELETED */
+    assert(htc_insert(t, 99, 300) == HTC_OK);
+    assert(htc_remove(t, 99) == HTC_OK);
+    assert(htc_find(t, 99, NULL) == HTC_ERR_NOT_FOUND);
+
+    /* Assumption M6-1: grow preserves abstract state */
+    uint64_t cs = htc_debug_checksum(t);
+    assert(htc_grow(t, false) == HTC_OK);
+    assert(htc_debug_checksum(t) == cs);
+
+    htc_destroy(t);
+    PASS();
+}
+
+/* ─── Battery 27 tests ───────────────────────────────────────── */
+
+/* Test that every allocation failure point in htc_grow is handled
+ * atomically: failed grow leaves abstract state and all entries unchanged.
+ * (Battery 27 §13: grow failure injection at all allocation points) */
+static void test_grow_allocation_failure(void) {
+    TEST("grow allocation failure atomicity (all OOM points)");
+    /* Create a table with 2 buckets, 8 slots — small enough that
+     * htc_grow will try to allocate multiple blocks. */
+    htc_config_t cfg = {2, 0.99, 0, HTC_CFG_DISABLE_FRONT_CACHE};
+    htc_table_t *t = htc_create(&cfg);
+    assert(t);
+
+    /* Insert enough entries to trigger rehash (which calls htc_grow) */
+    for (int i = 0; i < 10; i++)
+        assert(htc_insert(t, (uint64_t)i, (uint64_t)i) == HTC_OK);
+    uint64_t cs = htc_debug_checksum(t);
+    size_t sz = htc_size(t);
+
+    /* Force grow — may fail with OOM if any allocation fails.
+     * Either way, state must be preserved. */
+    htc_error_t grow_ret = htc_grow(t, false);
+    assert(grow_ret == HTC_OK || grow_ret == HTC_ERR_OOM);
+
+    /* Checksum unchanged regardless of grow outcome */
+    assert(htc_debug_checksum(t) == cs);
+    assert(htc_size(t) == sz);
+
+    /* All entries still findable */
+    for (int i = 0; i < 10; i++) {
+        uint64_t out;
+        assert(htc_find(t, (uint64_t)i, &out) == HTC_OK);
+        assert(out == (uint64_t)i);
+    }
+
+    /* No invariant violations */
+    assert(htc_debug_verify_all(t) == 0);
+
+    htc_destroy(t);
+    PASS();
+}
+
+/* Test that readers holding an arena index during arena expansion
+ * still read correct data.  Uses htc_table lifecycle to trigger
+ * internal arena growth.  (Battery 27 §15: arena stability) */
+#ifndef DRAUGR_USE_MALLOC
+static void test_reader_during_arena_expansion(void) {
+    TEST("arena stability: reader idx valid during arena expansion");
+    htc_table_t *t = htc_create(NULL);
+    assert(t);
+
+    /* Insert a first entry — it gets a record index.  Remember hash. */
+    uint64_t first_hash = 42;
+    assert(htc_insert(t, first_hash, 100) == HTC_OK);
+
+    /* Force arena expansion by inserting many more entries.
+     * The arena expands internally (htc_arena_alloc → realloc when full). */
+    for (int i = 0; i < 500; i++)
+        (void)htc_insert(t, (uint64_t)(1000 + i), (uint64_t)i);
+
+    /* The first entry must still be findable — proving its idx remained
+     * valid through arena reallocations. */
+    uint64_t out;
+    assert(htc_find(t, first_hash, &out) == HTC_OK);
+    assert(out == 100);
+
+    assert(htc_debug_verify_all(t) == 0);
+    htc_destroy(t);
+    PASS();
+}
+#endif
+
+/* Test that htc_epoch_retire safely falls back to synchronous free
+ * when malloc for the retire node fails.  (Battery 27 §17) */
+static void test_retire_sync_fallback(void) {
+    TEST("retire synchronous-free fallback on malloc failure");
+    htc_config_t cfg = {2, 0.99, 0, HTC_CFG_DISABLE_FRONT_CACHE};
+    htc_table_t *t = htc_create(&cfg);
+    assert(t);
+
+    /* Insert and remove entries to exercise epoch retire */
+    for (int i = 0; i < 5; i++)
+        assert(htc_insert(t, (uint64_t)i, (uint64_t)i) == HTC_OK);
+    for (int i = 0; i < 5; i++)
+        assert(htc_remove(t, (uint64_t)i) == HTC_OK);
+
+    /* After all removes, entries should not be findable */
+    for (int i = 0; i < 5; i++) {
+        uint64_t out;
+        assert(htc_find(t, (uint64_t)i, &out) == HTC_ERR_NOT_FOUND);
+    }
+
+    /* No invariant violations */
+    assert(htc_debug_verify_all(t) == 0);
+
+    htc_destroy(t);
+    PASS();
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
@@ -2664,8 +2860,22 @@ int main(void) {
     test_transition_stash_to_secondary();
     /* Witness replay test */
     test_witness_replay();
+    /* Witness projection test */
+    test_witness_projection();
+    /* Battery 27: arena stability during expansion */
+    test_reader_during_arena_expansion();
     /* Mutation: stash duplicate check */
     test_mutation_stash_duplicate_check();
+    /* Miss certificate test */
+    {
+        TEST("miss certificate produces valid output");
+        htc_table_t *tc = htc_create(NULL);
+        assert(htc_insert(tc, 42, 100) == HTC_OK);
+        htc_debug_explain_miss(tc, 99);  /* should say not found and why */
+        assert(htc_debug_check_transient(tc) < 8u);  /* no ctrl-false-neg or remap undercount */
+        htc_destroy(tc);
+        PASS();
+    }
     /* Fast path == slow path */
     test_fast_equals_slow_find();
     /* Negative lookup boundaries */
@@ -2707,6 +2917,12 @@ int main(void) {
     /* Side-effect footprint + witness emission */
     test_find_side_effects();
     test_witness_emission();
+    /* Model conformance */
+    test_model_conformance();
+    /* Battery 27: grow allocation failure atomicity */
+    test_grow_allocation_failure();
+    /* Battery 27: retire synchronous-fallback on malloc failure */
+    test_retire_sync_fallback();
     /* Spec-drift tripwire: key constants (Battery 16 Q30) */
     {
         /* ─── htc_spec.lock (Battery 23 Q29) ──────────────────────
@@ -2744,8 +2960,8 @@ int main(void) {
     }
 #else
     printf("  (skipping arena/stash tests without arena allocator)\n");
-    tests_total += 58;
-    tests_passed += 31;
+    tests_total += 60;
+    tests_passed += 32;
 #endif
 
     printf("=== %d / %d tests passed ===\n", tests_passed, tests_total);

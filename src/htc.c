@@ -61,40 +61,71 @@ _Thread_local htc_witness_log_t htc_witness_log = {0};
  * Arena — flat array of records + free-list
  * ========================================================================= */
 
+/* Record pointer via block-linked arena: find the block containing idx
+ * and return the slot.  Blocks are never moved or freed while the
+ * arena is alive, so this is safe without the arena lock. */
+htc_record_t *htc_arena_ptr(htc_arena_t *a, uint32_t idx) {
+    uint32_t bi = idx >> HTC_ARENA_BLOCK_SHIFT;
+    uint32_t si = idx & HTC_ARENA_BLOCK_MASK;
+    htc_arena_block_t *b = __atomic_load_n(&a->head, __ATOMIC_RELAXED);
+    for (uint32_t i = 0; b && i < bi; i++) b = b->next;
+    return b ? &b->recs[si] : NULL;
+}
+
+/* Helper: zero a record's fields.  Caller must hold a->lock. */
+static inline void htc_arena_rec_zero(htc_record_t *r) {
+    r->identity_hash  = 0;
+    r->placement_hash = 0;
+    r->generation++;
+#ifdef HTC_TEST_SMALL_RECORD_GEN_BITS
+    r->generation &= (1u << HTC_TEST_SMALL_RECORD_GEN_BITS) - 1;
+#endif
+    __atomic_store_n(&r->user_value, 0, HTC_MO_RELEASE);
+}
+
 uint32_t htc_arena_alloc(htc_arena_t *a, uint64_t identity_hash,
                           uint64_t placement_hash, uint64_t value)
 {
     htc_spin_lock(&a->lock);
+    htc_record_t *r;
     if (a->free_count > 0) {
         a->free_count--;
         uint32_t idx = a->free_idx[a->free_count];
-        a->records[idx].generation++;
-        a->records[idx].identity_hash  = identity_hash;
-        a->records[idx].placement_hash = placement_hash;
-        __atomic_store_n(&a->records[idx].flags, 0, __ATOMIC_RELAXED);
-        __atomic_store_n(&a->records[idx].user_value, value, HTC_MO_RELEASE);
-        /* Test-mode narrow generation width (Battery 12 Q25) */
+        r = htc_arena_ptr(a, idx);
+        r->generation++;
+        r->identity_hash  = identity_hash;
+        r->placement_hash = placement_hash;
+        __atomic_store_n(&r->flags, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&r->user_value, value, HTC_MO_RELEASE);
 #ifdef HTC_TEST_SMALL_RECORD_GEN_BITS
-        a->records[idx].generation &= (1u << HTC_TEST_SMALL_RECORD_GEN_BITS) - 1;
+        r->generation &= (1u << HTC_TEST_SMALL_RECORD_GEN_BITS) - 1;
 #endif
         htc_spin_unlock(&a->lock);
         return idx;
     }
-    if (a->count >= a->capacity) {
-        uint32_t new_cap = a->capacity ? a->capacity * 2 : 64;
-        htc_record_t *nr = (htc_record_t *)realloc(
-            a->records, (size_t)new_cap * sizeof(htc_record_t));
-        if (!nr) { htc_spin_unlock(&a->lock); return UINT32_MAX; }
-        a->records  = nr;
-        a->capacity = new_cap;
+    /* Allocate a new block when current one is full */
+    uint32_t bi = a->count >> HTC_ARENA_BLOCK_SHIFT;
+    uint32_t needed = bi + 1;
+    uint32_t have = 0;
+    {
+        htc_arena_block_t *b = a->head;
+        while (b) { have++; b = b->next; }
+    }
+    while (have < needed) {
+        htc_arena_block_t *nb = (htc_arena_block_t *)calloc(1, sizeof(htc_arena_block_t));
+        if (!nb) { htc_spin_unlock(&a->lock); return UINT32_MAX; }
+        nb->next = a->head;
+        __atomic_store_n(&a->head, nb, __ATOMIC_RELEASE);
+        have++;
     }
     uint32_t idx = a->count++;
-    a->records[idx].identity_hash  = identity_hash;
-    a->records[idx].placement_hash = placement_hash;
-    __atomic_store_n(&a->records[idx].flags, 0, __ATOMIC_RELAXED);
-    __atomic_store_n(&a->records[idx].user_value, value, HTC_MO_RELEASE);
+    r = htc_arena_ptr(a, idx);
+    r->identity_hash  = identity_hash;
+    r->placement_hash = placement_hash;
+    __atomic_store_n(&r->flags, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&r->user_value, value, HTC_MO_RELEASE);
 #ifdef HTC_TEST_SMALL_RECORD_GEN_BITS
-    a->records[idx].generation &= (1u << HTC_TEST_SMALL_RECORD_GEN_BITS) - 1;
+    r->generation &= (1u << HTC_TEST_SMALL_RECORD_GEN_BITS) - 1;
 #endif
     htc_spin_unlock(&a->lock);
     return idx;
@@ -103,13 +134,7 @@ uint32_t htc_arena_alloc(htc_arena_t *a, uint64_t identity_hash,
 void htc_arena_free(htc_arena_t *a, uint32_t idx)
 {
     htc_spin_lock(&a->lock);
-    a->records[idx].identity_hash  = 0;
-    a->records[idx].placement_hash = 0;
-    a->records[idx].generation++;
-#ifdef HTC_TEST_SMALL_RECORD_GEN_BITS
-    a->records[idx].generation &= (1u << HTC_TEST_SMALL_RECORD_GEN_BITS) - 1;
-#endif
-    __atomic_store_n(&a->records[idx].user_value, 0, HTC_MO_RELEASE);
+    htc_arena_rec_zero(htc_arena_ptr(a, idx));
     if (a->free_count >= a->free_cap) {
         uint32_t new_cap = a->free_cap ? a->free_cap * 2 : 64;
         uint32_t *nf = (uint32_t *)realloc(
@@ -122,14 +147,14 @@ void htc_arena_free(htc_arena_t *a, uint32_t idx)
     htc_spin_unlock(&a->lock);
 }
 
-htc_record_t *htc_arena_ptr(htc_arena_t *a, uint32_t idx)
-{
-    return &a->records[idx];
-}
-
 void htc_arena_destroy(htc_arena_t *a)
 {
-    free(a->records);
+    htc_arena_block_t *b = a->head;
+    while (b) {
+        htc_arena_block_t *next = b->next;
+        free(b);
+        b = next;
+    }
     free(a->free_idx);
     memset(a, 0, sizeof(*a));
 }
@@ -213,9 +238,9 @@ void htc_epoch_retire(htc_epoch_ctl_t *ep, htc_arena_t *a, uint32_t arena_idx)
                                           false, HTC_MO_RELEASE, __ATOMIC_RELAXED));
 }
 
-void htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a)
+uint64_t htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a)
 {
-    if (!ep || !a) return;
+    if (!ep || !a) return 0;
 
     /* Compute the minimum non-zero thread epoch */
     uint64_t min_ep = UINT64_MAX;
@@ -226,11 +251,12 @@ void htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a)
 
     /* Pop entire retire list */
     htc_retire_node_t *head = __atomic_exchange_n(&ep->retire_head, NULL,
-                                                   HTC_MO_ACQUIRE);
+                                                    HTC_MO_ACQUIRE);
 
     /* Split into safe-to-free (retire_epoch < min_ep) and keep */
     htc_retire_node_t *keep = NULL, *keep_tail = NULL;
     htc_retire_node_t *free_list = NULL;
+    uint64_t reclaimed = 0;
 
     while (head) {
         htc_retire_node_t *next = head->next;
@@ -252,6 +278,7 @@ void htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a)
         free_list = n->next;
         htc_arena_free(a, n->arena_idx);
         free(n);
+        reclaimed++;
     }
 
     /* Re-pend keep list */
@@ -263,38 +290,28 @@ void htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a)
                                               false, HTC_MO_RELEASE, HTC_MO_ACQUIRE));
     }
 
-    /* Process retired generations (Battery 8 Q5) */
+    /* Process retired generations (Battery 8 Q5).
+     * NOTE: retired gens are NOT freed here — writers may still hold
+     * gen pointers loaded before the gen was retired.  Epoch-unpinned
+     * writers cannot be protected by retire_epoch < min_ep.
+     * Gens are freed during htc_destroy instead. */
     {
         htc_retire_gen_t *rg = __atomic_exchange_n(&ep->retire_gen_head, NULL,
                                                      HTC_MO_ACQUIRE);
-        htc_retire_gen_t *rg_keep = NULL;
-        while (rg) {
-            htc_retire_gen_t *next = rg->next;
-            if (rg->retire_epoch < min_ep) {
-                HTC_SCHED_HOOK(15); /* before epoch frees retired old generation */
-                /* Free gen's metadata — arena and shards are shared, skip */
-                free(rg->gen->meta);
-                free(rg->gen->buckets);
-                free(rg->gen->migrated_bitmap);
-                free(rg->gen);
-                free(rg);
-            } else {
-                rg->next = rg_keep;
-                rg_keep = rg;
-            }
-            rg = next;
-        }
-        if (rg_keep) {
+        /* Re-pend all retired gens — they remain reachable via the
+         * gen chain (new_gen->old) and are freed during destroy. */
+        if (rg) {
+            htc_retire_gen_t *tail = rg;
+            while (tail->next) tail = tail->next;
             htc_retire_gen_t *old_rg = NULL;
             do {
-                htc_retire_gen_t *tail = rg_keep;
-                while (tail->next) tail = tail->next;
                 tail->next = old_rg;
             } while (!__atomic_compare_exchange_n(&ep->retire_gen_head, &old_rg,
-                                                  rg_keep, false,
-                                                  HTC_MO_RELEASE, HTC_MO_ACQUIRE));
+                                                   rg, false,
+                                                   HTC_MO_RELEASE, HTC_MO_ACQUIRE));
         }
     }
+    return reclaimed;
 }
 
 void htc_epoch_advance(htc_epoch_ctl_t *ep)
@@ -550,9 +567,9 @@ void htc_resize_finish(htc_table_t *t)
      * and shards (shared with the current generation). */
     htc_table_gen_t *old = g->old;
     g->old = NULL;
-    htc_epoch_collect(t->epoch, old->arena);
+    HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, old->arena));
     htc_epoch_advance(t->epoch);
-    htc_epoch_collect(t->epoch, old->arena);
+    HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, old->arena));
     free(old->meta);
     free(old->buckets);
     free(old->migrated_bitmap);
@@ -642,12 +659,19 @@ int htc_bucket_scan(htc_bucket_t *b, htc_bucket_meta_t *m,
 static int htc_bucket_scan_seq(htc_bucket_t *b, htc_bucket_meta_t *m,
                                 htc_arena_t *a,
                                 uint64_t identity_hash, uint16_t tag,
-                                htc_scan_mode_t mode)
+                                htc_scan_mode_t mode
+#ifdef HTC_STATS
+                                , _Atomic uint64_t *seq_retry_cnt
+#endif
+                                )
 {
     uint8_t  want_p8       = htc_partial8(tag);
     bool     want_secondary = (mode == HTC_SCAN_SECONDARY);
 
 retry:
+#ifdef HTC_STATS
+    if (seq_retry_cnt) __atomic_fetch_add(seq_retry_cnt, 1, __ATOMIC_RELAXED);
+#endif
     {
         uint32_t s0 = __atomic_load_n(&m->seq, HTC_MO_ACQUIRE);
         if (s0 & HTC_SEQ_BUSY) goto retry;
@@ -1262,12 +1286,15 @@ htc_error_t htc_grow(htc_table_t *t, bool reseed)
                        __ATOMIC_RELAXED);
 #endif
 
-    /* Release all shards */
+    /* Release all shards — epoch_collect is intentionally NOT called
+     * here.  A concurrent thread may still hold a gen pointer loaded
+     * earlier; freeing retired gens via epoch_collect would UAF that
+     * pointer.  Collection happens safely during htc_remove /
+     * htc_insert epoch_collect calls where the caller does not hold
+     * cross-generation references. */
     for (uint32_t si = t->shard_count; si > 0; si--)
         htc_spin_unlock(&t->shards[si - 1].lock);
 
-    htc_epoch_collect(t->epoch, t->arena);
-    htc_epoch_advance(t->epoch);
     htc_spin_unlock(&t->grow_lock);
     return HTC_OK;
 }
@@ -1385,7 +1412,7 @@ void htc_destroy(htc_table_t *t)
     /* Drain any pending retirements (arena records) */
     for (int i = 0; i < 8; i++) {
         htc_epoch_advance(t->epoch);
-        htc_epoch_collect(t->epoch, g->arena);
+        HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, g->arena));
     }
     /* Force-free any remaining retire nodes */
     {
@@ -1467,9 +1494,40 @@ const htc_amq_filter_t *htc_get_filter(const htc_table_t *t) {
 }
 
 #ifdef HTC_STATS
+
+static void htc_stats_aggregate(const htc_table_t *t, htc_stats_t *out,
+                                 htc_shard_stats_t *shard_out) {
+    memcpy(out, &t->stats, sizeof(htc_stats_t));
+    memset(shard_out, 0, sizeof(htc_shard_stats_t));
+    if (!t->shards) return;
+    htc_table_gen_t *g = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
+    uint32_t sc = g ? g->shard_count : t->shard_count;
+    for (uint32_t si = 0; si < sc; si++) {
+        const htc_shard_stats_t *ss = &t->shards[si].shard_stats;
+#define AGG(f) __atomic_fetch_add(&shard_out->f, __atomic_load_n(&ss->f, __ATOMIC_RELAXED), __ATOMIC_RELAXED)
+        AGG(stash_insert);
+        AGG(stash_full);
+        AGG(stash_grow);
+        AGG(bfs_attempts);
+        AGG(bfs_success);
+        AGG(bfs_no_path);
+        AGG(bfs_abandoned_shards);
+        for (int d = 0; d < 8; d++)
+            __atomic_fetch_add(&shard_out->bfs_depth_histogram[d],
+                               __atomic_load_n(&ss->bfs_depth_histogram[d], __ATOMIC_RELAXED),
+                               __ATOMIC_RELAXED);
+        AGG(insert_oom);
+        AGG(insert_pathological);
+#undef AGG
+    }
+}
+
 void htc_stats_print(const htc_table_t *t) {
     if (!t) return;
-    const htc_stats_t *s = &t->stats;
+    htc_stats_t agg;
+    htc_shard_stats_t shard_agg;
+    htc_stats_aggregate(t, &agg, &shard_agg);
+    const htc_stats_t *s = &agg;
     printf("htc stats:\n");
     printf("  find_primary_hit    %lu\n", __atomic_load_n(&s->find_primary_hit, __ATOMIC_RELAXED));
     printf("  find_secondary_hit  %lu\n", __atomic_load_n(&s->find_secondary_hit, __ATOMIC_RELAXED));
@@ -1497,6 +1555,58 @@ void htc_stats_print(const htc_table_t *t) {
     printf("  grow_reason_load    %lu\n", __atomic_load_n(&s->grow_reason_load, __ATOMIC_RELAXED));
     printf("  grow_reason_stash   %lu\n", __atomic_load_n(&s->grow_reason_stash_full, __ATOMIC_RELAXED));
     printf("  grow_reseed_count   %lu\n", __atomic_load_n(&s->grow_reseed_count, __ATOMIC_RELAXED));
+    printf("  retired_record_cnt  %lu\n", __atomic_load_n(&s->retired_record_count, __ATOMIC_RELAXED));
+    printf("  reclaimed_record_cnt %lu\n", __atomic_load_n(&s->reclaimed_record_count, __ATOMIC_RELAXED));
+    printf("  attempted_write_frz  %lu\n", __atomic_load_n(&s->attempted_write_to_frozen_gen, __ATOMIC_RELAXED));
+    printf("  attempted_write_old  %lu\n", __atomic_load_n(&s->attempted_write_to_old_gen, __ATOMIC_RELAXED));
+    printf("  bfs_abandoned        %lu\n", __atomic_load_n(&s->bfs_abandoned_shards, __ATOMIC_RELAXED));
+    printf("  remap_saturations    %lu\n", __atomic_load_n(&s->remap_saturations, __ATOMIC_RELAXED));
+    /* Per-shard aggregated counters */
+    printf("  [shard totals]\n");
+    printf("    stash_insert       %lu\n", __atomic_load_n(&shard_agg.stash_insert, __ATOMIC_RELAXED));
+    printf("    stash_full         %lu\n", __atomic_load_n(&shard_agg.stash_full, __ATOMIC_RELAXED));
+    printf("    stash_grow         %lu\n", __atomic_load_n(&shard_agg.stash_grow, __ATOMIC_RELAXED));
+    printf("    bfs_attempts       %lu\n", __atomic_load_n(&shard_agg.bfs_attempts, __ATOMIC_RELAXED));
+    printf("    bfs_success        %lu\n", __atomic_load_n(&shard_agg.bfs_success, __ATOMIC_RELAXED));
+    printf("    bfs_no_path        %lu\n", __atomic_load_n(&shard_agg.bfs_no_path, __ATOMIC_RELAXED));
+    printf("    bfs_abandoned      %lu\n", __atomic_load_n(&shard_agg.bfs_abandoned_shards, __ATOMIC_RELAXED));
+    printf("    insert_oom         %lu\n", __atomic_load_n(&shard_agg.insert_oom, __ATOMIC_RELAXED));
+    printf("    insert_pathological %lu\n", __atomic_load_n(&shard_agg.insert_pathological, __ATOMIC_RELAXED));
+    for (int d = 0; d < 8; d++)
+        printf("    bfs_depth[%d]       %lu\n", d,
+               __atomic_load_n(&shard_agg.bfs_depth_histogram[d], __ATOMIC_RELAXED));
+}
+
+void htc_stats_reset(htc_table_t *t) {
+    if (!t) return;
+#define ZR(f) __atomic_store_n(&t->stats.f, 0, __ATOMIC_RELAXED)
+    ZR(find_primary_hit); ZR(find_secondary_hit); ZR(find_stash_hit);
+    ZR(find_oldgen_hit); ZR(find_negative); ZR(secondary_skipped);
+    ZR(secondary_checked); ZR(seq_retries); ZR(bfs_attempts);
+    ZR(bfs_success); ZR(bfs_no_path); ZR(stash_insert); ZR(stash_grow);
+    ZR(stash_full); ZR(remap_saturations); ZR(front_cache_hit);
+    ZR(front_cache_miss); ZR(grow_started); ZR(grow_copied_bucket_entries);
+    ZR(grow_copied_stash_entries); ZR(writer_retry_gen_changed);
+    ZR(writer_retry_gen_frozen); ZR(attempted_write_to_frozen_gen);
+    ZR(attempted_write_to_old_gen); ZR(old_gen_count);
+    ZR(old_gen_buckets_bytes); ZR(bfs_abandoned_shards);
+    ZR(retired_record_count); ZR(reclaimed_record_count);
+    ZR(insert_oom); ZR(insert_pathological); ZR(grow_reason_load);
+    ZR(grow_reason_stash_full); ZR(grow_reseed_count);
+    for (int d = 0; d < 8; d++) ZR(bfs_depth_histogram[d]);
+#undef ZR
+    if (!t->shards) return;
+    htc_table_gen_t *g = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
+    uint32_t sc = g ? g->shard_count : t->shard_count;
+    for (uint32_t si = 0; si < sc; si++) {
+        htc_shard_stats_t *ss = &t->shards[si].shard_stats;
+#define ZRS(f) __atomic_store_n(&ss->f, 0, __ATOMIC_RELAXED)
+        ZRS(stash_insert); ZRS(stash_full); ZRS(stash_grow);
+        ZRS(bfs_attempts); ZRS(bfs_success); ZRS(bfs_no_path);
+        ZRS(bfs_abandoned_shards); ZRS(insert_oom); ZRS(insert_pathological);
+        for (int d = 0; d < 8; d++) ZRS(bfs_depth_histogram[d]);
+#undef ZRS
+    }
 }
 #endif
 
@@ -1799,6 +1909,154 @@ bool htc_debug_slow_find(const htc_table_t *t, uint64_t hash,
     return false;
 }
 
+/* ─── Negative miss certificate (Battery 27 §26) ─────────────
+ * Explains exactly why a hash was NOT found.  Scans each
+ * possible location and reports the reason for each miss. */
+void htc_debug_explain_miss(const htc_table_t *t, uint64_t hash) {
+    if (!t) { printf("explain_miss: NULL table\n"); return; }
+    htc_table_gen_t *g = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
+    if (!g) { printf("explain_miss: no generation\n"); return; }
+    uint64_t ph  = htc_placement_hash(hash, g->seed);
+    uint16_t tag = htc_tag16(ph);
+    uint32_t b1  = (uint32_t)(ph & g->bucket_mask);
+    uint32_t b2  = htc_alt_bucket(b1, ph, tag) & g->bucket_mask;
+    printf("=== miss certificate for hash 0x%016lx ===\n", hash);
+    printf("  placement=0x%016lx tag=0x%04x p8=0x%02x\n", ph, tag, htc_partial8(tag));
+    printf("  primary=%u secondary=%u\n", b1, b2);
+
+    /* Primary bucket: scan all slots, report each */
+    printf("--- primary bucket %u ---\n", b1);
+    for (unsigned si = 0; si < HTC_BUCKET_SLOTS; si++) {
+        uint64_t w = __atomic_load_n(&g->buckets[b1].slot[si], HTC_MO_ACQUIRE);
+        if (!htc_slot_live(w)) { printf("  slot[%u]: EMPTY\n", si); continue; }
+        uint32_t idx = htc_slot_index(w);
+        htc_record_t *r = htc_arena_ptr(g->arena, idx);
+        bool hash_match = (r->identity_hash == hash);
+        bool tag_match  = (htc_slot_tag(w) == tag);
+        bool in_sec     = htc_slot_in_secondary(w);
+        uint64_t flags  = __atomic_load_n(&r->flags, HTC_MO_ACQUIRE);
+        printf("  slot[%u]: LIVE idx=%lu tag_match=%d in_sec=%d hash_match=%d flags=%lu\n",
+               si, (unsigned long)idx, tag_match, in_sec, hash_match, flags);
+        (void)r; (void)hash_match; (void)tag_match; (void)in_sec; (void)flags;
+    }
+
+    /* Remap decision */
+    uint8_t rc = __atomic_load_n(&g->meta[b1].remap_count, __ATOMIC_RELAXED);
+    printf("--- remap decision ---\n");
+    printf("  remap_count[%u]=%u", b1, rc);
+    if (rc == 0) printf(" → skip secondary (count=0)\n");
+    else if (rc == 0xFF) printf(" → check secondary (SATURATED)\n");
+    else printf(" → check secondary\n");
+
+    /* Secondary bucket */
+    printf("--- secondary bucket %u ---\n", b2);
+    for (unsigned si = 0; si < HTC_BUCKET_SLOTS; si++) {
+        uint64_t w = __atomic_load_n(&g->buckets[b2].slot[si], HTC_MO_ACQUIRE);
+        if (!htc_slot_live(w)) { printf("  slot[%u]: EMPTY\n", si); continue; }
+        uint32_t idx = htc_slot_index(w);
+        htc_record_t *r = htc_arena_ptr(g->arena, idx);
+        bool hash_match = (r->identity_hash == hash);
+        bool tag_match  = (htc_slot_tag(w) == tag);
+        bool in_sec     = htc_slot_in_secondary(w);
+        uint64_t flags  = __atomic_load_n(&r->flags, HTC_MO_ACQUIRE);
+        printf("  slot[%u]: LIVE idx=%lu tag_match=%d in_sec=%d hash_match=%d flags=%lu\n",
+               si, (unsigned long)idx, tag_match, in_sec, hash_match, flags);
+    }
+
+    /* Stashes */
+    printf("--- stashes ---\n");
+    const htc_stash_t *ss = t->shards ? &t->shards[htc_shard_of(b1, t->shard_count)].stash : &t->stash;
+    for (uint32_t i = 0; i < HTC_STASH_MAX; i++) {
+        uint64_t w = __atomic_load_n(&ss->slots[i], HTC_MO_ACQUIRE);
+        if (!htc_slot_live(w)) { printf("  stash[%u]: EMPTY\n", i); continue; }
+        uint32_t idx = htc_slot_index(w);
+        htc_record_t *r = htc_arena_ptr(g->arena, idx);
+        bool hash_match = (r->identity_hash == hash);
+        bool tag_match  = (htc_slot_tag(w) == tag);
+        uint64_t flags  = __atomic_load_n(&r->flags, HTC_MO_ACQUIRE);
+        printf("  stash[%u]: LIVE idx=%lu tag_match=%d hash_match=%d flags=%lu\n",
+               i, (unsigned long)idx, tag_match, hash_match, flags);
+    }
+    if (ss != &t->stash) {
+        printf("--- global stash ---\n");
+        for (uint32_t i = 0; i < HTC_STASH_MAX; i++) {
+            uint64_t w = __atomic_load_n(&t->stash.slots[i], HTC_MO_ACQUIRE);
+            if (!htc_slot_live(w)) { printf("  global_stash[%u]: EMPTY\n", i); continue; }
+            uint32_t idx = htc_slot_index(w);
+            printf("  global_stash[%u]: LIVE idx=%lu\n", i, (unsigned long)idx);
+        }
+    }
+
+    /* Old generation */
+    if (g->old) {
+        printf("--- old generation ---\n");
+        uint64_t old_val;
+        bool found = htc_find_in_old_gen(g->old, g->arena, hash, tag, &old_val);
+        printf("  found in old gen: %s\n", found ? "YES" : "NO");
+    }
+    printf("=== end miss certificate ===\n");
+}
+
+/* ─── Transient-state invariant verifier (Battery 27 §20-21) ─
+ * Checks that internal consistency invariants hold during
+ * transient states (seq_busy, gen freezing, etc.).
+ * Returns 0 if OK, bitmask of fault types otherwise.
+ * Safe to call from SCHED_HOOK callbacks (no reentrancy). */
+uint32_t htc_debug_check_transient(const htc_table_t *t) {
+    if (!t) return 0;
+    uint32_t faults = 0;
+    htc_table_gen_t *g = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
+    if (!g) return 0;
+
+    /* Check: ctrl_tags are populated for every LIVE slot.
+     * A zero ctrl byte for a LIVE slot would cause the fast path
+     * (htc_bucket_scan_seq) to miss it. */
+    for (uint32_t bi = 0; bi < g->num_buckets; bi++) {
+        uint64_t ctrl = htc_ctrl_load(&g->meta[bi]);
+        for (unsigned si = 0; si < HTC_BUCKET_SLOTS; si++) {
+            uint64_t w = __atomic_load_n(&g->buckets[bi].slot[si], HTC_MO_ACQUIRE);
+            if (!htc_slot_live(w)) continue;
+            uint64_t match = (ctrl >> (si * 8)) & 0xFF;
+            if (match == 0) faults |= 2u;  /* ctrl false negative risk */
+        }
+    }
+
+    /* Check: seq guard is consistent within buckets.
+     * During transient operations, seq may be BUSY but must
+     * not remain BUSY indefinitely.  This is a liveness check
+     * that cannot be fully verified here, but we flag BUSY as
+     * a transient warning. */
+    uint32_t busy_count = 0;
+    for (uint32_t bi = 0; bi < g->num_buckets; bi++) {
+        uint32_t seq = __atomic_load_n(&g->meta[bi].seq, HTC_MO_ACQUIRE);
+        if (seq & HTC_SEQ_BUSY) busy_count++;
+    }
+    if (busy_count) faults |= 4u;  /* transient: seq busy (benign if short) */
+
+    /* Check: remap_count is conservative.
+     * Count actual secondary entries and compare to remap_count.
+     * remap_count may be SATURATED or >= actual count, never less. */
+    for (uint32_t bi = 0; bi < g->num_buckets; bi++) {
+        uint32_t actual_sec = 0;
+        uint32_t p = bi;
+        for (unsigned si = 0; si < HTC_BUCKET_SLOTS; si++) {
+            uint64_t w = __atomic_load_n(&g->buckets[p].slot[si], HTC_MO_ACQUIRE);
+            if (htc_slot_live(w) && htc_slot_in_secondary(w))
+                actual_sec++;
+        }
+        uint8_t stored = __atomic_load_n(&g->meta[bi].remap_count, __ATOMIC_RELAXED);
+        if (stored != HTC_REMAP_SATURATED && stored < actual_sec)
+            faults |= 8u;  /* remap under-count: would cause false negative */
+    }
+
+    /* Check: no bucket has both primary and secondary entries for same hash.
+     * Duplicate detection is done elsewhere (htc_debug_check_duplicate_hash),
+     * but here we do a quick spot-check. */
+    /* (deferred to htc_debug_check_duplicate_hash for full scan) */
+
+    return faults;
+}
+
 /* ─── Explain hash diagnostic (Battery 16 Q33) ────────────── */
 void htc_debug_explain_hash(const htc_table_t *t_, uint64_t hash)
 {
@@ -2072,6 +2330,10 @@ htc_error_t htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
             }
             if (__atomic_load_n(&cur->state, HTC_MO_ACQUIRE) != HTC_GEN_ACTIVE) {
                 HTC_STAT_INC(t->stats.writer_retry_gen_frozen);
+                if (__atomic_load_n(&cur->state, HTC_MO_ACQUIRE) == HTC_GEN_OLD)
+                    HTC_STAT_INC(t->stats.attempted_write_to_old_gen);
+                else
+                    HTC_STAT_INC(t->stats.attempted_write_to_frozen_gen);
                 if (t->shards) htc_unlock_shards(t->shards, s1, s2);
                 goto retry_nowait;
             }
@@ -2107,8 +2369,9 @@ htc_error_t htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
         uint32_t idx = htc_arena_alloc(t->arena, hash, ph, value);
         if (idx == UINT32_MAX) {
             HTC_STAT_INC(t->stats.insert_oom);
-            if (t->shards) htc_unlock_shards(t->shards, s1, s2);
+            HTC_STAT_INC_SHARD(t, s1, insert_oom);
             htc_witness_record(HTC_WIT_RETURN_ERR, hash, 0, 0, 0, 3, 0);  /* HTC_ERR_OOM */
+            if (t->shards) htc_unlock_shards(t->shards, s1, s2);
             return HTC_ERR_OOM;
         }
 
@@ -2173,6 +2436,7 @@ htc_error_t htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
             if (bfs_find_path(t, gen, b1, b2, &bfs_path)) {
                 HTC_SCHED_HOOK(7);  /* after BFS path found */
                 HTC_STAT_INC(t->stats.bfs_attempts);
+                HTC_STAT_INC_SHARD(t, s1, bfs_attempts);
                 /* Collect shards from b1, b2, and all path buckets */
                 uint32_t all_sids[HTC_BFS_MAX_PATH + 4];
                 uint8_t  all_n = 0;
@@ -2223,6 +2487,8 @@ htc_error_t htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
 
                     if (validate_path_locked(t, gen, &bfs_path, expected_src)) {
                         HTC_STAT_INC(t->stats.bfs_success);
+                        HTC_STAT_INC_SHARD(t, s1, bfs_success);
+                        { uint8_t bd = bfs_path.move_count; if (bd > 7) bd = 7; HTC_STAT_ADD_SHARD(t, s1, bfs_depth_histogram[bd], 1); }
                         commit_path_locked(t, gen, &bfs_path, expected_src, slot_word);
                         if (t->shards)
                             for (uint8_t i = all_n; i > 0; i--)
@@ -2235,8 +2501,11 @@ htc_error_t htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
                             htc_spin_unlock(&t->shards[all_sids[i - 1]].lock);
                     if (t->shards) htc_lock_shards(t->shards, s1, s2);
                 }
+                HTC_STAT_INC(t->stats.bfs_abandoned_shards);
+                HTC_STAT_INC_SHARD(t, s1, bfs_abandoned_shards);
             } else {
                 HTC_STAT_INC(t->stats.bfs_no_path);
+                HTC_STAT_INC_SHARD(t, s1, bfs_no_path);
             }
         }
 
@@ -2253,6 +2522,10 @@ htc_error_t htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
             }
             if (__atomic_load_n(&cur->state, HTC_MO_ACQUIRE) != HTC_GEN_ACTIVE) {
                 HTC_STAT_INC(t->stats.writer_retry_gen_frozen);
+                if (__atomic_load_n(&cur->state, HTC_MO_ACQUIRE) == HTC_GEN_OLD)
+                    HTC_STAT_INC(t->stats.attempted_write_to_old_gen);
+                else
+                    HTC_STAT_INC(t->stats.attempted_write_to_frozen_gen);
                 htc_arena_free(t->arena, idx);
                 if (t->shards) htc_unlock_shards(t->shards, s1, s2);
                 goto retry_nowait;
@@ -2268,16 +2541,20 @@ htc_error_t htc_insert(htc_table_t *t, uint64_t hash, uint64_t value)
         }
         if (htc_stash_insert(stash_ptr, slot_word) >= 0) {
             HTC_STAT_INC(t->stats.stash_insert);
+            HTC_STAT_INC_SHARD(t, s1, stash_insert);
             htc_stash_maintain(stash_ptr);
             goto insert_done;
         }
         HTC_STAT_INC(t->stats.stash_full);
+        HTC_STAT_INC_SHARD(t, s1, stash_full);
 
         /* Stash full — free record, grow table (with reseed), retry */
         htc_arena_free(t->arena, idx);
         if (t->shards) htc_unlock_shards(t->shards, s1, s2);
-        htc_epoch_collect(t->epoch, t->arena);
+        HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
         htc_epoch_advance(t->epoch);
+        HTC_STAT_INC(t->stats.stash_grow);
+        HTC_STAT_INC_SHARD(t, s1, stash_grow);
         HTC_STAT_INC(t->stats.grow_reason_stash_full);
         htc_error_t grow_ret = htc_grow(t, true);  /* reseed on pathology */
         if (grow_ret != HTC_OK) return grow_ret;
@@ -2290,8 +2567,15 @@ retry_nowait:
     }
 
     HTC_STAT_INC(t->stats.insert_pathological);
+    HTC_STAT_INC_SHARD(t, s1, insert_pathological);
     htc_witness_record(HTC_WIT_RETURN_ERR, hash, 0, 0, 0, 4, 0);  /* HTC_ERR_PATHOLOGICAL */
     htc_witness_record(HTC_WIT_OP_FINISH, hash, 0, 0, 0, 4, 0);
+    /* PATHOLOGICAL certificate (Battery 27 §27):
+     * Only access t-level fields — the generation pointer may be
+     * invalidated by a concurrent grow. */
+    printf("PATHOLOGICAL: hash=0x%016lx num_buckets=%u stash_max=%u"
+           " shard_count=%u seed=0x%016lx\n",
+           hash, t->num_buckets, HTC_STASH_MAX, t->shard_count, t->seed);
     return HTC_ERR_PATHOLOGICAL;
 
 insert_done:
@@ -2300,7 +2584,7 @@ insert_done:
 
     if (t->shards) htc_unlock_shards(t->shards, s1, s2);
 
-    htc_epoch_collect(t->epoch, t->arena);
+    HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
     htc_epoch_advance(t->epoch);
 
     double lf = (double)__atomic_load_n(&t->size, __ATOMIC_RELAXED) / (double)t->num_buckets;
@@ -2384,7 +2668,7 @@ htc_error_t htc_upsert(htc_table_t *t, uint64_t hash, uint64_t value)
         }
 
         __atomic_fetch_add(&t->size, 1, __ATOMIC_RELAXED);
-        htc_epoch_collect(t->epoch, t->arena);
+        HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
         htc_epoch_advance(t->epoch);
 
         double lf = (double)__atomic_load_n(&t->size, __ATOMIC_RELAXED) / (double)t->num_buckets;
@@ -2499,7 +2783,11 @@ htc_error_t htc_find(const htc_table_t *t_, uint64_t hash, uint64_t *out_value)
         {
             int si = htc_bucket_scan_seq(&g->buckets[b1], &g->meta[b1],
                                          g->arena, hash, tag,
-                                         HTC_SCAN_PRIMARY);
+                                         HTC_SCAN_PRIMARY
+#ifdef HTC_STATS
+                                         , &t->stats.seq_retries
+#endif
+                                         );
             if (si >= 0) {
                 uint64_t w = __atomic_load_n(&g->buckets[b1].slot[si],
                                              HTC_MO_ACQUIRE);
@@ -2538,7 +2826,11 @@ htc_error_t htc_find(const htc_table_t *t_, uint64_t hash, uint64_t *out_value)
             uint32_t b2 = htc_alt_bucket(b1, ph, tag) & g->bucket_mask;
             int si = htc_bucket_scan_seq(&g->buckets[b2], &g->meta[b2],
                                          g->arena, hash, tag,
-                                         HTC_SCAN_SECONDARY);
+                                         HTC_SCAN_SECONDARY
+#ifdef HTC_STATS
+                                         , &t->stats.seq_retries
+#endif
+                                         );
             if (si >= 0) {
                 uint64_t w = __atomic_load_n(&g->buckets[b2].slot[si],
                                              HTC_MO_ACQUIRE);
@@ -2647,9 +2939,10 @@ htc_error_t htc_remove(htc_table_t *t, uint64_t hash)
             htc_front_cache_remove(&htc_thread_cache, hash);
             if (t->have_amq_filter) t->amq_filter.delete(t->amq_filter.filter, hash);
             htc_epoch_retire(t->epoch, t->arena, idx);
+            HTC_STAT_INC(t->stats.retired_record_count);
             __atomic_fetch_sub(&t->size, 1, __ATOMIC_RELAXED);
             if (t->shards) htc_unlock_shards(t->shards, s1, s2);
-            htc_epoch_collect(t->epoch, t->arena);
+            HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
             htc_epoch_advance(t->epoch);
             return HTC_OK;
         }
@@ -2674,9 +2967,10 @@ htc_error_t htc_remove(htc_table_t *t, uint64_t hash)
             htc_front_cache_remove(&htc_thread_cache, hash);
             if (t->have_amq_filter) t->amq_filter.delete(t->amq_filter.filter, hash);
             htc_epoch_retire(t->epoch, t->arena, idx);
+            HTC_STAT_INC(t->stats.retired_record_count);
             __atomic_fetch_sub(&t->size, 1, __ATOMIC_RELAXED);
             if (t->shards) htc_unlock_shards(t->shards, s1, s2);
-            htc_epoch_collect(t->epoch, t->arena);
+            HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
             htc_epoch_advance(t->epoch);
             return HTC_OK;
         }
@@ -2699,9 +2993,10 @@ htc_error_t htc_remove(htc_table_t *t, uint64_t hash)
             htc_front_cache_remove(&htc_thread_cache, hash);
             if (t->have_amq_filter) t->amq_filter.delete(t->amq_filter.filter, hash);
             htc_epoch_retire(t->epoch, t->arena, idx);
+            HTC_STAT_INC(t->stats.retired_record_count);
             __atomic_fetch_sub(&t->size, 1, __ATOMIC_RELAXED);
             if (t->shards) htc_unlock_shards(t->shards, s1, s2);
-            htc_epoch_collect(t->epoch, t->arena);
+            HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
             htc_epoch_advance(t->epoch);
             return HTC_OK;
         }
@@ -2728,9 +3023,10 @@ htc_error_t htc_remove(htc_table_t *t, uint64_t hash)
                 htc_bucket_seq_end(&gen->meta[b1], gs);
                 htc_front_cache_remove(&htc_thread_cache, hash);
                 htc_epoch_retire(t->epoch, t->arena, idx);
+                HTC_STAT_INC(t->stats.retired_record_count);
                 __atomic_fetch_sub(&t->size, 1, __ATOMIC_RELAXED);
                 if (t->shards) htc_unlock_shards(t->shards, s1, s2);
-                htc_epoch_collect(t->epoch, t->arena);
+                HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
                 htc_epoch_advance(t->epoch);
                 return HTC_OK;
             }
@@ -2738,7 +3034,7 @@ htc_error_t htc_remove(htc_table_t *t, uint64_t hash)
     }
 
     if (t->shards) htc_unlock_shards(t->shards, s1, s2);
-    htc_epoch_collect(t->epoch, t->arena);
+    HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
     htc_epoch_advance(t->epoch);
     return HTC_ERR_NOT_FOUND;
 }

@@ -172,7 +172,8 @@ bool htc_kv_remove(htc_kv_t *kv, const void *key, size_t klen) {
     htc_kv_entry_t *e = (htc_kv_entry_t *)(uintptr_t)ptr;
     if (!keys_equal(key, klen, e->key, e->klen)) return false;
 
-    return htc_remove(kv->t, hash) == HTC_OK;
+    htc_error_t ret = htc_remove(kv->t, hash);
+    return ret == HTC_OK;
 }
 
 void htc_kv_set_filter(htc_kv_t *kv, const htc_amq_filter_t *amq) {
@@ -202,8 +203,8 @@ bool htc_kv_iter_next(htc_kv_iter_t *it) {
 
     while (it->idx < it->count) {
         uint32_t i = it->idx++;
-        htc_record_t *r = &g->arena->records[i];
-        if (r->identity_hash == 0) continue;  /* freed/deleted slot */
+        htc_record_t *r = htc_arena_ptr(g->arena, i);
+        if (!r || r->identity_hash == 0) continue;  /* freed/deleted slot */
         uint64_t ptr = __atomic_load_n(&r->user_value, __ATOMIC_RELAXED);
         if (!ptr) continue;
 
@@ -227,10 +228,14 @@ size_t htc_kv_memory_bytes(const htc_kv_t *kv) {
     size_t total = sizeof(htc_kv_t);
     htc_table_gen_t *g = __atomic_load_n(&kv->t->current_gen, __ATOMIC_ACQUIRE);
     if (g && g->arena) {
-        total += (size_t)g->arena->capacity * sizeof(htc_record_t);
+        /* Count blocks */
+        htc_arena_block_t *b = __atomic_load_n(&g->arena->head, __ATOMIC_RELAXED);
+        while (b) { total += sizeof(htc_arena_block_t); b = b->next; }
         total += (size_t)g->arena->free_cap * sizeof(uint32_t);
         for (uint32_t i = 0; i < g->arena->count; i++) {
-            uint64_t ptr = __atomic_load_n(&g->arena->records[i].user_value, __ATOMIC_RELAXED);
+            htc_record_t *r = htc_arena_ptr(g->arena, i);
+            if (!r) continue;
+            uint64_t ptr = __atomic_load_n(&r->user_value, __ATOMIC_RELAXED);
             if (ptr) {
                 htc_kv_entry_t *e = (htc_kv_entry_t *)(uintptr_t)ptr;
                 total += sizeof(htc_kv_entry_t) + e->klen + e->vlen;

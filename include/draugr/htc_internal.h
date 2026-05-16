@@ -348,15 +348,25 @@ typedef struct {
     _Atomic uint8_t flag;
 } htc_spinlock_t;
 
+/* Arena record blocks — fixed-size pages so htc_arena_ptr is never
+ * invalidated by concurrent arena growth (Battery 27 §15). */
+#define HTC_ARENA_BLOCK_SHIFT  10
+#define HTC_ARENA_BLOCK_SIZE   (1u << HTC_ARENA_BLOCK_SHIFT)
+#define HTC_ARENA_BLOCK_MASK   (HTC_ARENA_BLOCK_SIZE - 1)
+
+typedef struct htc_arena_block {
+    struct htc_arena_block *next;
+    htc_record_t            recs[HTC_ARENA_BLOCK_SIZE];
+} htc_arena_block_t;
+
 typedef struct {
-    htc_record_t *records;
-    uint32_t      count;
-    uint32_t      capacity;
-    uint32_t     *free_idx;
-    uint32_t      free_count;
-    uint32_t      free_cap;
-    void         *allocator;
-    htc_spinlock_t lock;
+    _Atomic(htc_arena_block_t *) head;  /* first block in linked list */
+    uint32_t                        count;
+    uint32_t                       *free_idx;
+    uint32_t                        free_count;
+    uint32_t                        free_cap;
+    void                           *allocator;
+    htc_spinlock_t                  lock;
 } htc_arena_t;
 
 /* Stash: per-shard overflow, fixed at HTC_STASH_MAX entries.
@@ -382,6 +392,9 @@ typedef struct __attribute__((aligned(64))) {
     uint32_t        bucket_begin;
     uint32_t        bucket_count;
     _Atomic uint8_t migrated;
+#ifdef HTC_STATS
+    htc_shard_stats_t shard_stats;
+#endif
 } htc_shard_t;
 
 _Static_assert(sizeof(htc_shard_t) % 64 == 0, "htc_shard_t size must be a multiple of 64 bytes");
@@ -486,6 +499,8 @@ bool     htc_debug_slow_find(const htc_table_t *t, uint64_t hash,
                               uint64_t *out_value);    /* independent of ctrl/remap/cache hints */
 void     htc_debug_explain_hash(const htc_table_t *t, uint64_t hash);  /* diagnostic dump */
 void     htc_debug_explain_epoch(const htc_table_t *t);  /* epoch blocker diagnostic */
+void     htc_debug_explain_miss(const htc_table_t *t, uint64_t hash);  /* negative miss certificate (Battery 27 §26) */
+uint32_t htc_debug_check_transient(const htc_table_t *t);  /* transient-state verifier (Battery 27 §20-21) */
 uint64_t htc_debug_checksum(const htc_table_t *t);  /* logical checksum (layout-independent) */
 htc_table_t *htc_debug_rebuild(const htc_table_t *t, uint32_t flags);  /* canonical rebuild */
 
@@ -529,14 +544,39 @@ typedef struct {
     _Atomic uint64_t grow_reseed_count;       /* number of times reseed was performed */
 } htc_stats_t;
 
-#define HTC_STAT_INC(s) __atomic_fetch_add(&s, 1, __ATOMIC_RELAXED)
+#define HTC_STAT_INC(s)   __atomic_fetch_add(&s, 1, __ATOMIC_RELAXED)
+#define HTC_STAT_ADD(s,v) __atomic_fetch_add(&s, v, __ATOMIC_RELAXED)
+#define HTC_STAT_INC_SHARD(t, sid, fld) \
+    __atomic_fetch_add(&(t)->shards[sid].shard_stats.fld, 1, __ATOMIC_RELAXED)
+#define HTC_STAT_ADD_SHARD(t, sid, fld, v) \
+    __atomic_fetch_add(&(t)->shards[sid].shard_stats.fld, v, __ATOMIC_RELAXED)
+
+/* Per-shard counters for diagnosing shard imbalance */
+typedef struct {
+    _Atomic uint64_t stash_insert;
+    _Atomic uint64_t stash_full;
+    _Atomic uint64_t stash_grow;
+    _Atomic uint64_t bfs_attempts;
+    _Atomic uint64_t bfs_success;
+    _Atomic uint64_t bfs_no_path;
+    _Atomic uint64_t bfs_abandoned_shards;
+    _Atomic uint64_t bfs_depth_histogram[8];
+    _Atomic uint64_t insert_oom;
+    _Atomic uint64_t insert_pathological;
+} htc_shard_stats_t;
 
 /** Print all stats counters to stdout (requires HTC_STATS). */
 void htc_stats_print(const htc_table_t *t);
+void htc_stats_reset(htc_table_t *t);
 #else
 typedef int htc_stats_t;
-#define HTC_STAT_INC(s) ((void)0)
+typedef int htc_shard_stats_t;
+#define HTC_STAT_INC(s)       ((void)0)
+#define HTC_STAT_ADD(s,v)     ((void)(v))
+#define HTC_STAT_INC_SHARD(t, sid, fld) ((void)0)
+#define HTC_STAT_ADD_SHARD(t, sid, fld, v) ((void)(v))
 static inline void htc_stats_print(const htc_table_t *t) { (void)t; }
+static inline void htc_stats_reset(htc_table_t *t) { (void)t; }
 #endif
 
 struct htc_table {
@@ -939,7 +979,7 @@ void htc_stash_maintain(htc_stash_t *s);
 /* Epoch operations (Phase 2) */
 void htc_epoch_retire(htc_epoch_ctl_t *ep, htc_arena_t *a, uint32_t arena_idx);
 bool htc_epoch_retire_gen(htc_epoch_ctl_t *ep, struct htc_table_gen *gen);
-void htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a);
+uint64_t htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a);
 void htc_epoch_advance(htc_epoch_ctl_t *ep);
 
 /* Thread detach: release epoch slot and clear front cache. (Battery 8 Q3) */

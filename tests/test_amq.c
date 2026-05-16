@@ -11,11 +11,11 @@ int main(void) {
     htc_amq_filter_t amq = htc_amq_cuckoo(cf);
     htc_set_filter(t, &amq);
     for (int i = 0; i < 1000; i++) {
-        assert(htc_insert(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, (uint64_t)i));
+        assert(htc_insert(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, (uint64_t)i) == HTC_OK);
     }
     for (int i = 0; i < 1000; i++) {
         uint64_t out;
-        assert(htc_find(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, &out) && out == (uint64_t)i);
+        assert(htc_find(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, &out) == HTC_OK && out == (uint64_t)i);
     }
     printf("cuckoo OK\n");
     htc_set_filter(t, NULL);
@@ -28,11 +28,11 @@ int main(void) {
     amq = htc_amq_vacuum(vf);
     htc_set_filter(t, &amq);
     for (int i = 0; i < 1000; i++) {
-        assert(htc_insert(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, (uint64_t)i));
+        assert(htc_insert(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, (uint64_t)i) == HTC_OK);
     }
     for (int i = 0; i < 1000; i++) {
         uint64_t out;
-        assert(htc_find(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, &out) && out == (uint64_t)i);
+        assert(htc_find(t, (uint64_t)i * 0x9e3779b97f4a7c15ULL, &out) == HTC_OK && out == (uint64_t)i);
     }
     printf("vacuum OK\n");
     htc_set_filter(t, NULL);
