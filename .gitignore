@@ -12,3 +12,5 @@ cmake_install.cmake
 Makefile
 build_asan/
 build_nosan/
+build-default/
+build_malloc/
