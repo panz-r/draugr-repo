@@ -6,7 +6,7 @@
  *   -n N        operations per thread (default 100000)
  *   -b N        initial buckets (default 64)
  *   -l FLOAT    max load factor (default 0.75)
-  *   -m MIX      operation mix: read, balanced, write, neg, pureneg, mixednogrow (default balanced)
+  *   -m MIX      operation mix: read, balanced, write, insert-nogrow, insert-withgrow, neg, pureneg, mixednogrow (default balanced)
  *   -k DIST     key distribution: seq, random (default seq)
  *   -f          enable cuckoo filter (default off)
  *   -c FLOAT    negative lookup fraction for 'neg' mix (default 0.5)
@@ -118,6 +118,28 @@ static void worker_pure_neg(worker_t *w) {
     }
 }
 
+/* Insert-no-grow: table pre-sized with slack so no grow occurs during timed
+ * section.  Pure inserts into reserved capacity. */
+static void worker_insert_nogrow(worker_t *w) {
+    uint64_t base = (uint64_t)w->id * 10000000ULL + 300000000ULL;
+    for (int i = 0; i < w->ops; i++) {
+        uint64_t h = base + (opt_key == 'r' ? xorshift64(&w->seed) : (uint64_t)i);
+        htc_error_t r = htc_insert(w->t, h, h >> 1);
+        (void)r;
+    }
+}
+
+/* Insert-with-grow: starts near load threshold (using reduced warmup),
+ * then inserts to intentionally trigger grow/reseed during timed region. */
+static void worker_insert_withgrow(worker_t *w) {
+    uint64_t base = (uint64_t)w->id * 10000000ULL + 400000000ULL;
+    for (int i = 0; i < w->ops; i++) {
+        uint64_t h = base + (opt_key == 'r' ? xorshift64(&w->seed) : (uint64_t)i);
+        htc_error_t r = htc_insert(w->t, h, h >> 1);
+        (void)r;
+    }
+}
+
 /* Mixed no-grow benchmark: table pre-sized with slack, no growth during timed
  * section.  ~80% successful find, ~15% negative find, ~5% insert/remove.
  * Uses a separate hash range for inserts to stay within slack capacity. */
@@ -152,6 +174,8 @@ static void *worker_run(void *arg) {
     case 'r': worker_read(w); break;
     case 'b': worker_balanced(w); break;
     case 'w': worker_write(w); break;
+    case 'i': worker_insert_nogrow(w); break;
+    case 'j': worker_insert_withgrow(w); break;
     case 'n': worker_neg(w); break;
     case 'p': worker_pure_neg(w); break;
     case 'g': worker_mixed_nogrow(w); break;
@@ -192,8 +216,12 @@ int main(int argc, char **argv) {
     }
 
     /* Warmup: pre-fill to target load */
-    if (opt_mix != 'w') {
-        int warmup = (int)((double)opt_buckets * 8 * opt_load * 0.5);
+    if (opt_mix != 'w' && opt_mix != 'j') {
+        int warmup;
+        if (opt_mix == 'i')
+            warmup = (int)((double)opt_buckets * 8 * opt_load * 0.3); /* leave slack for nogrow */
+        else
+            warmup = (int)((double)opt_buckets * 8 * opt_load * 0.5);
         for (int i = 0; i < warmup; i++)
             htc_insert(t, hash_seq(i + 1000000), (uint64_t)i);
     }
@@ -226,6 +254,8 @@ int main(int argc, char **argv) {
     else if (opt_mix == 'w') mix_name = "write";
     else if (opt_mix == 'n') mix_name = "neg";
     else if (opt_mix == 'p') mix_name = "pureneg";
+    else if (opt_mix == 'i') mix_name = "insertnogrow";
+    else if (opt_mix == 'j') mix_name = "insertwithgrow";
     else if (opt_mix == 'g') mix_name = "mixednogrow";
 
     /* Battery 13 Q29, Battery 28 §29: reproducibility manifest */
@@ -259,7 +289,6 @@ int main(int argc, char **argv) {
     fprintf(stderr, "buckets_initial %d\n", opt_buckets);
     fprintf(stderr, "ops_per_thread %d\n", opt_ops);
     fprintf(stderr, "warmup %d\n", opt_mix != 'w' ? (int)((double)opt_buckets * 8 * opt_load * 0.5) : 0);
-    fprintf(stderr, "front_cache %s\n", "disabled");
     fprintf(stderr, "stats %s\n",
 #ifdef HTC_STATS
             "enabled"
@@ -290,16 +319,30 @@ int main(int argc, char **argv) {
 #else
     fprintf(stderr, "arch unknown\n");
 #endif
+    /* Benchmark guardrails: grow estimate, load factors */
+    size_t final_sz = htc_size(t);
+    size_t initial_cap = (size_t)opt_buckets * 8; /* HTC_BUCKET_SLOTS */
+    int grow_est = 0;
+    size_t cap = initial_cap;
+    while (cap < final_sz + initial_cap/2) { grow_est++; cap *= 2; }
+    double final_lf = final_sz > 0 && opt_buckets > 0
+        ? (double)final_sz / (double)(opt_buckets * 8) /* HTC_BUCKET_SLOTS */
+        : 0.0;
     fprintf(stderr, "elapsed_us %.0f\n", t_elapsed);
     fprintf(stderr, "total_ops %.0f\n", total_ops);
-    fprintf(stderr, "final_size %zu\n", htc_size(t));
+    fprintf(stderr, "final_size %zu\n", final_sz);
+    fprintf(stderr, "initial_capacity %zu\n", initial_cap);
+    fprintf(stderr, "final_load_factor %.2f\n", final_lf);
+    fprintf(stderr, "grow_estimate %d\n", grow_est);
+    fprintf(stderr, "front_cache %s\n", "disabled");
 
-    printf("threads\tmix\tfilter\tload\tops/sec\tus/op\tsize\n");
-    printf("%d\t%s\t%d\t%.2f\t%.0f\t%.1f\t%zu\n",
+    printf("threads\tmix\tfilter\tload\tfinal_lf\tgrow_est\tops/sec\tus/op\tsize\n");
+    printf("%d\t%s\t%d\t%.2f\t%.2f\t%d\t%.0f\t%.1f\t%zu\n",
            opt_threads, mix_name, opt_filter, opt_load,
+           final_lf, grow_est,
            total_ops / (t_elapsed / 1e6),
            t_elapsed / total_ops,
-           htc_size(t));
+           final_sz);
 
     if (cf) {
         htc_set_filter(t, NULL);

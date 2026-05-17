@@ -43,6 +43,11 @@ endif()
 add_library(draugr ${DRAUGR_SOURCES})
 target_link_libraries(draugr m)
 
+option(HTC_STATS "Enable performance counters" OFF)
+if(HTC_STATS)
+  target_compile_definitions(draugr PRIVATE HTC_STATS)
+endif()
+
 target_include_directories(draugr
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

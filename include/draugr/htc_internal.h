@@ -390,6 +390,22 @@ typedef struct {
 } htc_stash_t;
 _Static_assert(sizeof(htc_stash_t) == 280, "htc_stash_t layout changed; review packing");
 
+/* ─── Per-shard counters MUST be defined before htc_shard_t ── */
+#ifdef HTC_STATS
+typedef struct {
+    _Atomic uint64_t stash_insert;
+    _Atomic uint64_t stash_full;
+    _Atomic uint64_t stash_grow;
+    _Atomic uint64_t bfs_attempts;
+    _Atomic uint64_t bfs_success;
+    _Atomic uint64_t bfs_no_path;
+    _Atomic uint64_t bfs_abandoned_shards;
+    _Atomic uint64_t bfs_depth_histogram[8];
+    _Atomic uint64_t insert_oom;
+    _Atomic uint64_t insert_pathological;
+} htc_shard_stats_t;
+#endif
+
 /* ─── Shard: one per shard, covers a range of buckets ───── */
 typedef struct __attribute__((aligned(64))) {
     htc_spinlock_t  lock;
@@ -561,20 +577,6 @@ typedef struct {
     __atomic_fetch_add(&(t)->shards[sid].shard_stats.fld, 1, __ATOMIC_RELAXED)
 #define HTC_STAT_ADD_SHARD(t, sid, fld, v) \
     __atomic_fetch_add(&(t)->shards[sid].shard_stats.fld, v, __ATOMIC_RELAXED)
-
-/* Per-shard counters for diagnosing shard imbalance */
-typedef struct {
-    _Atomic uint64_t stash_insert;
-    _Atomic uint64_t stash_full;
-    _Atomic uint64_t stash_grow;
-    _Atomic uint64_t bfs_attempts;
-    _Atomic uint64_t bfs_success;
-    _Atomic uint64_t bfs_no_path;
-    _Atomic uint64_t bfs_abandoned_shards;
-    _Atomic uint64_t bfs_depth_histogram[8];
-    _Atomic uint64_t insert_oom;
-    _Atomic uint64_t insert_pathological;
-} htc_shard_stats_t;
 
 /** Print all stats counters to stdout (requires HTC_STATS). */
 void htc_stats_print(const htc_table_t *t);
