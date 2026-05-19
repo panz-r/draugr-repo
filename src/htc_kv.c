@@ -15,7 +15,6 @@ typedef struct htc_kv_entry {
     size_t  vlen;
     int     key_copy;   /* 1 if key was internally allocated */
     int     val_copy;   /* 1 if val was internally allocated */
-    int     freed;      /* 1 if deferred-free callback already ran */
     struct htc_kv_entry *next; /* intrusive list for lifecycle tracking */
 } htc_kv_entry_t;
 
@@ -38,7 +37,8 @@ static bool keys_equal(const void *a, size_t alen, const void *b, size_t blen) {
 /* ─── htc_kv structure ─────────────────────────────────────── */
 struct htc_kv {
     htc_table_t      *t;
-    htc_kv_entry_t   *all_entries; /* intrusive list of every allocated entry */
+    htc_kv_entry_t   *all_entries; /* intrusive list of live entries */
+    htc_spinlock_t    list_lock;   /* protects all_entries mutations */
 };
 
 /* ─── Lifecycle ─────────────────────────────────────────────── */
@@ -53,9 +53,9 @@ htc_kv_t *htc_kv_create(const htc_config_t *cfg) {
 void htc_kv_destroy(htc_kv_t *kv) {
     if (!kv) return;
 
-    /* Drain pending epoch retire callbacks so all freed flags are set
-     * before we walk the list.  After draining, every removed entry
-     * has freed==1 and its key/val already freed by the callback. */
+    /* Drain pending epoch retire callbacks so removed entries are fully
+     * freed (callback frees key/val + struct). After draining, only
+     * never-removed live entries remain on the list. */
     htc_table_t *t = kv->t;
     if (t->epoch && t->arena) {
         for (int i = 0; i < 8; i++) {
@@ -64,16 +64,13 @@ void htc_kv_destroy(htc_kv_t *kv) {
         }
     }
 
-    /* Walk the intrusive list — quiescent, no concurrent modifications.
-     * freed==1: key/val freed by callback, just free the struct.
-     * freed==0: live entry, free key/val then the struct. */
+    /* Walk remaining live entries — quiescent, no concurrent modifications.
+     * Only entries that were never removed remain. */
     htc_kv_entry_t *e = kv->all_entries;
     while (e) {
         htc_kv_entry_t *next = e->next;
-        if (!e->freed) {
-            if (e->key_copy) free(e->key);
-            if (e->val_copy) free(e->val);
-        }
+        if (e->key_copy) free(e->key);
+        if (e->val_copy) free(e->val);
         free(e);
         e = next;
     }
@@ -82,17 +79,33 @@ void htc_kv_destroy(htc_kv_t *kv) {
     free(kv);
 }
 
+/* ─── List management ─────────────────────────────────────────── */
+
+static void list_push(htc_kv_t *kv, htc_kv_entry_t *e) {
+    htc_spin_lock(&kv->list_lock);
+    e->next = kv->all_entries;
+    kv->all_entries = e;
+    htc_spin_unlock(&kv->list_lock);
+}
+
+static void list_remove(htc_kv_t *kv, htc_kv_entry_t *target) {
+    htc_spin_lock(&kv->list_lock);
+    htc_kv_entry_t **pp = &kv->all_entries;
+    while (*pp) {
+        if (*pp == target) {
+            *pp = target->next;
+            break;
+        }
+        pp = &(*pp)->next;
+    }
+    htc_spin_unlock(&kv->list_lock);
+}
+
 /* ─── Insert helper ─────────────────────────────────────────── */
 static bool kv_insert(htc_kv_t *kv, htc_kv_entry_t *e, uint64_t hash) {
     uint64_t ptr = (uint64_t)(uintptr_t)e;
     if (htc_insert(kv->t, hash, ptr) != HTC_OK) return false;
-    /* Push onto tracking list (lock-free stack via CAS) */
-    htc_kv_entry_t *old;
-    do {
-        old = kv->all_entries;
-        e->next = old;
-    } while (!__atomic_compare_exchange_n(&kv->all_entries, &old, e,
-                                          false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+    list_push(kv, e);
     return true;
 }
 
@@ -156,15 +169,13 @@ bool htc_kv_insert_copy(htc_kv_t *kv, const void *key, size_t klen,
 }
 
 /* Deferred free callback for epoch-based entry reclamation.
- * Frees key/val copies and marks the entry freed. The struct
- * stays on the all_entries list for htc_kv_destroy to free. */
+ * Entry has already been removed from the all_entries list,
+ * so we can free key/val copies and the struct itself. */
 static void kv_entry_retire_cb(void *ctx) {
     htc_kv_entry_t *e = (htc_kv_entry_t *)ctx;
     if (e->key_copy) free(e->key);
     if (e->val_copy) free(e->val);
-    e->key = NULL;
-    e->val = NULL;
-    e->freed = 1;
+    free(e);
 }
 
 /* ─── Find ──────────────────────────────────────────────────── */
@@ -200,22 +211,30 @@ bool htc_kv_remove(htc_kv_t *kv, const void *key, size_t klen) {
     if (!kv || !key) return false;
     uint64_t hash = kv_hash(key, klen);
 
-    /* Scoped find: epoch stays pinned through key comparison */
+    /* Scoped find: epoch stays pinned through key comparison and remove */
     uint64_t ptr = 0;
     htc_error_t ret = htc_find_scoped(kv->t, hash, &ptr);
     if (ret != HTC_OK) return false;  /* epoch already unpinned */
 
     htc_kv_entry_t *e = (htc_kv_entry_t *)(uintptr_t)ptr;
     bool match = keys_equal(key, klen, e->key, e->klen);
-    htc_epoch_unpin(kv->t->epoch);
-    /* After unpin, e may no longer be safe to dereference */
 
-    if (!match) return false;
+    if (!match) {
+        htc_epoch_unpin(kv->t->epoch);
+        return false;
+    }
 
+    /* Remove from hash table while epoch is still pinned, preventing
+     * the record from being reclaimed between find and remove. */
     htc_error_t r = htc_remove(kv->t, hash);
+    htc_epoch_unpin(kv->t->epoch);
+
     if (r != HTC_OK) return false;
 
-    /* Defer free of entry via epoch reclamation */
+    /* Remove from tracking list and defer free via epoch reclamation.
+     * List removal is synchronous (under spinlock); struct free is
+     * deferred until all threads have passed the removal epoch. */
+    list_remove(kv, e);
     htc_epoch_retire_custom(kv->t->epoch, kv_entry_retire_cb, e);
     return true;
 }
@@ -249,6 +268,7 @@ bool htc_kv_iter_next(htc_kv_iter_t *it) {
         uint32_t i = it->idx++;
         htc_record_t *r = htc_arena_ptr(g->arena, i);
         if (!r || r->identity_hash == 0) continue;  /* freed/deleted slot */
+        if (__atomic_load_n(&r->flags, __ATOMIC_ACQUIRE) != 0) continue;  /* removed */
         uint64_t ptr = __atomic_load_n(&r->user_value, __ATOMIC_RELAXED);
         if (!ptr) continue;
 

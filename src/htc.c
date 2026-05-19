@@ -325,39 +325,21 @@ uint64_t htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a)
                                               false, HTC_MO_RELEASE, HTC_MO_ACQUIRE));
     }
 
-    /* Process retired generations.
-     * Since htc_find_scoped pins epoch BEFORE loading current_gen,
-     * epoch reclamation safely covers gen pointers. */
+    /* Re-pend retired generations without freeing.  Epoch-based gen
+     * reclamation is unsafe because htc_find_in_old_gen traverses
+     * gen->old chains that can cross epoch boundaries.  Gens are
+     * freed during htc_destroy instead. */
     {
         htc_retire_gen_t *rg = __atomic_exchange_n(&ep->retire_gen_head, NULL,
                                                      HTC_MO_ACQUIRE);
-        htc_retire_gen_t *gen_keep = NULL, *gen_keep_tail = NULL;
-
-        while (rg) {
-            htc_retire_gen_t *next = rg->next;
-            if (rg->retire_epoch < min_ep) {
-                /* Safe to free: all readers that held this gen have advanced */
-                free(rg->gen->meta);
-                free(rg->gen->buckets);
-                if (rg->gen->migrated_bitmap) free(rg->gen->migrated_bitmap);
-                free(rg->gen);
-                free(rg);
-                reclaimed++;
-            } else {
-                rg->next = NULL;
-                if (gen_keep_tail) gen_keep_tail->next = rg;
-                else               gen_keep = rg;
-                gen_keep_tail = rg;
-            }
-            rg = next;
-        }
-
-        if (gen_keep) {
+        if (rg) {
+            htc_retire_gen_t *tail = rg;
+            while (tail->next) tail = tail->next;
             htc_retire_gen_t *old_rg = NULL;
             do {
-                gen_keep_tail->next = old_rg;
+                tail->next = old_rg;
             } while (!__atomic_compare_exchange_n(&ep->retire_gen_head, &old_rg,
-                                                   gen_keep, false,
+                                                   rg, false,
                                                    HTC_MO_RELEASE, HTC_MO_ACQUIRE));
         }
     }

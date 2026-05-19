@@ -814,6 +814,7 @@ bool bare_resize_table(ht_bare_t *t) {
   memcpy(old_overflow_hash, t->overflow_hash_pd, old_overflow_len * sizeof(uint64_t));
   memcpy(old_overflow_vals, t->overflow_vals, old_overflow_len * sizeof(uint32_t));
 
+  if (t->size > SIZE_MAX / 2) return false;
   size_t new_capacity = next_pow2(t->size * 2);
   if (new_capacity < 4) new_capacity = 4;
   uint8_t *new_main_block = bare_alloc_main_block(new_capacity);

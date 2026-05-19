@@ -201,6 +201,15 @@ target_link_options(test_property_b PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wr
 target_link_libraries(test_property_b m)
 add_test(NAME ht_property_tests_b COMMAND test_property_b)
 
+# Fault injection tests — M4, A1-A3, R3 (--wrap intercepts allocators)
+set(FI_TEST_SOURCES ../src/htc.c ../src/htc_kv.c ${WRAP_TEST_COMMON})
+add_executable(test_fault_injection test_fault_injection.c)
+target_sources(test_fault_injection PRIVATE ${FI_TEST_SOURCES})
+target_include_directories(test_fault_injection PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_options(test_fault_injection PRIVATE -Wl,--wrap,malloc,--wrap,calloc,--wrap,realloc,--wrap,free)
+target_link_libraries(test_fault_injection m pthread)
+add_test(NAME fault_injection_tests COMMAND test_fault_injection)
+
 add_executable(test_next_pow2 test_next_pow2.c ../src/util.c)
 target_include_directories(test_next_pow2 PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_test(NAME next_pow2_tests COMMAND test_next_pow2)
