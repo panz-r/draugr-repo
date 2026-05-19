@@ -385,8 +385,8 @@ typedef struct {
     _Atomic uint32_t live_count;             /* 4 bytes: fast empty-stash skip in find */
     uint32_t          size;                  /* 4 bytes */
     void             *allocator;             /* 8 bytes */
-    uint16_t          full_events;           /* 4 bytes (with empty_epochs) */
-    uint16_t          empty_epochs;
+    _Atomic uint16_t  full_events;           /* 4 bytes (with empty_epochs) */
+    _Atomic uint16_t  empty_epochs;
 } htc_stash_t;
 _Static_assert(sizeof(htc_stash_t) == 280, "htc_stash_t layout changed; review packing");
 
@@ -446,6 +446,7 @@ typedef struct {
     _Atomic uint64_t                  thread_epoch[HTC_EPOCH_MAX_THREADS];  /* offset 64, per-thread writes */
     _Atomic(htc_retire_node_t *)      retire_head;
     _Atomic(htc_retire_gen_t *)       retire_gen_head;
+    void                             *allocator;          /* for retire node allocations */
 } htc_epoch_ctl_t;
 _Static_assert(offsetof(htc_epoch_ctl_t, thread_epoch) == 64, "thread_epoch must start on its own cache line");
 

@@ -4,8 +4,8 @@
  * Flat-arena allocator, SWAR bucket-scan, simple cuckoo placement
  * (primary → secondary → stash), and grow-via-rehash.
  *
- * Uses raw malloc/calloc/realloc/free throughout (no DRAUGR macros)
- * so that ASan can track every allocation precisely.
+ * Uses DRAUGR_ALLOC/DRAUGR_CALLOC/DRAUGR_FREE macros throughout,
+ * routing through arena or stdlib at build time via DRAUGR_USE_MALLOC.
  *
  * ─── RAW_ATOMIC operation registry (Battery 17 Q3) ────────────
  *
@@ -112,7 +112,7 @@ uint32_t htc_arena_alloc(htc_arena_t *a, uint64_t identity_hash,
         while (b) { have++; b = b->next; }
     }
     while (have < needed) {
-        htc_arena_block_t *nb = (htc_arena_block_t *)calloc(1, sizeof(htc_arena_block_t));
+        htc_arena_block_t *nb = (htc_arena_block_t *)DRAUGR_CALLOC(a->allocator, 1, sizeof(htc_arena_block_t));
         if (!nb) { htc_spin_unlock(&a->lock); return UINT32_MAX; }
         nb->next = a->head;
         __atomic_store_n(&a->head, nb, __ATOMIC_RELEASE);
@@ -137,8 +137,10 @@ void htc_arena_free(htc_arena_t *a, uint32_t idx)
     htc_arena_rec_zero(htc_arena_ptr(a, idx));
     if (a->free_count >= a->free_cap) {
         uint32_t new_cap = a->free_cap ? a->free_cap * 2 : 64;
-        uint32_t *nf = (uint32_t *)realloc(
-            a->free_idx, (size_t)new_cap * sizeof(uint32_t));
+        uint32_t *nf = (uint32_t *)DRAUGR_REALLOC(
+            a->allocator, a->free_idx,
+            (size_t)a->free_cap * sizeof(uint32_t),
+            (size_t)new_cap * sizeof(uint32_t));
         if (!nf) { htc_spin_unlock(&a->lock); return; }
         a->free_idx = nf;
         a->free_cap = new_cap;
@@ -152,11 +154,24 @@ void htc_arena_destroy(htc_arena_t *a)
     htc_arena_block_t *b = a->head;
     while (b) {
         htc_arena_block_t *next = b->next;
-        free(b);
+        DRAUGR_FREE(a->allocator, b, sizeof(htc_arena_block_t));
         b = next;
     }
-    free(a->free_idx);
+    DRAUGR_FREE(a->allocator, a->free_idx, (size_t)a->free_cap * sizeof(uint32_t));
     memset(a, 0, sizeof(*a));
+}
+
+/* Reset arena for reuse: zero all records, reset counters, keep blocks
+ * and free_idx allocated.  Safe for subsequent htc_arena_alloc calls. */
+static void htc_arena_clear(htc_arena_t *a)
+{
+    htc_arena_block_t *b = a->head;
+    while (b) {
+        memset(b->recs, 0, sizeof(b->recs));
+        b = b->next;
+    }
+    a->count = 0;
+    a->free_count = 0;
 }
 
 /* =========================================================================
@@ -228,7 +243,7 @@ void htc_epoch_retire(htc_epoch_ctl_t *ep, htc_arena_t *a, uint32_t arena_idx)
     HTC_SCHED_HOOK(14); /* before epoch retire free */
     uint64_t cur = __atomic_load_n(&ep->global_epoch, __ATOMIC_RELAXED);
 
-    htc_retire_node_t *n = (htc_retire_node_t *)malloc(sizeof(htc_retire_node_t));
+    htc_retire_node_t *n = (htc_retire_node_t *)DRAUGR_ALLOC(ep->allocator, sizeof(htc_retire_node_t));
     if (!n) { htc_arena_free(a, arena_idx); return; }
     n->arena_idx    = arena_idx;
     n->shard_id     = 0;
@@ -253,7 +268,7 @@ void htc_epoch_retire_custom(htc_epoch_ctl_t *ep,
     if (!ep || !cb) { if (cb) cb(ctx); return; }
     uint64_t cur = __atomic_load_n(&ep->global_epoch, __ATOMIC_RELAXED);
 
-    htc_retire_node_t *n = (htc_retire_node_t *)malloc(sizeof(htc_retire_node_t));
+    htc_retire_node_t *n = (htc_retire_node_t *)DRAUGR_ALLOC(ep->allocator, sizeof(htc_retire_node_t));
     if (!n) { cb(ctx); return; }  /* OOM: synchronous fallback */
     n->arena_idx    = 0;
     n->shard_id     = 0;
@@ -312,7 +327,7 @@ uint64_t htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a)
         } else {
             htc_arena_free(a, n->arena_idx);
         }
-        free(n);
+        DRAUGR_FREE(ep->allocator, n, sizeof(htc_retire_node_t));
         reclaimed++;
     }
 
@@ -325,21 +340,47 @@ uint64_t htc_epoch_collect(htc_epoch_ctl_t *ep, htc_arena_t *a)
                                               false, HTC_MO_RELEASE, HTC_MO_ACQUIRE));
     }
 
-    /* Re-pend retired generations without freeing.  Epoch-based gen
-     * reclamation is unsafe because htc_find_in_old_gen traverses
-     * gen->old chains that can cross epoch boundaries.  Gens are
-     * freed during htc_destroy instead. */
+    /* Reclaim retired generations whose retire_epoch < min_ep.
+     * Safe because: (a) htc_grow always sets new_gen->old = NULL
+     * before retiring the old gen, severing the chain that
+     * htc_find_in_old_gen would traverse; (b) min_ep ensures no
+     * thread can still hold a pointer to the gen's buckets.
+     * Gens not yet safe are re-pended. */
     {
         htc_retire_gen_t *rg = __atomic_exchange_n(&ep->retire_gen_head, NULL,
                                                      HTC_MO_ACQUIRE);
-        if (rg) {
-            htc_retire_gen_t *tail = rg;
-            while (tail->next) tail = tail->next;
+        htc_retire_gen_t *gkeep = NULL, *gkeep_tail = NULL;
+        while (rg) {
+            htc_retire_gen_t *next = rg->next;
+            if (rg->retire_epoch < min_ep) {
+                htc_table_gen_t *gen = rg->gen;
+                DRAUGR_FREE(ep->allocator, gen->meta,
+                            (size_t)gen->num_buckets * sizeof(htc_bucket_meta_t));
+                DRAUGR_FREE(ep->allocator, gen->buckets,
+                            (size_t)gen->num_buckets * sizeof(htc_bucket_t));
+                if (gen->migrated_bitmap) {
+                    size_t bm_w = ((gen->chunk_count + 63) / 64);
+                    (void)bm_w;
+                    DRAUGR_FREE(ep->allocator, gen->migrated_bitmap,
+                                bm_w * sizeof(uint64_t));
+                }
+                DRAUGR_FREE(ep->allocator, gen, sizeof(htc_table_gen_t));
+                DRAUGR_FREE(ep->allocator, rg, sizeof(htc_retire_gen_t));
+                reclaimed++;
+            } else {
+                rg->next = NULL;
+                if (gkeep_tail) gkeep_tail->next = rg;
+                else            gkeep = rg;
+                gkeep_tail = rg;
+            }
+            rg = next;
+        }
+        if (gkeep) {
             htc_retire_gen_t *old_rg = NULL;
             do {
-                tail->next = old_rg;
+                gkeep_tail->next = old_rg;
             } while (!__atomic_compare_exchange_n(&ep->retire_gen_head, &old_rg,
-                                                   rg, false,
+                                                   gkeep, false,
                                                    HTC_MO_RELEASE, HTC_MO_ACQUIRE));
         }
     }
@@ -361,7 +402,7 @@ bool htc_epoch_retire_gen(htc_epoch_ctl_t *ep, htc_table_gen_t *gen)
     if (!ep || !gen) return false;
     uint64_t cur = __atomic_load_n(&ep->global_epoch, __ATOMIC_RELAXED);
 
-    htc_retire_gen_t *n = (htc_retire_gen_t *)malloc(sizeof(htc_retire_gen_t));
+    htc_retire_gen_t *n = (htc_retire_gen_t *)DRAUGR_ALLOC(ep->allocator, sizeof(htc_retire_gen_t));
     if (!n) return false;
     n->gen          = gen;
     n->retire_epoch = cur + 2;
@@ -454,13 +495,15 @@ bool htc_resize_start(htc_table_t *t, uint32_t new_num_buckets)
     uint32_t nb = 1;
     while (nb < new_num_buckets) nb <<= 1;
 
-    htc_table_gen_t *gen = (htc_table_gen_t *)calloc(1, sizeof(htc_table_gen_t));
+    htc_table_gen_t *gen = (htc_table_gen_t *)DRAUGR_CALLOC(t->allocator, 1, sizeof(htc_table_gen_t));
     if (!gen) return false;
 
-    gen->buckets = (htc_bucket_t *)calloc((size_t)nb, sizeof(htc_bucket_t));
-    gen->meta    = (htc_bucket_meta_t *)calloc((size_t)nb, sizeof(htc_bucket_meta_t));
+    gen->buckets = (htc_bucket_t *)DRAUGR_CALLOC(t->allocator, (size_t)nb, sizeof(htc_bucket_t));
+    gen->meta    = (htc_bucket_meta_t *)DRAUGR_CALLOC(t->allocator, (size_t)nb, sizeof(htc_bucket_meta_t));
     if (!gen->buckets || !gen->meta) {
-        free(gen->buckets); free(gen->meta); free(gen);
+        DRAUGR_FREE(t->allocator, gen->buckets, (size_t)nb * sizeof(htc_bucket_t));
+        DRAUGR_FREE(t->allocator, gen->meta, (size_t)nb * sizeof(htc_bucket_meta_t));
+        DRAUGR_FREE(t->allocator, gen, sizeof(htc_table_gen_t));
         return false;
     }
 
@@ -479,10 +522,12 @@ bool htc_resize_start(htc_table_t *t, uint32_t new_num_buckets)
 
     /* Allocate migrated bitmap (one bit per chunk) */
     size_t bm_words = (gen->chunk_count + 63) / 64;
-    gen->migrated_bitmap = (uint64_t *)calloc(bm_words, sizeof(uint64_t));
+    gen->migrated_bitmap = (uint64_t *)DRAUGR_CALLOC(t->allocator, bm_words, sizeof(uint64_t));
     if (!gen->migrated_bitmap) {
         __atomic_store_n(&old_gen->state, HTC_GEN_ACTIVE, HTC_MO_RELEASE);
-        free(gen->meta); free(gen->buckets); free(gen);
+        DRAUGR_FREE(t->allocator, gen->meta, (size_t)nb * sizeof(htc_bucket_meta_t));
+        DRAUGR_FREE(t->allocator, gen->buckets, (size_t)nb * sizeof(htc_bucket_t));
+        DRAUGR_FREE(t->allocator, gen, sizeof(htc_table_gen_t));
         return false;
     }
     __atomic_store_n(&gen->state, HTC_GEN_ACTIVE, HTC_MO_RELEASE);
@@ -621,10 +666,14 @@ void htc_resize_finish(htc_table_t *t)
     HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, old->arena));
     htc_epoch_advance(t->epoch);
     HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, old->arena));
-    free(old->meta);
-    free(old->buckets);
-    free(old->migrated_bitmap);
-    free(old);
+    DRAUGR_FREE(t->allocator, old->meta, (size_t)old->num_buckets * sizeof(htc_bucket_meta_t));
+    DRAUGR_FREE(t->allocator, old->buckets, (size_t)old->num_buckets * sizeof(htc_bucket_t));
+    if (old->migrated_bitmap) {
+        size_t bm_old = ((old->chunk_count + 63) / 64);
+        (void)bm_old;
+        DRAUGR_FREE(t->allocator, old->migrated_bitmap, bm_old * sizeof(uint64_t));
+    }
+    DRAUGR_FREE(t->allocator, old, sizeof(htc_table_gen_t));
 }
 
 /* Search recursively through old generations for a key. */
@@ -1210,10 +1259,11 @@ htc_error_t htc_grow(htc_table_t *t, bool reseed)
         return HTC_ERR_OOM;
     }
 
-    htc_bucket_t      *new_buckets = (htc_bucket_t *)calloc(1, bsz);
-    htc_bucket_meta_t *new_meta    = (htc_bucket_meta_t *)calloc(1, msz);
+    htc_bucket_t      *new_buckets = (htc_bucket_t *)DRAUGR_CALLOC(t->allocator, 1, bsz);
+    htc_bucket_meta_t *new_meta    = (htc_bucket_meta_t *)DRAUGR_CALLOC(t->allocator, 1, msz);
     if (!new_buckets || !new_meta) {
-        free(new_buckets); free(new_meta);
+        DRAUGR_FREE(t->allocator, new_buckets, bsz);
+        DRAUGR_FREE(t->allocator, new_meta, msz);
         for (uint32_t si = t->shard_count; si > 0; si--)
             htc_spin_unlock(&t->shards[si - 1].lock);
         __atomic_store_n(&old_gen->state, HTC_GEN_ACTIVE, HTC_MO_RELEASE);
@@ -1278,8 +1328,8 @@ htc_error_t htc_grow(htc_table_t *t, bool reseed)
         t->num_buckets = old_bucket_count;
         t->bucket_mask = old_bucket_count - 1;
         t->stash       = old_stash;
-        free(new_buckets);
-        free(new_meta);
+        DRAUGR_FREE(t->allocator, new_buckets, bsz);
+        DRAUGR_FREE(t->allocator, new_meta, msz);
         for (uint32_t si = t->shard_count; si > 0; si--)
             htc_spin_unlock(&t->shards[si - 1].lock);
         __atomic_store_n(&old_gen->state, HTC_GEN_ACTIVE, HTC_MO_RELEASE);
@@ -1291,7 +1341,7 @@ htc_error_t htc_grow(htc_table_t *t, bool reseed)
     htc_stash_destroy(&old_stash);
 
     /* Create the new generation — set its state to ACTIVE */
-    htc_table_gen_t *new_gen = (htc_table_gen_t *)calloc(1, sizeof(htc_table_gen_t));
+    htc_table_gen_t *new_gen = (htc_table_gen_t *)DRAUGR_CALLOC(t->allocator, 1, sizeof(htc_table_gen_t));
     if (!new_gen) {
         /* OOM on gen allocation.  Ownership: new_buckets/new_meta freed,
          * old state restored, old_stash already destroyed. */
@@ -1301,8 +1351,8 @@ htc_error_t htc_grow(htc_table_t *t, bool reseed)
         t->num_buckets = old_bucket_count;
         t->bucket_mask = old_bucket_count - 1;
         t->stash       = old_stash;
-        free(new_buckets);
-        free(new_meta);
+        DRAUGR_FREE(t->allocator, new_buckets, bsz);
+        DRAUGR_FREE(t->allocator, new_meta, msz);
         for (uint32_t si = t->shard_count; si > 0; si--)
             htc_spin_unlock(&t->shards[si - 1].lock);
         __atomic_store_n(&old_gen->state, HTC_GEN_ACTIVE, HTC_MO_RELEASE);
@@ -1321,7 +1371,7 @@ htc_error_t htc_grow(htc_table_t *t, bool reseed)
     new_gen->shard_count  = old_gen->shard_count;
     new_gen->chunk_count  = (new_count + HTC_CHUNK_SIZE - 1) / HTC_CHUNK_SIZE;
     size_t bm_words = (new_gen->chunk_count + 63) / 64;
-    new_gen->migrated_bitmap = (uint64_t *)calloc(bm_words, sizeof(uint64_t));
+    new_gen->migrated_bitmap = (uint64_t *)DRAUGR_CALLOC(t->allocator, bm_words, sizeof(uint64_t));
     if (new_gen->migrated_bitmap) {
         for (size_t wi = 0; wi < bm_words; wi++)
             new_gen->migrated_bitmap[wi] = ~0ULL;
@@ -1340,10 +1390,14 @@ htc_error_t htc_grow(htc_table_t *t, bool reseed)
      * (safe because all shards are still locked). */
     new_gen->old = NULL;
     if (!htc_epoch_retire_gen(t->epoch, old_gen)) {
-        free(old_gen->meta);
-        free(old_gen->buckets);
-        if (old_gen->migrated_bitmap) free(old_gen->migrated_bitmap);
-        free(old_gen);
+        DRAUGR_FREE(t->allocator, old_gen->meta, (size_t)old_gen->num_buckets * sizeof(htc_bucket_meta_t));
+        DRAUGR_FREE(t->allocator, old_gen->buckets, (size_t)old_gen->num_buckets * sizeof(htc_bucket_t));
+        if (old_gen->migrated_bitmap) {
+            size_t obm = ((old_gen->chunk_count + 63) / 64);
+            (void)obm;
+            DRAUGR_FREE(t->allocator, old_gen->migrated_bitmap, obm * sizeof(uint64_t));
+        }
+        DRAUGR_FREE(t->allocator, old_gen, sizeof(htc_table_gen_t));
     }
 
     /* Track old generation memory for diagnostics */
@@ -1355,12 +1409,11 @@ htc_error_t htc_grow(htc_table_t *t, bool reseed)
                        __ATOMIC_RELAXED);
 #endif
 
-    /* Release all shards — epoch_collect is intentionally NOT called
-     * here.  A concurrent thread may still hold a gen pointer loaded
-     * earlier; freeing retired gens via epoch_collect would UAF that
-     * pointer.  Collection happens safely during htc_remove /
-     * htc_insert epoch_collect calls where the caller does not hold
-     * cross-generation references. */
+    /* Release all shards.  epoch_collect is not called here because
+     * the just-retired old gen has retire_epoch = cur+2, which is
+     * strictly above min_ep — collection would be a no-op anyway.
+     * Subsequent insert/remove calls will collect the old gen once
+     * all threads have advanced past retire_epoch. */
     for (uint32_t si = t->shard_count; si > 0; si--)
         htc_spin_unlock(&t->shards[si - 1].lock);
 
@@ -1384,7 +1437,7 @@ htc_table_t *htc_create_with_arena(const htc_config_t *cfg,
      * would reference arena indices from a destroyed arena. */
     memset(&htc_thread_cache, 0, sizeof(htc_thread_cache));
 
-    (void)arena;
+    void *alloc = (void *)arena;
 
     htc_config_t c;
     if (cfg) {
@@ -1413,27 +1466,30 @@ htc_table_t *htc_create_with_arena(const htc_config_t *cfg,
         c.initial_buckets = 4;
     }
 
-    htc_table_t *t = (htc_table_t *)calloc(1, sizeof(htc_table_t));
+    htc_table_t *t = (htc_table_t *)DRAUGR_CALLOC(alloc, 1, sizeof(htc_table_t));
     if (!t) return NULL;
+    t->allocator = alloc;
 
-    t->buckets = (htc_bucket_t *)calloc((size_t)nb, sizeof(htc_bucket_t));
-    if (!t->buckets) { free(t); return NULL; }
+    t->buckets = (htc_bucket_t *)DRAUGR_CALLOC(alloc, (size_t)nb, sizeof(htc_bucket_t));
+    if (!t->buckets) { DRAUGR_FREE(alloc, t, sizeof(htc_table_t)); return NULL; }
 
-    t->meta = (htc_bucket_meta_t *)calloc((size_t)nb,
-                                           sizeof(htc_bucket_meta_t));
-    if (!t->meta) { free(t->buckets); free(t); return NULL; }
+    t->meta = (htc_bucket_meta_t *)DRAUGR_CALLOC(alloc, (size_t)nb,
+                                                   sizeof(htc_bucket_meta_t));
+    if (!t->meta) { DRAUGR_FREE(alloc, t->buckets, (size_t)nb * sizeof(htc_bucket_t)); DRAUGR_FREE(alloc, t, sizeof(htc_table_t)); return NULL; }
 
-    t->arena = (htc_arena_t *)calloc(1, sizeof(htc_arena_t));
-    if (!t->arena) { free(t->meta); free(t->buckets); free(t); return NULL; }
+    t->arena = (htc_arena_t *)DRAUGR_CALLOC(alloc, 1, sizeof(htc_arena_t));
+    if (!t->arena) { DRAUGR_FREE(alloc, t->meta, (size_t)nb * sizeof(htc_bucket_meta_t)); DRAUGR_FREE(alloc, t->buckets, (size_t)nb * sizeof(htc_bucket_t)); DRAUGR_FREE(alloc, t, sizeof(htc_table_t)); return NULL; }
+    t->arena->allocator = alloc;
 
     /* Phase 2: shards and epoch control */
-    t->shards = (htc_shard_t *)calloc((size_t)sc, sizeof(htc_shard_t));
-    if (!t->shards) { free(t->arena); free(t->meta); free(t->buckets); free(t); return NULL; }
+    t->shards = (htc_shard_t *)DRAUGR_CALLOC(alloc, (size_t)sc, sizeof(htc_shard_t));
+    if (!t->shards) { DRAUGR_FREE(alloc, t->arena, sizeof(htc_arena_t)); DRAUGR_FREE(alloc, t->meta, (size_t)nb * sizeof(htc_bucket_meta_t)); DRAUGR_FREE(alloc, t->buckets, (size_t)nb * sizeof(htc_bucket_t)); DRAUGR_FREE(alloc, t, sizeof(htc_table_t)); return NULL; }
     for (uint32_t i = 0; i < sc; i++)
-        t->shards[i].stash.allocator = t->allocator;
+        t->shards[i].stash.allocator = alloc;
 
-    t->epoch = (htc_epoch_ctl_t *)calloc(1, sizeof(htc_epoch_ctl_t));
-    if (!t->epoch) { free(t->shards); free(t->arena); free(t->meta); free(t->buckets); free(t); return NULL; }
+    t->epoch = (htc_epoch_ctl_t *)DRAUGR_CALLOC(alloc, 1, sizeof(htc_epoch_ctl_t));
+    if (!t->epoch) { DRAUGR_FREE(alloc, t->shards, (size_t)sc * sizeof(htc_shard_t)); DRAUGR_FREE(alloc, t->arena, sizeof(htc_arena_t)); DRAUGR_FREE(alloc, t->meta, (size_t)nb * sizeof(htc_bucket_meta_t)); DRAUGR_FREE(alloc, t->buckets, (size_t)nb * sizeof(htc_bucket_t)); DRAUGR_FREE(alloc, t, sizeof(htc_table_t)); return NULL; }
+    t->epoch->allocator = alloc;
     __atomic_store_n(&t->epoch->global_epoch, 1, __ATOMIC_RELAXED);
 
     t->num_buckets    = nb;
@@ -1451,12 +1507,11 @@ htc_table_t *htc_create_with_arena(const htc_config_t *cfg,
 #endif
     }
     __atomic_store_n(&t->size, 0, __ATOMIC_RELAXED);
-    t->allocator      = NULL;
 
     /* Create initial table generation */
     {
-        htc_table_gen_t *gen = (htc_table_gen_t *)calloc(1, sizeof(htc_table_gen_t));
-        if (!gen) { free(t->epoch); free(t->shards); free(t->arena); free(t->meta); free(t->buckets); free(t); return NULL; }
+        htc_table_gen_t *gen = (htc_table_gen_t *)DRAUGR_CALLOC(alloc, 1, sizeof(htc_table_gen_t));
+        if (!gen) { DRAUGR_FREE(alloc, t->epoch, sizeof(htc_epoch_ctl_t)); DRAUGR_FREE(alloc, t->shards, (size_t)sc * sizeof(htc_shard_t)); DRAUGR_FREE(alloc, t->arena, sizeof(htc_arena_t)); DRAUGR_FREE(alloc, t->meta, (size_t)nb * sizeof(htc_bucket_meta_t)); DRAUGR_FREE(alloc, t->buckets, (size_t)nb * sizeof(htc_bucket_t)); DRAUGR_FREE(alloc, t, sizeof(htc_table_t)); return NULL; }
         __atomic_store_n(&gen->state, HTC_GEN_ACTIVE, __ATOMIC_RELAXED);
         gen->buckets      = t->buckets;
         gen->meta         = t->meta;
@@ -1476,6 +1531,8 @@ htc_table_t *htc_create_with_arena(const htc_config_t *cfg,
 void htc_destroy(htc_table_t *t)
 {
     if (!t) return;
+    void *alloc = t->allocator;
+    (void)alloc;
     htc_table_gen_t *g = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
 
     /* Drain any pending retirements (arena records) */
@@ -1491,7 +1548,7 @@ void htc_destroy(htc_table_t *t)
         while (n) {
             htc_retire_node_t *next = n->next;
             if (n->retire_cb) n->retire_cb(n->retire_ctx);
-            free(n);
+            DRAUGR_FREE(t->epoch->allocator, n, sizeof(htc_retire_node_t));
             n = next;
         }
     }
@@ -1502,46 +1559,61 @@ void htc_destroy(htc_table_t *t)
                                                      NULL, HTC_MO_ACQUIRE);
         while (rg) {
             htc_retire_gen_t *next = rg->next;
-            free(rg->gen->meta);
-            free(rg->gen->buckets);
-            free(rg->gen->migrated_bitmap);
-            free(rg->gen);
-            free(rg);
+            htc_table_gen_t *rgen = rg->gen;
+            DRAUGR_FREE(alloc, rgen->meta, (size_t)rgen->num_buckets * sizeof(htc_bucket_meta_t));
+            DRAUGR_FREE(alloc, rgen->buckets, (size_t)rgen->num_buckets * sizeof(htc_bucket_t));
+            if (rgen->migrated_bitmap) {
+                size_t bm_words_rg = ((rgen->chunk_count + 63) / 64);
+                (void)bm_words_rg;
+                DRAUGR_FREE(alloc, rgen->migrated_bitmap, bm_words_rg * sizeof(uint64_t));
+            }
+            DRAUGR_FREE(alloc, rgen, sizeof(htc_table_gen_t));
+            DRAUGR_FREE(t->epoch->allocator, rg, sizeof(htc_retire_gen_t));
             rg = next;
         }
     }
 
-    /* Free the current generation (old gens are retired via epoch system).
+    /* Free the current generation (old gens were freed above).
      * Arena and shards are shared — free once. */
-    void *arena_freed = NULL;
-    void *shards_freed = NULL;
     if (g) {
-        if (g->arena && g->arena != arena_freed) {
+        if (g->arena) {
             htc_arena_destroy(g->arena);
-            free(g->arena);
-            arena_freed = g->arena;
+            DRAUGR_FREE(alloc, g->arena, sizeof(htc_arena_t));
         }
-        free(g->meta);
-        free(g->buckets);
-        if (g->shards && g->shards != shards_freed) {
+        DRAUGR_FREE(alloc, g->meta, (size_t)g->num_buckets * sizeof(htc_bucket_meta_t));
+        DRAUGR_FREE(alloc, g->buckets, (size_t)g->num_buckets * sizeof(htc_bucket_t));
+        if (g->shards) {
             for (uint32_t i = 0; i < g->shard_count; i++)
                 htc_stash_destroy(&g->shards[i].stash);
-            free(g->shards);
-            shards_freed = g->shards;
+            DRAUGR_FREE(alloc, g->shards, (size_t)g->shard_count * sizeof(htc_shard_t));
         }
-        free(g->migrated_bitmap);
-        free(g);
+        if (g->migrated_bitmap) {
+            size_t bm_words_g = ((g->chunk_count + 63) / 64);
+            (void)bm_words_g;
+            DRAUGR_FREE(alloc, g->migrated_bitmap, bm_words_g * sizeof(uint64_t));
+        }
+        DRAUGR_FREE(alloc, g, sizeof(htc_table_gen_t));
     }
 
     htc_stash_destroy(&t->stash);
-    free(t->epoch);
-    free(t);
+    DRAUGR_FREE(alloc, t->epoch, sizeof(htc_epoch_ctl_t));
+    DRAUGR_FREE(alloc, t, sizeof(htc_table_t));
 }
 
 void htc_clear(htc_table_t *t)
 {
     if (!t) return;
-    htc_arena_destroy(t->arena);
+    /* Reset arena records without freeing blocks so subsequent operations
+     * can reuse them.  htc_arena_destroy would free the blocks, leaving
+     * gen->arena pointing at a struct whose head is NULL — which happens
+     * to work for fresh allocations but is semantically wrong and fragile. */
+    htc_arena_clear(t->arena);
+    /* Clear per-shard stashes — they may contain slot words referencing
+     * arena indices whose records were just zeroed above. */
+    if (t->shards) {
+        for (uint32_t i = 0; i < t->shard_count; i++)
+            htc_stash_destroy(&t->shards[i].stash);
+    }
     htc_stash_destroy(&t->stash);
     memset(t->buckets, 0, (size_t)t->num_buckets * sizeof(htc_bucket_t));
     memset(t->meta, 0, (size_t)t->num_buckets * sizeof(htc_bucket_meta_t));
@@ -1710,9 +1782,12 @@ uint32_t htc_debug_recompute_remap(const htc_table_t *t) {
     htc_table_gen_t *g = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
     if (!g) return 0;
     uint32_t mismatches = 0;
-    uint32_t *recomputed = calloc(g->num_buckets, sizeof(uint32_t));
-    uint16_t *recomputed_filter = calloc(g->num_buckets, sizeof(uint16_t));
-    if (!recomputed || !recomputed_filter) { free(recomputed); free(recomputed_filter); return 0; }
+    uint32_t *recomputed = DRAUGR_CALLOC(t->allocator, g->num_buckets, sizeof(uint32_t));
+    uint16_t *recomputed_filter = DRAUGR_CALLOC(t->allocator, g->num_buckets, sizeof(uint16_t));
+    size_t r_sz = (size_t)g->num_buckets * sizeof(uint32_t);
+    size_t rf_sz = (size_t)g->num_buckets * sizeof(uint16_t);
+    (void)r_sz; (void)rf_sz;
+    if (!recomputed || !recomputed_filter) { DRAUGR_FREE(t->allocator, recomputed, r_sz); DRAUGR_FREE(t->allocator, recomputed_filter, rf_sz); return 0; }
 
     for (uint32_t bi = 0; bi < g->num_buckets; bi++) {
         for (unsigned si = 0; si < HTC_BUCKET_SLOTS; si++) {
@@ -1736,7 +1811,8 @@ uint32_t htc_debug_recompute_remap(const htc_table_t *t) {
         if (stored != HTC_REMAP_SATURATED && (stored_filter & recomputed_filter[bi]) != recomputed_filter[bi])
             mismatches++;
     }
-    free(recomputed); free(recomputed_filter);
+    DRAUGR_FREE(t->allocator, recomputed, r_sz);
+    DRAUGR_FREE(t->allocator, recomputed_filter, rf_sz);
     return mismatches;
 }
 
@@ -1749,7 +1825,9 @@ uint64_t htc_debug_check_duplicate_hash(const htc_table_t *t) {
     /* Brute-force: scan all buckets and stash for duplicate hashes */
     uint32_t max_entries = g->num_buckets * HTC_BUCKET_SLOTS +
         (g->shards ? g->shard_count : 0) * HTC_STASH_MAX + HTC_STASH_MAX;
-    uint64_t *hashes = calloc(max_entries, sizeof(uint64_t));
+    uint64_t *hashes = DRAUGR_CALLOC(t->allocator, max_entries, sizeof(uint64_t));
+    size_t hashes_sz = (size_t)max_entries * sizeof(uint64_t);
+    (void)hashes_sz;
     if (!hashes) return 0;
     uint32_t n = 0;
 
@@ -1759,7 +1837,7 @@ uint64_t htc_debug_check_duplicate_hash(const htc_table_t *t) {
             if (!htc_slot_live(w)) continue;
             htc_record_t *r = htc_arena_ptr(g->arena, htc_slot_index(w));
             for (uint32_t j = 0; j < n; j++)
-                if (hashes[j] == r->identity_hash) { free(hashes); return r->identity_hash; }
+                if (hashes[j] == r->identity_hash) { DRAUGR_FREE(t->allocator, hashes, hashes_sz); return r->identity_hash; }
             hashes[n++] = r->identity_hash;
         }
 
@@ -1771,7 +1849,7 @@ uint64_t htc_debug_check_duplicate_hash(const htc_table_t *t) {
                 if (!htc_slot_live(w)) continue;
                 htc_record_t *r = htc_arena_ptr(g->arena, htc_slot_index(w));
                 for (uint32_t j = 0; j < n; j++)
-                    if (hashes[j] == r->identity_hash) { free(hashes); return r->identity_hash; }
+                    if (hashes[j] == r->identity_hash) { DRAUGR_FREE(t->allocator, hashes, hashes_sz); return r->identity_hash; }
                 hashes[n++] = r->identity_hash;
             }
 
@@ -1781,11 +1859,11 @@ uint64_t htc_debug_check_duplicate_hash(const htc_table_t *t) {
         if (!htc_slot_live(w)) continue;
         htc_record_t *r = htc_arena_ptr(g->arena, htc_slot_index(w));
         for (uint32_t j = 0; j < n; j++)
-            if (hashes[j] == r->identity_hash) { free(hashes); return r->identity_hash; }
+            if (hashes[j] == r->identity_hash) { DRAUGR_FREE(t->allocator, hashes, hashes_sz); return r->identity_hash; }
         hashes[n++] = r->identity_hash;
     }
 
-    free(hashes);
+    DRAUGR_FREE(t->allocator, hashes, hashes_sz);
     return 0;
 }
 
@@ -1840,7 +1918,9 @@ uint32_t htc_debug_verify_all(const htc_table_t *t) {
         {
             /* Collect all referenced arena indices */
             uint32_t max_idx = g->arena->count;
-            uint8_t *refcount = calloc(max_idx ? max_idx : 1, 1);
+            uint8_t *refcount = DRAUGR_CALLOC(t->allocator, max_idx ? max_idx : 1, 1);
+            size_t refcount_sz = max_idx ? max_idx : 1;
+            (void)refcount_sz;
             if (refcount) {
                 for (uint32_t bi = 0; bi < g->num_buckets; bi++) {
                     for (unsigned si = 0; si < HTC_BUCKET_SLOTS; si++) {
@@ -1878,7 +1958,7 @@ uint32_t htc_debug_verify_all(const htc_table_t *t) {
                         if (refcount[i] > 1)  faults |= 256u;  /* multiply referenced */
                     }
                 }
-                free(refcount);
+                DRAUGR_FREE(t->allocator, refcount, refcount_sz);
             }
         }
     }
@@ -2331,9 +2411,11 @@ htc_table_t *htc_debug_rebuild(const htc_table_t *t_, uint32_t flags) {
         }
     }
 
-    hashes = malloc(count * sizeof(uint64_t));
-    values = malloc(count * sizeof(uint64_t));
-    if (!hashes || !values) { free(hashes); free(values); return NULL; }
+    hashes = DRAUGR_ALLOC(t->allocator, count * sizeof(uint64_t));
+    values = DRAUGR_ALLOC(t->allocator, count * sizeof(uint64_t));
+    size_t hashes_sz = count * sizeof(uint64_t);
+    (void)hashes_sz;
+    if (!hashes || !values) { DRAUGR_FREE(t->allocator, hashes, hashes_sz); DRAUGR_FREE(t->allocator, values, hashes_sz); return NULL; }
 
     uint32_t idx = 0;
     for (uint32_t i = 0; i < capacity; i++) {
@@ -2349,18 +2431,19 @@ htc_table_t *htc_debug_rebuild(const htc_table_t *t_, uint32_t flags) {
     /* Create fresh table with same capacity, different seed */
     htc_config_t cfg = {(uint32_t)t->num_buckets, t->max_load_factor, 0, flags};
     htc_table_t *t2 = htc_create(&cfg);
-    if (!t2) { free(hashes); free(values); return NULL; }
+    if (!t2) { DRAUGR_FREE(t->allocator, hashes, hashes_sz); DRAUGR_FREE(t->allocator, values, hashes_sz); return NULL; }
 
     for (uint32_t i = 0; i < count; i++) {
         htc_error_t ret = htc_insert(t2, hashes[i], values[i]);
         if (ret != HTC_OK) {
             htc_destroy(t2);
-            free(hashes); free(values);
+            DRAUGR_FREE(t->allocator, hashes, hashes_sz); DRAUGR_FREE(t->allocator, values, hashes_sz);
             return NULL;
         }
     }
 
-    free(hashes); free(values);
+    DRAUGR_FREE(t->allocator, hashes, hashes_sz);
+    DRAUGR_FREE(t->allocator, values, hashes_sz);
     return t2;
 }
 
@@ -2680,92 +2763,72 @@ htc_error_t htc_upsert(htc_table_t *t, uint64_t hash, uint64_t value)
     if (!t) return HTC_ERR_OOM;
 
     for (int attempt = 0; attempt < 4; attempt++) {
-        /* Pin epoch before loading current_gen so that epoch reclamation
-         * cannot free the generation while we access its fields. */
-        htc_epoch_pin(t->epoch);
-
         htc_table_gen_t *gen = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
-        if (!gen) { htc_epoch_unpin(t->epoch); return HTC_ERR_OOM; }
-        uint32_t mask = gen->bucket_mask;
+        if (!gen) return HTC_ERR_OOM;
 
         uint64_t ph  = htc_placement_hash(hash, gen->seed);
         uint16_t tag = htc_tag16(ph);
-        uint32_t  b1 = (uint32_t)(ph & mask);
-        uint32_t  b2 = htc_alt_bucket(b1, ph, tag) & mask;
+        uint32_t  b1 = (uint32_t)(ph & gen->bucket_mask);
+        uint32_t  b2 = htc_alt_bucket(b1, ph, tag) & gen->bucket_mask;
+        uint32_t  s1 = htc_shard_of(b1, t->shard_count);
+        uint32_t  s2 = htc_shard_of(b2, t->shard_count);
 
-        /* Ensure chunk is migrated so we operate on the current gen */
-        htc_ensure_chunk_migrated(t, b1);
-        if (b2 != b1) htc_ensure_chunk_migrated(t, b2);
+        if (t->shards) htc_lock_shards(t->shards, s1, s2);
 
-        /* Search current gen buckets and stash, but don't update yet */
-        uint64_t found_word = 0;
-        int si = htc_bucket_scan(&gen->buckets[b1], &gen->meta[b1],
-                                 t->arena, hash, tag, HTC_SCAN_PRIMARY);
-        if (si >= 0) {
-            found_word = __atomic_load_n(&gen->buckets[b1].slot[si], HTC_MO_ACQUIRE);
-        } else if (htc_must_check_secondary(&gen->meta[b1], tag)) {
-            si = htc_bucket_scan(&gen->buckets[b2], &gen->meta[b2],
-                                 t->arena, hash, tag, HTC_SCAN_SECONDARY);
-            if (si >= 0)
-                found_word = __atomic_load_n(&gen->buckets[b2].slot[si], HTC_MO_ACQUIRE);
-        }
-        if (!found_word) {
-            htc_stash_t *ss = gen->shards ? &gen->shards[htc_shard_of(b1, gen->shard_count)].stash : &t->stash;
-            int sti = htc_stash_find(ss, t->arena, hash, tag);
-            htc_stash_t *found_ss = ss;
-            if (sti < 0 && ss != &t->stash) {
-                sti = htc_stash_find(&t->stash, t->arena, hash, tag);
-                if (sti >= 0) found_ss = &t->stash;
-            }
-            if (sti >= 0)
-                found_word = __atomic_load_n(&found_ss->slots[sti], HTC_MO_ACQUIRE);
-        }
-        if (found_word) {
-            htc_epoch_unpin(t->epoch);
-            __atomic_store_n(&htc_arena_ptr(t->arena, htc_slot_index(found_word))->user_value,
-                             value, HTC_MO_RELEASE);
-            return HTC_OK;
-        }
-
-        /* Check old gen chain for stale copies and clear them */
-        if (gen->old) {
-            uint64_t old_val = 0;
-            if (htc_find_in_old_gen(gen->old, t->arena, hash, tag, &old_val)) {
-                htc_epoch_unpin(t->epoch);
-                htc_ensure_chunk_migrated(t, b1);
-                if (b2 != b1) htc_ensure_chunk_migrated(t, b2);
+        /* Revalidate: gen must still be current and active after acquiring
+         * locks — a concurrent grow may have frozen it. */
+        {
+            htc_table_gen_t *cur = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
+            if (cur != gen || __atomic_load_n(&cur->state, HTC_MO_ACQUIRE) != HTC_GEN_ACTIVE) {
+                if (t->shards) htc_unlock_shards(t->shards, s1, s2);
                 continue;
             }
         }
 
-        /* not found — insert */
-        uint32_t idx = htc_arena_alloc(t->arena, hash, ph, value);
-        if (idx == UINT32_MAX) {
-            HTC_STAT_INC(t->stats.insert_oom);
-            htc_epoch_unpin(t->epoch);
-            return HTC_ERR_OOM;
+        htc_ensure_chunk_migrated(t, b1);
+        if (b2 != b1) htc_ensure_chunk_migrated(t, b2);
+
+        /* Search under shard lock — same protocol as htc_insert. */
+        int si = htc_bucket_scan(&gen->buckets[b1], &gen->meta[b1],
+                                 t->arena, hash, tag, HTC_SCAN_PRIMARY);
+        if (si >= 0) {
+            uint64_t w = __atomic_load_n(&gen->buckets[b1].slot[si], HTC_MO_ACQUIRE);
+            __atomic_store_n(&htc_arena_ptr(t->arena, htc_slot_index(w))->user_value,
+                             value, HTC_MO_RELEASE);
+            if (t->shards) htc_unlock_shards(t->shards, s1, s2);
+            return HTC_OK;
+        }
+        if (htc_must_check_secondary(&gen->meta[b1], tag)) {
+            si = htc_bucket_scan(&gen->buckets[b2], &gen->meta[b2],
+                                 t->arena, hash, tag, HTC_SCAN_SECONDARY);
+            if (si >= 0) {
+                uint64_t w = __atomic_load_n(&gen->buckets[b2].slot[si], HTC_MO_ACQUIRE);
+                __atomic_store_n(&htc_arena_ptr(t->arena, htc_slot_index(w))->user_value,
+                                 value, HTC_MO_RELEASE);
+                if (t->shards) htc_unlock_shards(t->shards, s1, s2);
+                return HTC_OK;
+            }
+        }
+        htc_stash_t *ss = gen->shards ? &gen->shards[htc_shard_of(b1, gen->shard_count)].stash : &t->stash;
+        htc_stash_t *hit_ss = ss;
+        int sti = htc_stash_find(ss, t->arena, hash, tag);
+        if (sti < 0 && ss != &t->stash) {
+            hit_ss = &t->stash;
+            sti = htc_stash_find(hit_ss, t->arena, hash, tag);
+        }
+        if (sti >= 0) {
+            uint64_t w = __atomic_load_n(&hit_ss->slots[sti], HTC_MO_ACQUIRE);
+            __atomic_store_n(&htc_arena_ptr(t->arena, htc_slot_index(w))->user_value,
+                             value, HTC_MO_RELEASE);
+            if (t->shards) htc_unlock_shards(t->shards, s1, s2);
+            return HTC_OK;
         }
 
-        uint64_t slot_word = htc_slot_pack(idx, tag, HTC_STATE_LIVE, 0);
-
-        if (!htc_place_entry(t, gen, ph, slot_word, NULL)) {
-            htc_arena_free(t->arena, idx);
-            htc_epoch_unpin(t->epoch);
-            return HTC_ERR_PATHOLOGICAL;
-        }
-
-        __atomic_fetch_add(&t->size, 1, __ATOMIC_RELAXED);
-        htc_epoch_unpin(t->epoch);
-        HTC_STAT_ADD(t->stats.reclaimed_record_count, htc_epoch_collect(t->epoch, t->arena));
-        htc_epoch_advance(t->epoch);
-
-        double lf = (double)__atomic_load_n(&t->size, __ATOMIC_RELAXED) / (double)t->num_buckets;
-        if (lf > t->max_load_factor) {
-            HTC_STAT_INC(t->stats.grow_reason_load);
-            htc_grow(t, false);
-        }
-
-        return HTC_OK;
+        /* Key not found under lock — release and insert.
+         * htc_insert acquires its own shard locks and performs duplicate
+         * checking, so a concurrent insert for the same key is safe. */
+        if (t->shards) htc_unlock_shards(t->shards, s1, s2);
+        return htc_insert(t, hash, value);
     }
     return HTC_ERR_PATHOLOGICAL;
 }
@@ -2774,8 +2837,14 @@ htc_error_t htc_update(htc_table_t *t, uint64_t hash, uint64_t value)
 {
     if (!t) return HTC_ERR_OOM;
 
+    /* Pin epoch before loading current_gen so that gen->buckets and arena
+     * records remain valid throughout the scan.  Without pinning, a
+     * concurrent grow could free the old generation's buckets via epoch
+     * reclamation while this thread still dereferences them. */
+    htc_epoch_pin(t->epoch);
+
     htc_table_gen_t *gen = __atomic_load_n(&t->current_gen, HTC_MO_ACQUIRE);
-    if (!gen) return HTC_ERR_OOM;
+    if (!gen) { htc_epoch_unpin(t->epoch); return HTC_ERR_OOM; }
     uint32_t mask = gen->bucket_mask;
 
     uint64_t ph  = htc_placement_hash(hash, gen->seed);
@@ -2793,6 +2862,7 @@ htc_error_t htc_update(htc_table_t *t, uint64_t hash, uint64_t value)
             uint64_t w = __atomic_load_n(&gen->buckets[b1].slot[si], HTC_MO_ACQUIRE);
             __atomic_store_n(&htc_arena_ptr(t->arena, htc_slot_index(w))->user_value,
                              value, HTC_MO_RELEASE);
+            htc_epoch_unpin(t->epoch);
             return HTC_OK;
         }
     }
@@ -2803,6 +2873,7 @@ htc_error_t htc_update(htc_table_t *t, uint64_t hash, uint64_t value)
             uint64_t w = __atomic_load_n(&gen->buckets[b2].slot[si], HTC_MO_ACQUIRE);
             __atomic_store_n(&htc_arena_ptr(t->arena, htc_slot_index(w))->user_value,
                              value, HTC_MO_RELEASE);
+            htc_epoch_unpin(t->epoch);
             return HTC_OK;
         }
     }
@@ -2815,6 +2886,7 @@ htc_error_t htc_update(htc_table_t *t, uint64_t hash, uint64_t value)
             uint64_t w = __atomic_load_n(&ss->slots[si], HTC_MO_ACQUIRE);
             __atomic_store_n(&htc_arena_ptr(t->arena, htc_slot_index(w))->user_value,
                              value, HTC_MO_RELEASE);
+            htc_epoch_unpin(t->epoch);
             return HTC_OK;
         }
     }
@@ -2827,6 +2899,7 @@ htc_error_t htc_update(htc_table_t *t, uint64_t hash, uint64_t value)
             if (b2 != b1) htc_ensure_chunk_migrated(t, b2);
         }
     }
+    htc_epoch_unpin(t->epoch);
     return HTC_ERR_NOT_FOUND;
 }
 
@@ -2904,10 +2977,11 @@ htc_error_t htc_find_scoped(const htc_table_t *t_, uint64_t hash, uint64_t *out_
         bool check_sec;
         do {
             uint32_t s_remap = __atomic_load_n(&g->meta[b1].seq, HTC_MO_ACQUIRE);
-            if (s_remap & HTC_SEQ_BUSY) continue;
+            if (s_remap & HTC_SEQ_BUSY) { htc_cpu_relax(); continue; }
             check_sec = htc_must_check_secondary(&g->meta[b1], tag);
             uint32_t s_end = __atomic_load_n(&g->meta[b1].seq, HTC_MO_ACQUIRE);
             if (s_remap == s_end && !(s_end & HTC_SEQ_BUSY)) break;
+            htc_cpu_relax();
         } while (1);
 
         if (check_sec) {

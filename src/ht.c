@@ -1166,6 +1166,7 @@ static void kv_free(ht_table_t *t, ht_entry_t *e) {
         return;
     }
 #endif
+    (void)t;
     free(e->kv_ptr);
     e->kv_ptr = NULL;
 }

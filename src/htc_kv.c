@@ -4,7 +4,6 @@
 
 #include "draugr/htc_kv.h"
 #include "draugr/htc_internal.h"
-#include <stdlib.h>
 #include <string.h>
 
 /* ─── Key-value entry stored in arena records ──────────────── */
@@ -15,6 +14,7 @@ typedef struct htc_kv_entry {
     size_t  vlen;
     int     key_copy;   /* 1 if key was internally allocated */
     int     val_copy;   /* 1 if val was internally allocated */
+    void   *allocator;  /* t->allocator, for deferred free */
     struct htc_kv_entry *next; /* intrusive list for lifecycle tracking */
 } htc_kv_entry_t;
 
@@ -43,10 +43,10 @@ struct htc_kv {
 
 /* ─── Lifecycle ─────────────────────────────────────────────── */
 htc_kv_t *htc_kv_create(const htc_config_t *cfg) {
-    htc_kv_t *kv = (htc_kv_t *)calloc(1, sizeof(htc_kv_t));
+    htc_kv_t *kv = (htc_kv_t *)DRAUGR_CALLOC(NULL, 1, sizeof(htc_kv_t));
     if (!kv) return NULL;
     kv->t = htc_create(cfg);
-    if (!kv->t) { free(kv); return NULL; }
+    if (!kv->t) { DRAUGR_FREE(NULL, kv, sizeof(htc_kv_t)); return NULL; }
     return kv;
 }
 
@@ -57,6 +57,8 @@ void htc_kv_destroy(htc_kv_t *kv) {
      * freed (callback frees key/val + struct). After draining, only
      * never-removed live entries remain on the list. */
     htc_table_t *t = kv->t;
+    void *alloc = t->allocator;
+    (void)alloc;
     if (t->epoch && t->arena) {
         for (int i = 0; i < 8; i++) {
             htc_epoch_advance(t->epoch);
@@ -69,14 +71,14 @@ void htc_kv_destroy(htc_kv_t *kv) {
     htc_kv_entry_t *e = kv->all_entries;
     while (e) {
         htc_kv_entry_t *next = e->next;
-        if (e->key_copy) free(e->key);
-        if (e->val_copy) free(e->val);
-        free(e);
+        if (e->key_copy) DRAUGR_FREE(alloc, e->key, e->klen ? e->klen : 1);
+        if (e->val_copy) DRAUGR_FREE(alloc, e->val, e->vlen ? e->vlen : 1);
+        DRAUGR_FREE(alloc, e, sizeof(htc_kv_entry_t));
         e = next;
     }
 
     htc_destroy(t);
-    free(kv);
+    DRAUGR_FREE(NULL, kv, sizeof(htc_kv_t));
 }
 
 /* ─── List management ─────────────────────────────────────────── */
@@ -109,15 +111,16 @@ static bool kv_insert(htc_kv_t *kv, htc_kv_entry_t *e, uint64_t hash) {
     return true;
 }
 
-htc_kv_entry_t *kv_entry_alloc(const void *key, size_t klen,
+htc_kv_entry_t *kv_entry_alloc(void *alloc, const void *key, size_t klen,
                                 const void *val, size_t vlen, int copy_keys)
 {
-    htc_kv_entry_t *e = (htc_kv_entry_t *)calloc(1, sizeof(htc_kv_entry_t));
+    htc_kv_entry_t *e = (htc_kv_entry_t *)DRAUGR_CALLOC(alloc, 1, sizeof(htc_kv_entry_t));
     if (!e) return NULL;
+    e->allocator = alloc;
 
     if (copy_keys) {
-        e->key = malloc(klen ? klen : 1);
-        if (!e->key) { free(e); return NULL; }
+        e->key = DRAUGR_ALLOC(alloc, klen ? klen : 1);
+        if (!e->key) { DRAUGR_FREE(alloc, e, sizeof(htc_kv_entry_t)); return NULL; }
         memcpy(e->key, key, klen);
         e->key_copy = 1;
     } else {
@@ -126,8 +129,12 @@ htc_kv_entry_t *kv_entry_alloc(const void *key, size_t klen,
     e->klen = klen;
 
     if (copy_keys) {
-        e->val = malloc(vlen ? vlen : 1);
-        if (!e->val) { if (e->key_copy) free(e->key); free(e); return NULL; }
+        e->val = DRAUGR_ALLOC(alloc, vlen ? vlen : 1);
+        if (!e->val) {
+            if (e->key_copy) DRAUGR_FREE(alloc, e->key, e->klen ? e->klen : 1);
+            DRAUGR_FREE(alloc, e, sizeof(htc_kv_entry_t));
+            return NULL;
+        }
         memcpy(e->val, val, vlen);
         e->val_copy = 1;
     } else {
@@ -143,10 +150,10 @@ bool htc_kv_insert(htc_kv_t *kv, const void *key, size_t klen,
 {
     if (!kv || !key) return false;
     uint64_t hash = kv_hash(key, klen);
-    htc_kv_entry_t *e = kv_entry_alloc(key, klen, val, vlen, 0);
+    htc_kv_entry_t *e = kv_entry_alloc(kv->t->allocator, key, klen, val, vlen, 0);
     if (!e) return false;
     if (!kv_insert(kv, e, hash)) {
-        free(e);
+        DRAUGR_FREE(kv->t->allocator, e, sizeof(htc_kv_entry_t));
         return false;
     }
     return true;
@@ -157,12 +164,14 @@ bool htc_kv_insert_copy(htc_kv_t *kv, const void *key, size_t klen,
 {
     if (!kv || !key) return false;
     uint64_t hash = kv_hash(key, klen);
-    htc_kv_entry_t *e = kv_entry_alloc(key, klen, val, vlen, 1);
+    htc_kv_entry_t *e = kv_entry_alloc(kv->t->allocator, key, klen, val, vlen, 1);
     if (!e) return false;
     if (!kv_insert(kv, e, hash)) {
-        if (e->key_copy) free(e->key);
-        if (e->val_copy) free(e->val);
-        free(e);
+        void *alloc = kv->t->allocator;
+        (void)alloc;
+        if (e->key_copy) DRAUGR_FREE(alloc, e->key, e->klen ? e->klen : 1);
+        if (e->val_copy) DRAUGR_FREE(alloc, e->val, e->vlen ? e->vlen : 1);
+        DRAUGR_FREE(alloc, e, sizeof(htc_kv_entry_t));
         return false;
     }
     return true;
@@ -173,9 +182,11 @@ bool htc_kv_insert_copy(htc_kv_t *kv, const void *key, size_t klen,
  * so we can free key/val copies and the struct itself. */
 static void kv_entry_retire_cb(void *ctx) {
     htc_kv_entry_t *e = (htc_kv_entry_t *)ctx;
-    if (e->key_copy) free(e->key);
-    if (e->val_copy) free(e->val);
-    free(e);
+    void *alloc = e->allocator;
+    (void)alloc;
+    if (e->key_copy) DRAUGR_FREE(alloc, e->key, e->klen ? e->klen : 1);
+    if (e->val_copy) DRAUGR_FREE(alloc, e->val, e->vlen ? e->vlen : 1);
+    DRAUGR_FREE(alloc, e, sizeof(htc_kv_entry_t));
 }
 
 /* ─── Find ──────────────────────────────────────────────────── */
@@ -211,7 +222,9 @@ bool htc_kv_remove(htc_kv_t *kv, const void *key, size_t klen) {
     if (!kv || !key) return false;
     uint64_t hash = kv_hash(key, klen);
 
-    /* Scoped find: epoch stays pinned through key comparison and remove */
+    /* Scoped find: epoch stays pinned through key comparison, remove,
+     * and entry reclamation — prevents the entry from being freed by
+     * concurrent epoch_collect between any of these steps. */
     uint64_t ptr = 0;
     htc_error_t ret = htc_find_scoped(kv->t, hash, &ptr);
     if (ret != HTC_OK) return false;  /* epoch already unpinned */
@@ -224,18 +237,22 @@ bool htc_kv_remove(htc_kv_t *kv, const void *key, size_t klen) {
         return false;
     }
 
-    /* Remove from hash table while epoch is still pinned, preventing
-     * the record from being reclaimed between find and remove. */
+    /* Remove from hash table while epoch is still pinned. */
     htc_error_t r = htc_remove(kv->t, hash);
-    htc_epoch_unpin(kv->t->epoch);
-
-    if (r != HTC_OK) return false;
+    if (r != HTC_OK) {
+        htc_epoch_unpin(kv->t->epoch);
+        return false;
+    }
 
     /* Remove from tracking list and defer free via epoch reclamation.
      * List removal is synchronous (under spinlock); struct free is
-     * deferred until all threads have passed the removal epoch. */
+     * deferred until all threads have passed the removal epoch.
+     * Epoch remains pinned through retire_custom so that the OOM
+     * synchronous-fallback path (which frees e immediately) cannot
+     * race with a concurrent epoch_collect on another thread. */
     list_remove(kv, e);
     htc_epoch_retire_custom(kv->t->epoch, kv_entry_retire_cb, e);
+    htc_epoch_unpin(kv->t->epoch);
     return true;
 }
 
@@ -290,6 +307,13 @@ size_t htc_kv_count(const htc_kv_t *kv) {
 size_t htc_kv_memory_bytes(const htc_kv_t *kv) {
     if (!kv) return 0;
     size_t total = sizeof(htc_kv_t);
+
+    /* Pin epoch while scanning arena records so that entries freed by
+     * concurrent removes (and retired via epoch reclamation) are not
+     * reclaimed mid-scan.  Without pinning, DRAUGR_USE_MALLOC mode can
+     * free the htc_kv_entry_t struct, making e->klen/e->vlen a UAF. */
+    htc_epoch_pin(kv->t->epoch);
+
     htc_table_gen_t *g = __atomic_load_n(&kv->t->current_gen, __ATOMIC_ACQUIRE);
     if (g && g->arena) {
         /* Count blocks */
@@ -299,6 +323,7 @@ size_t htc_kv_memory_bytes(const htc_kv_t *kv) {
         for (uint32_t i = 0; i < g->arena->count; i++) {
             htc_record_t *r = htc_arena_ptr(g->arena, i);
             if (!r) continue;
+            if (__atomic_load_n(&r->flags, __ATOMIC_ACQUIRE) != 0) continue;
             uint64_t ptr = __atomic_load_n(&r->user_value, __ATOMIC_RELAXED);
             if (ptr) {
                 htc_kv_entry_t *e = (htc_kv_entry_t *)(uintptr_t)ptr;
@@ -306,5 +331,7 @@ size_t htc_kv_memory_bytes(const htc_kv_t *kv) {
             }
         }
     }
+
+    htc_epoch_unpin(kv->t->epoch);
     return total;
 }

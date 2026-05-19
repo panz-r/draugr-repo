@@ -2755,7 +2755,6 @@ static void test_grow_allocation_failure(void) {
 /* Test that readers holding an arena index during arena expansion
  * still read correct data.  Uses htc_table lifecycle to trigger
  * internal arena growth.  (Battery 27 §15: arena stability) */
-#ifndef DRAUGR_USE_MALLOC
 static void test_reader_during_arena_expansion(void) {
     TEST("arena stability: reader idx valid during arena expansion");
     htc_table_t *t = htc_create(NULL);
@@ -2780,7 +2779,6 @@ static void test_reader_during_arena_expansion(void) {
     htc_destroy(t);
     PASS();
 }
-#endif
 
 /* Test that htc_epoch_retire safely falls back to synchronous free
  * when malloc for the retire node fails.  (Battery 27 §17) */
