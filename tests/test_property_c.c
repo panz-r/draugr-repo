@@ -1055,8 +1055,11 @@ static void test_zero_length_key_value(void) {
                 size_t klen, vlen;
                 ht_iter_t iter = ht_iter_begin(ht);
                 if (ht_iter_next(ht, &iter, &key, &klen, &value, &vlen)) {
-                    ht_remove(ht, key, klen);
-                    model_remove(m, key, klen);
+                    char keybuf[256];
+                    size_t kl = klen < sizeof(keybuf) ? klen : sizeof(keybuf);
+                    memcpy(keybuf, key, kl);
+                    ht_remove(ht, keybuf, kl);
+                    model_remove(m, keybuf, kl);
                 }
             }
         } else {

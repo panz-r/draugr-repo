@@ -1,5 +1,7 @@
 #include "draugr/ht_cache_internal.h"
+#ifndef DRAUGR_USE_MALLOC
 #include "draugr/arena.h"
+#endif
 #include <stdlib.h>
 #include <string.h>
 

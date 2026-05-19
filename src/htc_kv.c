@@ -15,6 +15,7 @@ typedef struct htc_kv_entry {
     size_t  vlen;
     int     key_copy;   /* 1 if key was internally allocated */
     int     val_copy;   /* 1 if val was internally allocated */
+    int     freed;      /* 1 if deferred-free callback already ran */
     struct htc_kv_entry *next; /* intrusive list for lifecycle tracking */
 } htc_kv_entry_t;
 
@@ -51,16 +52,33 @@ htc_kv_t *htc_kv_create(const htc_config_t *cfg) {
 
 void htc_kv_destroy(htc_kv_t *kv) {
     if (!kv) return;
-    /* Walk intrusive list and free every tracked entry */
+
+    /* Drain pending epoch retire callbacks so all freed flags are set
+     * before we walk the list.  After draining, every removed entry
+     * has freed==1 and its key/val already freed by the callback. */
+    htc_table_t *t = kv->t;
+    if (t->epoch && t->arena) {
+        for (int i = 0; i < 8; i++) {
+            htc_epoch_advance(t->epoch);
+            htc_epoch_collect(t->epoch, t->arena);
+        }
+    }
+
+    /* Walk the intrusive list — quiescent, no concurrent modifications.
+     * freed==1: key/val freed by callback, just free the struct.
+     * freed==0: live entry, free key/val then the struct. */
     htc_kv_entry_t *e = kv->all_entries;
     while (e) {
         htc_kv_entry_t *next = e->next;
-        if (e->key_copy) free(e->key);
-        if (e->val_copy) free(e->val);
+        if (!e->freed) {
+            if (e->key_copy) free(e->key);
+            if (e->val_copy) free(e->val);
+        }
         free(e);
         e = next;
     }
-    htc_destroy(kv->t);
+
+    htc_destroy(t);
     free(kv);
 }
 
@@ -68,7 +86,7 @@ void htc_kv_destroy(htc_kv_t *kv) {
 static bool kv_insert(htc_kv_t *kv, htc_kv_entry_t *e, uint64_t hash) {
     uint64_t ptr = (uint64_t)(uintptr_t)e;
     if (htc_insert(kv->t, hash, ptr) != HTC_OK) return false;
-    /* Push onto tracking list (lock-free for concurrent safety) */
+    /* Push onto tracking list (lock-free stack via CAS) */
     htc_kv_entry_t *old;
     do {
         old = kv->all_entries;
@@ -137,6 +155,18 @@ bool htc_kv_insert_copy(htc_kv_t *kv, const void *key, size_t klen,
     return true;
 }
 
+/* Deferred free callback for epoch-based entry reclamation.
+ * Frees key/val copies and marks the entry freed. The struct
+ * stays on the all_entries list for htc_kv_destroy to free. */
+static void kv_entry_retire_cb(void *ctx) {
+    htc_kv_entry_t *e = (htc_kv_entry_t *)ctx;
+    if (e->key_copy) free(e->key);
+    if (e->val_copy) free(e->val);
+    e->key = NULL;
+    e->val = NULL;
+    e->freed = 1;
+}
+
 /* ─── Find ──────────────────────────────────────────────────── */
 bool htc_kv_find(htc_kv_t *kv, const void *key, size_t klen,
                  void *val, size_t *vlen)
@@ -144,21 +174,25 @@ bool htc_kv_find(htc_kv_t *kv, const void *key, size_t klen,
     if (!kv || !key) return false;
     uint64_t hash = kv_hash(key, klen);
 
-    /* Load entry pointer from htc; verify key match (handles hash collisions) */
+    /* Scoped find: epoch stays pinned through key comparison */
     uint64_t ptr = 0;
-    if (htc_find(kv->t, hash, &ptr) != HTC_OK) return false;
+    htc_error_t ret = htc_find_scoped(kv->t, hash, &ptr);
+    if (ret != HTC_OK) return false;  /* epoch already unpinned */
 
     htc_kv_entry_t *e = (htc_kv_entry_t *)(uintptr_t)ptr;
-    if (!keys_equal(key, klen, e->key, e->klen)) return false;
+    bool found = keys_equal(key, klen, e->key, e->klen);
 
-    if (val && vlen) {
-        size_t copy_len = e->vlen < *vlen ? e->vlen : *vlen;
-        memcpy(val, e->val, copy_len);
-        *vlen = e->vlen;
-    } else if (vlen) {
-        *vlen = e->vlen;
+    if (found) {
+        if (val && vlen) {
+            size_t copy_len = e->vlen < *vlen ? e->vlen : *vlen;
+            memcpy(val, e->val, copy_len);
+            *vlen = e->vlen;
+        } else if (vlen) {
+            *vlen = e->vlen;
+        }
     }
-    return true;
+    htc_epoch_unpin(kv->t->epoch);
+    return found;
 }
 
 /* ─── Remove ────────────────────────────────────────────────── */
@@ -166,14 +200,24 @@ bool htc_kv_remove(htc_kv_t *kv, const void *key, size_t klen) {
     if (!kv || !key) return false;
     uint64_t hash = kv_hash(key, klen);
 
-    /* Find first, verify key match, then remove */
+    /* Scoped find: epoch stays pinned through key comparison */
     uint64_t ptr = 0;
-    if (htc_find(kv->t, hash, &ptr) != HTC_OK) return false;
-    htc_kv_entry_t *e = (htc_kv_entry_t *)(uintptr_t)ptr;
-    if (!keys_equal(key, klen, e->key, e->klen)) return false;
+    htc_error_t ret = htc_find_scoped(kv->t, hash, &ptr);
+    if (ret != HTC_OK) return false;  /* epoch already unpinned */
 
-    htc_error_t ret = htc_remove(kv->t, hash);
-    return ret == HTC_OK;
+    htc_kv_entry_t *e = (htc_kv_entry_t *)(uintptr_t)ptr;
+    bool match = keys_equal(key, klen, e->key, e->klen);
+    htc_epoch_unpin(kv->t->epoch);
+    /* After unpin, e may no longer be safe to dereference */
+
+    if (!match) return false;
+
+    htc_error_t r = htc_remove(kv->t, hash);
+    if (r != HTC_OK) return false;
+
+    /* Defer free of entry via epoch reclamation */
+    htc_epoch_retire_custom(kv->t->epoch, kv_entry_retire_cb, e);
+    return true;
 }
 
 void htc_kv_set_filter(htc_kv_t *kv, const htc_amq_filter_t *amq) {

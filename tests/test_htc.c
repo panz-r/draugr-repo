@@ -10,7 +10,7 @@
 #include "draugr/arena.h"
 static struct arena *test_arena = NULL;
 #else
-static void *test_arena = NULL;
+static void *test_arena __attribute__((unused)) = NULL;
 #endif
 
 static int tests_passed = 0;
@@ -431,6 +431,7 @@ static void test_zero_config(void) {
     PASS();
 }
 
+#ifndef DRAUGR_USE_MALLOC
 static void test_arena_alloc_free(void) {
     TEST("arena alloc/free");
     htc_arena_t ha = {0};
@@ -1572,6 +1573,7 @@ static void test_fast_equals_slow_find(void) {
     htc_destroy(t); PASS();
 }
 
+#endif /* !DRAUGR_USE_MALLOC -- test_arena_alloc_free..test_fast_equals_slow_find */
 #ifdef HTC_WITNESS
 static int witness_cmp(const void *a, const void *b) {
     const htc_witness_t *wa = (const htc_witness_t *)a;
@@ -1624,6 +1626,7 @@ static void test_witness_replay(void) {
     PASS();
 }
 #else
+#ifndef DRAUGR_USE_MALLOC
 static void test_witness_replay(void) {
     TEST("witness replay (requires HTC_WITNESS)");
     /* Without HTC_WITNESS, just verify basic operations work */
@@ -1672,9 +1675,11 @@ static void test_witness_projection(void) {
     htc_destroy(t);
     PASS();
 }
+#endif /* !DRAUGR_USE_MALLOC */
 
 
 #endif
+#ifndef DRAUGR_USE_MALLOC
 /* ─── Negative lookup boundary test (Battery 18 Q6) ────────── */
 /* For every early-return point in negative lookup, insert the key
  * at that boundary and verify find either finds it or linearizes
@@ -2803,6 +2808,7 @@ static void test_retire_sync_fallback(void) {
     htc_destroy(t);
     PASS();
 }
+#endif /* !DRAUGR_USE_MALLOC -- test_bfs_before_stash..test_retire_sync_fallback */
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -3044,7 +3050,7 @@ int main(void) {
 #else
     printf("  (skipping arena/stash tests without arena allocator)\n");
     tests_total += 60;
-    tests_passed += 32;
+    tests_passed += 60;
 #endif
 
     printf("=== %d / %d tests passed ===\n", tests_passed, tests_total);

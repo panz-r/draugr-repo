@@ -47,7 +47,9 @@ static const ht_config_t default_cfg = {
 #define INS_UNIQUE 2
 
 static size_t bare_main_block_size(size_t capacity) {
-    return capacity * sizeof(uint64_t) + capacity * sizeof(uint32_t);
+    size_t elem = sizeof(uint64_t) + sizeof(uint32_t);
+    if (capacity > SIZE_MAX / elem) return 0;
+    return capacity * elem;
 }
 
 static void bare_main_block_init(ht_bare_t *b, uint8_t *block, size_t capacity) {
@@ -59,6 +61,7 @@ static void bare_main_block_init(ht_bare_t *b, uint8_t *block, size_t capacity) 
 
 static uint8_t *bare_alloc_main_block(size_t capacity) {
     size_t sz = bare_main_block_size(capacity);
+    if (sz == 0) return NULL;
     uint8_t *block = calloc(1, sz);
     if (!block) return NULL;
     memset(block + capacity * sizeof(uint64_t), 0xFF, capacity * sizeof(uint32_t));
@@ -85,6 +88,8 @@ bool bare_spill_grow(ht_bare_t *t) {
     size_t new_cap = old_cap ? old_cap * 2 : SPILL_INITIAL;
 
     size_t new_size = new_cap * (sizeof(uint64_t) + sizeof(uint32_t));
+    if (new_cap > 0 && new_size / new_cap != (sizeof(uint64_t) + sizeof(uint32_t)))
+        return false;
     uint8_t *new_block = malloc(new_size);
     if (!new_block) return false;
 
@@ -1149,6 +1154,21 @@ static void *kv_alloc(ht_table_t *t, size_t n) {
     return malloc(n);
 }
 
+static void kv_free(ht_table_t *t, ht_entry_t *e) {
+    if (!e->kv_ptr) return;
+    (void)t;
+#ifndef DRAUGR_USE_MALLOC
+    if (t->allocator) {
+        size_t total = ht_entry_key_storage(e->key_len) + e->val_len;
+        arena_free(t->allocator, e->kv_ptr, total);
+        e->kv_ptr = NULL;
+        return;
+    }
+#endif
+    free(e->kv_ptr);
+    e->kv_ptr = NULL;
+}
+
 // ============================================================================
 // High-Level Internal: Entry Management
 // ============================================================================
@@ -1208,8 +1228,7 @@ static bool update_entry_value(ht_table_t *t, uint32_t eidx,
     if (!data) return false;
     memcpy(data, key, key_len);
     memcpy((uint8_t *)data + klen_stor, value, value_len);
-    if (!t->allocator)
-        free(e->kv_ptr);
+    kv_free(t, e);
     e->val_len = (uint32_t)value_len;
     e->kv_ptr = (uint8_t *)data;
     return true;
@@ -1446,10 +1465,8 @@ ht_table_t *ht_create_with_arena(const ht_config_t *cfg,
 
 void ht_destroy(ht_table_t *t) {
   if (!t) return;
-  if (!t->allocator) {
-    for (size_t i = 0; i < t->entry_count; i++) {
-      free(t->entries[i].kv_ptr);
-    }
+  for (size_t i = 0; i < t->entry_count; i++) {
+    kv_free(t, &t->entries[i]);
   }
   if (!t->entries_in_block)
     free(t->entries);
@@ -1523,8 +1540,10 @@ static ht_insert_result_t do_insert_with_hash(ht_table_t *t, uint64_t hash,
             if (ctx.matches != ctx.stack_matches)
                 free(ctx.matches);
             if (!ok) return HT_INSERT_FAILED;
-            for (size_t i = 1; i < ctx.match_count; i++)
+            for (size_t i = 1; i < ctx.match_count; i++) {
+                kv_free(t, &t->entries[ctx.matches[i]]);
                 ht_bare_remove_val(&t->bare, hash, ctx.matches[i]);
+            }
             return HT_INSERT_UPDATE;
         }
         if (ctx.matches != ctx.stack_matches)
@@ -1762,8 +1781,10 @@ size_t ht_remove_with_hash(ht_table_t *t, uint64_t hash,
     ht_bare_find_all(&t->bare, hash, hl_key_scan_cb, &ctx);
 
     size_t removed = ctx.match_count;
-    for (size_t i = 0; i < ctx.match_count; i++)
+    for (size_t i = 0; i < ctx.match_count; i++) {
+        kv_free(t, &t->entries[ctx.matches[i]]);
         ht_bare_remove_val(&t->bare, hash, ctx.matches[i]);
+    }
 
     if (ctx.matches != ctx.stack_matches)
         free(ctx.matches);
@@ -1802,6 +1823,7 @@ size_t ht_remove_kv_with_hash(ht_table_t *t, uint64_t hash,
     size_t removed = 0;
     for (size_t i = 0; i < kctx.match_count; i++) {
         if (vals_match(t, kctx.matches[i], value, value_len)) {
+            kv_free(t, &t->entries[kctx.matches[i]]);
             ht_bare_remove_val(&t->bare, hash, kctx.matches[i]);
             removed++;
         }
@@ -1834,6 +1856,7 @@ bool ht_remove_kv_one_with_hash(ht_table_t *t, uint64_t hash,
 
     for (size_t i = 0; i < ctx.match_count; i++) {
         if (vals_match(t, ctx.matches[i], value, value_len)) {
+            kv_free(t, &t->entries[ctx.matches[i]]);
             ht_bare_remove_val(&t->bare, hash, ctx.matches[i]);
 
             if (t->bare.min_load_factor > 0 && t->bare.size > 0 &&
@@ -2022,7 +2045,7 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
 
 	if (!ok) {
 		for (size_t i = 0; i < tmp_entry_count; i++) {
-			if (!t->allocator) free(tmp_entries[i].kv_ptr);
+			kv_free(t, &tmp_entries[i]);
 		}
 		if (tmp_entries != tmp_entries_block_start)
 			free(tmp_entries);
@@ -2032,10 +2055,8 @@ static bool ht_rebuild(ht_table_t *t, size_t new_capacity) {
 
     bare_place_prophylactic_tombstones(&tmp_b);
 
-    if (!t->allocator) {
-        for (size_t i = 0; i < old_entry_count; i++) {
-            free(old_entries[i].kv_ptr);
-        }
+    for (size_t i = 0; i < old_entry_count; i++) {
+        kv_free(t, &old_entries[i]);
     }
   if (!old_entries_in_block)
     free(old_entries);

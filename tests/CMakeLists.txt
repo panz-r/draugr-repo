@@ -147,6 +147,16 @@ add_executable(test_htc_kv_property test_htc_kv_property.c)
 target_link_libraries(test_htc_kv_property draugr m)
 add_test(NAME htc_kv_property_tests COMMAND test_htc_kv_property)
 
+# htc_kv concurrency stress tests (ASan/TSan recommended)
+add_executable(test_htc_kv_stress test_htc_kv_stress.c)
+target_link_libraries(test_htc_kv_stress draugr m pthread)
+add_test(NAME htc_kv_stress_tests COMMAND test_htc_kv_stress)
+
+# htc concurrency tests — C1/C2/C3 (TSan recommended)
+add_executable(test_htc_concurrency test_htc_concurrency.c)
+target_link_libraries(test_htc_concurrency draugr m pthread)
+add_test(NAME htc_concurrency_tests COMMAND test_htc_concurrency)
+
 # These tests use --wrap to intercept stdlib allocators
 # In DRAUGR_USE_MALLOC mode, --wrap tests still work (they intercept real malloc)
 set(WRAP_TEST_COMMON ../src/ht.c ../src/ht_cache.c ../src/util.c)

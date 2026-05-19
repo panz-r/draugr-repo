@@ -83,17 +83,39 @@ bool ht_bare_iter_next(ht_bare_t *t, ht_iter_t *iter,
 // High-Level Table: key → value
 // ============================================================================
 
+// Ownership: key/value data passed to insert/upsert/unsert is copied into
+// internal storage owned by the table.  The caller retains ownership of the
+// original buffers.  When an entry is removed (remove, upsert-dedup, destroy,
+// clear), the table frees its internal copy.
+//
+// Iterator invalidation: pointers returned by ht_iter_next point into the
+// table's internal storage and become dangling after the entry is removed,
+// replaced by upsert (with a different value size), or after resize/compact/
+// clear/destroy.  Copy key data before removing if needed after the call.
+
 // ============================================================================
 // Lifecycle
 // ============================================================================
 
+// ht_create: allocate a table backed by malloc.
 ht_table_t *ht_create(const ht_config_t *cfg,
                        ht_hash_fn hash_fn, ht_eq_fn eq_fn,
                        void *user_ctx);
+
+// ht_create_with_arena: allocate a table backed by the given arena.
+// Internal kv storage is allocated via arena_alloc and freed via arena_free
+// on removal, destroy, and clear.
 ht_table_t *ht_create_with_arena(const ht_config_t *cfg,
                                     ht_hash_fn hash_fn, ht_eq_fn eq_fn,
                                     void *user_ctx, struct arena *arena);
+
+// ht_destroy: free all internal storage and the table itself.
+// With arena mode, each live entry's kv storage is returned via arena_free.
 void ht_destroy(ht_table_t *t);
+
+// ht_clear: remove all entries, keeping the table usable.
+// Malloc mode: frees each entry's kv storage individually.
+// Arena mode: calls arena_clear (reclaims all arena memory in bulk).
 void ht_clear(ht_table_t *t);
 
 // ============================================================================
@@ -114,7 +136,9 @@ ht_insert_result_t ht_insert_with_hash(ht_table_t *t, uint64_t hash,
                                       const void *key, size_t key_len,
                                       const void *value, size_t value_len);
 
-// ht_upsert: remove all for key, insert single value.
+// ht_upsert: replace all entries for key with a single new value.
+// If the key already exists, the old entry's kv storage is freed and
+// duplicates (from prior ht_insert) are removed and freed.
 // Returns HT_INSERT_FAILED on error, HT_INSERT_OK if new entry,
 // or HT_INSERT_UPDATE if replaced existing.
 ht_insert_result_t ht_upsert(ht_table_t *t, const void *key, size_t key_len,
@@ -168,6 +192,10 @@ const void *ht_find_kv_with_hash(const ht_table_t *t, uint64_t hash,
 // ============================================================================
 // Deletion
 // ============================================================================
+
+// All remove functions free the table's internal copy of the removed entry's
+// key+value storage.  The caller's key/value buffers (passed by pointer) are
+// not freed — only the table's copy.
 
 // ht_remove: remove ALL entries for key, return count removed.
 size_t ht_remove(ht_table_t *t, const void *key, size_t key_len);

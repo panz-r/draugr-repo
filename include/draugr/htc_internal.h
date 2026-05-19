@@ -422,10 +422,14 @@ typedef struct __attribute__((aligned(64))) {
 _Static_assert(sizeof(htc_shard_t) % 64 == 0, "htc_shard_t size must be a multiple of 64 bytes");
 
 /* ─── Retire node for deferred epoch-based free ──────────── */
+typedef void (*htc_retire_fn)(void *ctx);
+
 typedef struct htc_retire_node {
     uint32_t                    arena_idx;
     uint32_t                    shard_id;   /* which shard's arena owns this */
     uint64_t                    retire_epoch;
+    htc_retire_fn               retire_cb;  /* NULL = arena_free, non-NULL = custom */
+    void                       *retire_ctx; /* context for custom callback */
     struct htc_retire_node     *next;
 } htc_retire_node_t;
 
@@ -514,7 +518,8 @@ static inline htc_arena_t *htc_shard_arena(htc_shard_t *shards, uint32_t bucket,
     return &shards[htc_shard_of(bucket, sc)].arena;
 }
 
-/* ─── Debug invariants (always available) ─────────────────── */
+/* ─── Debug invariants (debug builds only) ────────────────── */
+#ifndef NDEBUG
 uint32_t htc_debug_check_ctrl(const htc_table_t *t);
 uint32_t htc_debug_recompute_remap(const htc_table_t *t);
 uint64_t htc_debug_check_duplicate_hash(const htc_table_t *t);
@@ -522,14 +527,13 @@ size_t   htc_debug_live_count(const htc_table_t *t);
 uint32_t htc_debug_verify_all(const htc_table_t *t);  /* composite: ctrl+remap+dup+placement */
 bool     htc_debug_slow_find(const htc_table_t *t, uint64_t hash,
                               uint64_t *out_value);    /* independent of ctrl/remap/cache hints */
-uint64_t htc_debug_checksum(const htc_table_t *t);  /* logical checksum (layout-independent) */
-#ifndef NDEBUG
-void     htc_debug_explain_hash(const htc_table_t *t, uint64_t hash);  /* diagnostic dump, noop in release */
-void     htc_debug_explain_epoch(const htc_table_t *t);  /* epoch blocker diagnostic, noop in release */
-void     htc_debug_explain_miss(const htc_table_t *t, uint64_t hash);  /* negative miss certificate, noop in release */
-uint32_t htc_debug_check_transient(const htc_table_t *t);  /* transient-state verifier, noop in release */
+void     htc_debug_explain_hash(const htc_table_t *t, uint64_t hash);
+void     htc_debug_explain_epoch(const htc_table_t *t);
+void     htc_debug_explain_miss(const htc_table_t *t, uint64_t hash);
+uint32_t htc_debug_check_transient(const htc_table_t *t);
+uint64_t htc_debug_checksum(const htc_table_t *t);
+htc_table_t *htc_debug_rebuild(const htc_table_t *t, uint32_t flags);
 #endif
-htc_table_t *htc_debug_rebuild(const htc_table_t *t, uint32_t flags);  /* canonical rebuild */
 
 /* ─── Performance counters (optional, gated by HTC_STATS) ─── */
 #ifdef HTC_STATS
@@ -711,6 +715,14 @@ static inline uint64_t htc_ctrl_load(const htc_bucket_meta_t *m) {
     return __atomic_load_n(&m->ctrl_tags, __ATOMIC_RELAXED);
 }
 
+static inline void htc_cpu_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("pause");
+#elif defined(__aarch64__)
+    __asm__ volatile("yield");
+#endif
+}
+
 static inline void htc_ctrl_set(htc_bucket_meta_t *m, unsigned i, uint8_t p) {
     uint64_t set = ((uint64_t)p) << (i * 8);
     uint64_t clr = ~(0xFFULL << (i * 8));
@@ -719,6 +731,7 @@ static inline void htc_ctrl_set(htc_bucket_meta_t *m, unsigned i, uint8_t p) {
     while (!__atomic_compare_exchange_n(&m->ctrl_tags, &old, desired,
                                         false, HTC_MO_RELEASE, __ATOMIC_RELAXED)) {
         desired = (old & clr) | set;
+        htc_cpu_relax();
     }
 }
 
@@ -729,6 +742,7 @@ static inline void htc_ctrl_clear(htc_bucket_meta_t *m, unsigned i) {
     while (!__atomic_compare_exchange_n(&m->ctrl_tags, &old, desired,
                                         false, HTC_MO_RELEASE, __ATOMIC_RELAXED)) {
         desired = old & clr;
+        htc_cpu_relax();
     }
 }
 
@@ -766,7 +780,7 @@ typedef enum {
 
 static inline void htc_spin_lock(htc_spinlock_t *lk) {
     while (__atomic_exchange_n(&lk->flag, 1, HTC_MO_ACQUIRE))
-        ;
+        htc_cpu_relax();
 }
 
 static inline void htc_spin_unlock(htc_spinlock_t *lk) {
@@ -780,8 +794,10 @@ static inline void htc_spin_unlock(htc_spinlock_t *lk) {
 
 static inline htc_seq_guard_t htc_bucket_seq_begin(htc_bucket_meta_t *m) {
     uint32_t old = __atomic_load_n(&m->seq, __ATOMIC_RELAXED);
-    while (old & HTC_SEQ_BUSY)
+    while (old & HTC_SEQ_BUSY) {
+        htc_cpu_relax();
         old = __atomic_load_n(&m->seq, HTC_MO_ACQUIRE);
+    }
     __atomic_store_n(&m->seq, old | HTC_SEQ_BUSY, HTC_MO_RELEASE);
     __atomic_thread_fence(HTC_MO_ACQ_REL);
     return (htc_seq_guard_t){ .old_seq = old };
@@ -806,6 +822,7 @@ static inline void htc_bucket_seq_end(htc_bucket_meta_t *m, htc_seq_guard_t g) {
 
 uint64_t htc_epoch_pin(htc_epoch_ctl_t *ep);
 void    htc_epoch_unpin(htc_epoch_ctl_t *ep);
+void    htc_epoch_retire_custom(htc_epoch_ctl_t *ep, htc_retire_fn cb, void *ctx);
 
 /* ============================================================================
  * Shard locking helpers (Phase 2)
@@ -980,6 +997,12 @@ static inline void htc_witness_record(uint8_t event, uint64_t hash,
 #endif
 
 htc_error_t htc_grow(htc_table_t *t, bool reseed);
+
+/* Scoped find: identical to htc_find but leaves epoch pinned on HTC_OK
+ * return.  Caller must call htc_epoch_unpin(t->epoch) when done with the
+ * returned value.  On non-OK returns, the epoch is already unpinned. */
+htc_error_t htc_find_scoped(const htc_table_t *t, uint64_t hash, uint64_t *out_value);
+
 int  htc_bucket_scan(htc_bucket_t *b, htc_bucket_meta_t *m,
                       htc_arena_t *a, uint64_t identity_hash,
                       uint16_t tag, htc_scan_mode_t mode);
