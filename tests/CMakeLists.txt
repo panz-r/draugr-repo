@@ -115,6 +115,59 @@ add_custom_target(htc-cbmc-mutation-remap
     USES_TERMINAL
 )
 
+# ─── RSQF CBMC harnesses ────────────────────────────────────────
+add_custom_target(cbmc_rsqf_layout
+    COMMAND cbmc -D__CBMC__ --unwind 10 --bounds-check --pointer-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_rsqf_layout.c --function main
+    COMMENT "CBMC: RSQF layout and allocation correctness"
+    USES_TERMINAL
+)
+add_custom_target(cbmc_rsqf_ops
+    COMMAND cbmc -D__CBMC__ --unwind 8 --bounds-check --pointer-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_rsqf_ops.c --function main
+    COMMENT "CBMC: RSQF insert/lookup/delete for small capacity"
+    USES_TERMINAL
+)
+add_custom_target(cbmc_rsqf_slot_is_free
+    COMMAND cbmc -D__CBMC__ --unwind 10 --bounds-check --pointer-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_rsqf_slot_is_free.c --function main
+    COMMENT "CBMC: RSQF slot_is_free matches reference model"
+    USES_TERMINAL
+)
+add_custom_target(cbmc_rsqf_rank_select
+    COMMAND cbmc -D__CBMC__ --unwind 12 --bounds-check --pointer-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_rsqf_rank_select.c --function main
+    COMMENT "CBMC: RSQF rank/select vs slow reference for 2-block bitvectors"
+    USES_TERMINAL
+)
+# ─── CQF CBMC harnesses ────────────────────────────────────────
+add_custom_target(cbmc_cqf_encode_decode
+    COMMAND cbmc -D__CBMC__ --unwind 6 --bounds-check --pointer-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_cqf_encode_decode.c --function main
+    COMMENT "CBMC: CQF encode/decode roundtrip and slot count consistency"
+    USES_TERMINAL
+)
+add_custom_target(cbmc_cqf_rem_zero
+    COMMAND cbmc -D__CBMC__ --unwind 8 --bounds-check --pointer-check
+            ${CMAKE_SOURCE_DIR}/tests/cbmc_cqf_rem_zero.c --function main
+    COMMENT "CBMC: CQF rem=0 insert/count/delete preserves neighbors"
+    USES_TERMINAL
+)
+add_custom_target(cbmc_cqf_all
+    COMMAND ${CMAKE_COMMAND} --build . --target cbmc_cqf_encode_decode
+    COMMAND ${CMAKE_COMMAND} --build . --target cbmc_cqf_rem_zero
+    COMMENT "Running all CQF CBMC harnesses"
+    USES_TERMINAL
+)
+
+add_custom_target(cbmc_rsqf_all
+    COMMAND ${CMAKE_COMMAND} --build . --target cbmc_rsqf_layout
+    COMMAND ${CMAKE_COMMAND} --build . --target cbmc_rsqf_ops
+    COMMAND ${CMAKE_COMMAND} --build . --target cbmc_rsqf_rank_select
+    COMMENT "Running all RSQF CBMC harnesses"
+    USES_TERMINAL
+)
+
 # Filter tests
 add_executable(test_bloom test_bloom.c)
 target_link_libraries(test_bloom draugr m)
@@ -123,6 +176,39 @@ add_test(NAME bloom_filter_tests COMMAND test_bloom)
 add_executable(test_vacuum test_vacuum.c)
 target_link_libraries(test_vacuum draugr m)
 add_test(NAME vacuum_filter_tests COMMAND test_vacuum)
+
+add_executable(test_rsqf test_rsqf.c)
+target_link_libraries(test_rsqf draugr m)
+add_test(NAME rsqf_filter_tests COMMAND test_rsqf)
+set_tests_properties(rsqf_filter_tests PROPERTIES TIMEOUT 300)
+
+add_executable(test_cqf test_cqf.c)
+target_link_libraries(test_cqf draugr m)
+add_test(NAME cqf_filter_tests COMMAND test_cqf)
+
+add_executable(test_expand test_expand.c)
+target_link_libraries(test_expand draugr m)
+add_test(NAME cqf_expand_tests COMMAND test_expand)
+
+add_executable(test_merge_hang test_merge_hang.c)
+target_link_libraries(test_merge_hang draugr m)
+add_test(NAME cqf_merge_hang COMMAND test_merge_hang)
+
+add_executable(test_collision test_collision.c)
+target_link_libraries(test_collision draugr m)
+add_test(NAME cqf_collision COMMAND test_collision)
+
+add_executable(test_fingerprint_oracle test_fingerprint_oracle.c)
+target_link_libraries(test_fingerprint_oracle draugr m)
+add_test(NAME fingerprint_oracle_tests COMMAND test_fingerprint_oracle)
+
+add_executable(test_random_diff test_random_diff.c)
+target_link_libraries(test_random_diff draugr m)
+add_test(NAME random_diff_tests COMMAND test_random_diff 42 10000)
+
+add_executable(test_rank_select test_rank_select.c)
+target_link_libraries(test_rank_select m)
+add_test(NAME rank_select_tests COMMAND test_rank_select)
 
 add_executable(test_amq test_amq.c)
 target_link_libraries(test_amq draugr m)

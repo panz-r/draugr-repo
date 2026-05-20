@@ -215,6 +215,8 @@ const htc_amq_filter_t *htc_get_filter(const htc_table_t *t);
 /* Convenience wrappers for built-in filter types */
 #include "draugr/cuckoo_filter.h"
 #include "draugr/vacuum_filter.h"
+#include "draugr/rsqf_filter.h"
+#include "draugr/cqf_filter.h"
 
 static inline bool htc_amq_cuckoo_insert(void *cf, uint64_t h) {
     return cuckoo_filter_insert((cuckoo_filter_t *)cf, h) == CUCKOO_OK;
@@ -241,6 +243,34 @@ static inline htc_amq_filter_t htc_amq_vacuum(vacuum_filter_t *vf) {
         .insert = htc_amq_vacuum_insert,
         .lookup = (bool (*)(void *, uint64_t))vacuum_filter_lookup,
         .delete = htc_amq_vacuum_delete };
+    return f;
+}
+
+static inline bool htc_amq_rsqf_insert(void *rf, uint64_t h) {
+    return rsqf_filter_insert((rsqf_filter_t *)rf, h) == RSQF_OK;
+}
+static inline bool htc_amq_rsqf_delete(void *rf, uint64_t h) {
+    return rsqf_filter_delete((rsqf_filter_t *)rf, h) == RSQF_OK;
+}
+static inline htc_amq_filter_t htc_amq_rsqf(rsqf_filter_t *rf) {
+    htc_amq_filter_t f = { .filter = rf,
+        .insert = htc_amq_rsqf_insert,
+        .lookup = (bool (*)(void *, uint64_t))rsqf_filter_lookup,
+        .delete = htc_amq_rsqf_delete };
+    return f;
+}
+
+static inline bool htc_amq_cqf_insert(void *cf, uint64_t h) {
+    return cqf_filter_insert((cqf_filter_t *)cf, h) == CQF_OK;
+}
+static inline bool htc_amq_cqf_delete(void *cf, uint64_t h) {
+    return cqf_filter_delete((cqf_filter_t *)cf, h) == CQF_OK;
+}
+static inline htc_amq_filter_t htc_amq_cqf(cqf_filter_t *cf) {
+    htc_amq_filter_t f = { .filter = cf,
+        .insert = htc_amq_cqf_insert,
+        .lookup = (bool (*)(void *, uint64_t))cqf_filter_lookup,
+        .delete = htc_amq_cqf_delete };
     return f;
 }
 

@@ -33,11 +33,11 @@ if(DRAUGR_USE_MALLOC)
     add_compile_options(-DDRAUGR_USE_MALLOC)
     message(STATUS "Building with DRAUGR_USE_MALLOC: using stdlib allocators (arena excluded)")
     set(DRAUGR_SOURCES src/ht.c src/ht_cache.c src/util.c src/htc.c src/htc_kv.c
-                       src/cuckoo_filter.c src/bloom_filter.c src/vacuum_filter.c)
+                       src/cuckoo_filter.c src/bloom_filter.c src/vacuum_filter.c src/rsqf_filter.c src/cqf_filter.c)
 else()
     message(STATUS "Building with arena allocator (default)")
     set(DRAUGR_SOURCES src/ht.c src/ht_cache.c src/util.c src/arena.c src/htc.c src/htc_kv.c
-                       src/cuckoo_filter.c src/bloom_filter.c src/vacuum_filter.c)
+                       src/cuckoo_filter.c src/bloom_filter.c src/vacuum_filter.c src/rsqf_filter.c src/cqf_filter.c)
 endif()
 
 add_library(draugr ${DRAUGR_SOURCES})
