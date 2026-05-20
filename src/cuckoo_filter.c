@@ -186,13 +186,19 @@ cuckoo_filter_t *cuckoo_filter_create(size_t capacity, uint8_t bucket_size,
         return NULL;
 
     size_t total_entries = (size_t)ceil((double)capacity / 0.95);
+    size_t entries_per_set = 512 / fp_bits;
     size_t num_buckets = next_power_of_2((total_entries + bucket_size - 1) / bucket_size);
     if (num_buckets < 1) num_buckets = 1;
 
-    size_t num_entries = num_buckets * bucket_size;
+    /* Cap num_buckets to largest power of two where derived values
+     * fit struct fields (uint32_t num_buckets/num_entries, uint16_t num_sets).
+     * Halving preserves the power-of-two invariant. */
+    while (num_buckets > (size_t)UINT32_MAX / 2 + 1 ||
+           num_buckets * bucket_size > UINT32_MAX ||
+           (num_buckets * bucket_size + entries_per_set - 1) / entries_per_set > UINT16_MAX)
+        num_buckets /= 2;
 
-    /* Compute entries per set */
-    size_t entries_per_set = 512 / fp_bits;
+    size_t num_entries = num_buckets * bucket_size;
     size_t num_sets = (num_entries + entries_per_set - 1) / entries_per_set;
 
     /* Single allocation: struct + table */
@@ -272,13 +278,21 @@ cuckoo_err_t cuckoo_filter_insert(cuckoo_filter_t *cf, uint64_t hash) {
 
     /* Slow path: both buckets full, must evict via cuckoo hashing */
     size_t i = ((i1 + i2) & 1) ? i1 : i2;
+    size_t evict_idx[256];
+    uint32_t evict_orig[256];
+    int evict_n = 0;
 
     for (uint8_t n = 0; n < cf->max_kicks; n++) {
         size_t base = i * cf->bucket_size;
-        size_t evict_slot = mix32(n) % cf->bucket_size;
+        size_t evict_slot = (size_t)((uint64_t)mix32(n) * cf->bucket_size >> 32);
+        size_t idx = base + evict_slot;
+        uint32_t temp = cf_get(cf, idx);
 
-        uint32_t temp = cf_get(cf, base + evict_slot);
-        cf_set_entry(cf, base + evict_slot, fp);
+        evict_idx[evict_n] = idx;
+        evict_orig[evict_n] = temp;
+        evict_n++;
+
+        cf_set_entry(cf, idx, fp);
         fp = temp;
 
         i = cuckoo_alt_index(i, fp, cf->bucket_mask);
@@ -290,6 +304,10 @@ cuckoo_err_t cuckoo_filter_insert(cuckoo_filter_t *cf, uint64_t hash) {
             return CUCKOO_OK;
         }
     }
+
+    /* Eviction chain failed — rollback all modifications */
+    for (int j = evict_n - 1; j >= 0; j--)
+        cf_set_entry(cf, evict_idx[j], evict_orig[j]);
 
     return CUCKOO_ERR_FULL;
 }
