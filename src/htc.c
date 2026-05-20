@@ -2826,9 +2826,11 @@ htc_error_t htc_upsert(htc_table_t *t, uint64_t hash, uint64_t value)
 
         /* Key not found under lock — release and insert.
          * htc_insert acquires its own shard locks and performs duplicate
-         * checking, so a concurrent insert for the same key is safe. */
+         * checking.  If a concurrent insert wins, retry the upsert. */
         if (t->shards) htc_unlock_shards(t->shards, s1, s2);
-        return htc_insert(t, hash, value);
+        htc_error_t ins = htc_insert(t, hash, value);
+        if (ins == HTC_ERR_DUPLICATE) continue;
+        return ins;
     }
     return HTC_ERR_PATHOLOGICAL;
 }

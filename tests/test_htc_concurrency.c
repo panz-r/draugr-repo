@@ -6,6 +6,7 @@
  *   C2: htc_find_scoped_epoch_race
  *   C3: htc_remove_oldgen_race
  *   R2: htc_upsert_epoch_pin_regression
+ *   R3: htc_upsert_duplicate_race (concurrent upsert same key)
  */
 
 #include "draugr/htc.h"
@@ -196,6 +197,40 @@ static void test_upsert_epoch_pin_regression(void) {
     printf("PASS\n");
 }
 
+/* ─── R3: Concurrent upsert same key (DUPLICATE race) ─────────── */
+
+static void *r3_upsert_worker(void *arg) {
+    c1_arg_t *a = (c1_arg_t *)arg;
+    for (int i = 0; i < a->ops; i++) {
+        htc_error_t ret = htc_upsert(a->t, hash_seq(42), (uint64_t)(a->id * 10000 + i));
+        assert(ret == HTC_OK);
+    }
+    return NULL;
+}
+
+static void test_upsert_duplicate_race(void) {
+    printf("  R3: concurrent upsert same key (4 threads × 5000) ... ");
+    htc_config_t cfg = {.initial_buckets = 16, .max_load_factor = 0.75};
+    htc_table_t *t = htc_create(&cfg);
+    assert(t);
+
+    int T = 4, OPS = 5000;
+    pthread_t threads[4];
+    c1_arg_t args[4];
+    for (int i = 0; i < T; i++) {
+        args[i] = (c1_arg_t){t, i, OPS};
+        pthread_create(&threads[i], NULL, r3_upsert_worker, &args[i]);
+    }
+    for (int i = 0; i < T; i++)
+        pthread_join(threads[i], NULL);
+
+    /* Verify exactly one entry exists for hash_seq(42) */
+    uint64_t val = 0;
+    assert(htc_find(t, hash_seq(42), &val) == HTC_OK);
+    htc_destroy(t);
+    printf("PASS\n");
+}
+
 /* ─── Main ─────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -206,6 +241,7 @@ int main(void) {
     test_find_scoped_epoch_race();    /* C2 */
     test_remove_oldgen_race();        /* C3 */
     test_upsert_epoch_pin_regression(); /* R2 */
+    test_upsert_duplicate_race();     /* R3 */
 
     printf("htc concurrency PASS\n");
     return 0;
