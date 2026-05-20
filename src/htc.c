@@ -774,7 +774,7 @@ retry:
 #endif
     {
         uint32_t s0 = __atomic_load_n(&m->seq, HTC_MO_ACQUIRE);
-        if (s0 & HTC_SEQ_BUSY) goto retry;
+        if (s0 & HTC_SEQ_BUSY) { htc_cpu_relax(); goto retry; }
 
         uint64_t ctrl       = __atomic_load_n(&m->ctrl_tags, __ATOMIC_RELAXED);
         uint64_t candidates = htc_match8(ctrl, want_p8);
@@ -793,13 +793,13 @@ retry:
             if (__atomic_load_n(&r->flags, HTC_MO_ACQUIRE) != 0) continue;
 
             uint32_t s1 = __atomic_load_n(&m->seq, HTC_MO_ACQUIRE);
-            if (s0 != s1 || (s1 & HTC_SEQ_BUSY)) goto retry;
+            if (s0 != s1 || (s1 & HTC_SEQ_BUSY)) { htc_cpu_relax(); goto retry; }
 
             return (int)i;
         }
 
         uint32_t s1 = __atomic_load_n(&m->seq, HTC_MO_ACQUIRE);
-        if (s0 != s1 || (s1 & HTC_SEQ_BUSY)) goto retry;
+        if (s0 != s1 || (s1 & HTC_SEQ_BUSY)) { htc_cpu_relax(); goto retry; }
     }
     return -1;
 }

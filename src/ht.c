@@ -797,6 +797,9 @@ bool ht_bare_remove_val(ht_bare_t *t, uint64_t hash, uint32_t val) {
 // ============================================================================
 
 bool bare_resize_table(ht_bare_t *t) {
+  if (t->resizing) return false;
+  t->resizing = true;
+
   size_t old_cap = t->capacity;
   uint64_t *old_hash_pd = t->hash_pd;
   uint32_t *old_vals = t->vals;
@@ -814,17 +817,18 @@ bool bare_resize_table(ht_bare_t *t) {
   memcpy(old_overflow_hash, t->overflow_hash_pd, old_overflow_len * sizeof(uint64_t));
   memcpy(old_overflow_vals, t->overflow_vals, old_overflow_len * sizeof(uint32_t));
 
-  if (t->size > SIZE_MAX / 2) return false;
+  if (t->size > SIZE_MAX / 2) { t->resizing = false; return false; }
   size_t new_capacity = next_pow2(t->size * 2);
   if (new_capacity < 4) new_capacity = 4;
   uint8_t *new_main_block = bare_alloc_main_block(new_capacity);
-  if (!new_main_block) return false;
+  if (!new_main_block) { t->resizing = false; return false; }
 
   size_t new_spill_cap = old_spill_len > SPILL_INITIAL ? old_spill_len : SPILL_INITIAL;
   size_t new_spill_size = new_spill_cap * (sizeof(uint64_t) + sizeof(uint32_t));
   uint8_t *new_spill_block = malloc(new_spill_size);
   if (!new_spill_block) {
     free(new_main_block);
+    t->resizing = false;
     return false;
   }
   memset(new_spill_block, 0, new_spill_cap * sizeof(uint64_t));
@@ -855,6 +859,7 @@ bool bare_resize_table(ht_bare_t *t) {
   free(old_main_block);
   if (!old_spill_in_block)
     free(old_spill_block);
+  t->resizing = false;
   return true;
 }
 
@@ -862,11 +867,7 @@ bool ht_bare_resize(ht_bare_t *t, size_t new_capacity) {
     if (!t) return false;
     size_t main_live = t->size - t->spill_len - t->overflow_len;
     if (new_capacity < main_live) return false;
-    if (t->resizing) return true;
-    t->resizing = true;
-    bool ok = bare_resize_table(t);
-    t->resizing = false;
-    return ok;
+    return bare_resize_table(t);
 }
 
 void ht_bare_compact(ht_bare_t *t) {
