@@ -185,23 +185,29 @@ cuckoo_filter_t *cuckoo_filter_create(size_t capacity, uint8_t bucket_size,
     if (fp_bits < CUCKOO_MIN_FINGERPRINT_BITS || fp_bits > CUCKOO_MAX_FINGERPRINT_BITS)
         return NULL;
 
+    /* Early reject: capacities > UINT32_MAX cannot fit in uint32_t fields.
+     * The overflow guard loop below handles finer-grained cases. */
+    if (capacity > UINT32_MAX)
+        return NULL;
+
     size_t total_entries = (size_t)ceil((double)capacity / 0.95);
     size_t entries_per_set = 512 / fp_bits;
     size_t num_buckets = next_power_of_2((total_entries + bucket_size - 1) / bucket_size);
     if (num_buckets < 1) num_buckets = 1;
 
     /* Cap num_buckets to largest power of two where derived values
-     * fit struct fields (uint32_t num_buckets/num_entries, uint16_t num_sets).
+     * fit struct fields (uint32_t num_buckets/num_entries).
      * Halving preserves the power-of-two invariant. */
     while (num_buckets > (size_t)UINT32_MAX / 2 + 1 ||
-           num_buckets * bucket_size > UINT32_MAX ||
-           (num_buckets * bucket_size + entries_per_set - 1) / entries_per_set > UINT16_MAX)
+           num_buckets * bucket_size > UINT32_MAX)
         num_buckets /= 2;
 
     size_t num_entries = num_buckets * bucket_size;
     size_t num_sets = (num_entries + entries_per_set - 1) / entries_per_set;
 
     /* Single allocation: struct + table */
+    if (num_sets > (SIZE_MAX - sizeof(cuckoo_filter_t)) / CUCKOO_SET_BYTES)
+        return NULL;
     size_t alloc_size = sizeof(cuckoo_filter_t) + num_sets * CUCKOO_SET_BYTES;
     cuckoo_filter_t *cf = (cuckoo_filter_t *)calloc(1, alloc_size);
     if (!cf) return NULL;
@@ -209,8 +215,8 @@ cuckoo_filter_t *cuckoo_filter_create(size_t capacity, uint8_t bucket_size,
     cf->num_entries = (uint32_t)num_entries;
     cf->count = 0;
     cf->num_buckets = (uint32_t)num_buckets;
-    cf->entries_per_set = (uint16_t)entries_per_set;
-    cf->num_sets = (uint16_t)num_sets;
+    cf->entries_per_set = (uint32_t)entries_per_set;
+    cf->num_sets = (uint32_t)num_sets;
     cf->fingerprint_bits = fp_bits;
     cf->bucket_size = bucket_size;
     cf->max_kicks = max_kicks;
@@ -284,7 +290,7 @@ cuckoo_err_t cuckoo_filter_insert(cuckoo_filter_t *cf, uint64_t hash) {
 
     for (uint8_t n = 0; n < cf->max_kicks; n++) {
         size_t base = i * cf->bucket_size;
-        size_t evict_slot = (size_t)((uint64_t)mix32(n) * cf->bucket_size >> 32);
+        size_t evict_slot = (size_t)((uint64_t)mix32(n ^ fp) * cf->bucket_size >> 32);
         size_t idx = base + evict_slot;
         uint32_t temp = cf_get(cf, idx);
 

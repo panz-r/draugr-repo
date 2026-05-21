@@ -67,9 +67,6 @@ extern "C" {
  *  (each entry fits within a uint64_t, at most 2 words per access). */
 #define VACUUM_MAX_FINGERPRINT_BITS 32
 
-/** Threshold for using the small-table alternate function */
-#define VACUUM_SMALL_TABLE_THRESHOLD (1 << 18)
-
 /** Bytes per cache-line set. Must be a power of 2. */
 #define VACUUM_SET_BYTES 64
 
@@ -103,12 +100,11 @@ typedef struct vacuum_filter {
     uint32_t  num_entries;         /* Total entry capacity */
     uint32_t  count;               /* Items currently stored */
     uint32_t  num_buckets;         /* Number of buckets (arbitrary, not power-of-2) */
-    uint16_t  entries_per_set;     /* Entries that fit in one 64-byte set */
-    uint16_t  num_sets;            /* Number of cache-line sets in table */
+    uint32_t  entries_per_set;     /* Entries that fit in one 64-byte set */
+    uint32_t  num_sets;            /* Number of cache-line sets in table */
     uint8_t   fingerprint_bits;    /* Bits per fingerprint (1-32) */
     uint8_t   bucket_size;         /* Entries per bucket */
     uint8_t   max_evicts;          /* Max eviction steps before declaring full */
-    uint8_t   use_small_table_alt; /* Use small-table alternate function */
 
     /* Multi-range alternate function parameters.
      * Four AR sizes determined by the RangeSelection algorithm.
@@ -128,9 +124,13 @@ typedef struct vacuum_filter {
  *
  * Single allocation: struct + table in one malloc.
  *
+ * Capacity limit: the internal table uses uint32_t fields for num_buckets
+ * and num_entries, so the maximum capacity is ~4B entries / bucket_size.
+ * Capacities that would overflow are rejected (returns NULL).
+ *
  * @param capacity     Expected maximum number of items
  * @param bucket_size  Entries per bucket (0 for default 4)
- * @param fp_bits      Fingerprint size in bits, 1-32 (0 for default 10)
+ * @param fp_bits      Fingerprint size in bits, 2-32 (0 for default 10)
  * @param max_evicts   Max eviction steps (0 for default 200)
  * @return             Pointer to allocated filter, or NULL on failure
  */
@@ -216,7 +216,7 @@ size_t vacuum_filter_memory_bytes(const vacuum_filter_t *vf);
 /** Get bits per item at current load */
 static inline double vacuum_filter_bits_per_item(const vacuum_filter_t *vf) {
     if (vf->count == 0) return 0.0;
-    return (double)(vf->num_entries * vf->fingerprint_bits) / (double)vf->count;
+    return (double)((uint64_t)vf->num_entries * vf->fingerprint_bits) / (double)vf->count;
 }
 
 /** Estimate false positive rate based on current parameters */

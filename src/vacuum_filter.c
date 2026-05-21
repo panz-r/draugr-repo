@@ -188,6 +188,7 @@ static size_t range_selection(size_t num_items, size_t bucket_size, double ratio
         double capacity = AR_CAPACITY_FACTOR * (double)(b * l);
 
         if (max_load < capacity) break;
+        if (l > SIZE_MAX / 2) break;
         l *= 2;
     }
 
@@ -218,6 +219,11 @@ vacuum_filter_t *vacuum_filter_create(size_t capacity, uint8_t bucket_size,
     if (max_evicts == 0) max_evicts = VACUUM_MAX_EVICTS;
 
     if (fp_bits < VACUUM_MIN_FINGERPRINT_BITS || fp_bits > VACUUM_MAX_FINGERPRINT_BITS)
+        return NULL;
+
+    /* Early reject: capacities > UINT32_MAX cannot fit in uint32_t num_entries.
+     * The overflow guard loop below handles finer-grained cases. */
+    if (capacity > UINT32_MAX)
         return NULL;
 
     /* Size the table for the expected capacity at ~95% load factor.
@@ -254,11 +260,9 @@ vacuum_filter_t *vacuum_filter_create(size_t capacity, uint8_t bucket_size,
     /* Cap num_buckets so derived values fit their struct fields:
      *   num_buckets  fits uint32_t
      *   num_entries  = num_buckets * bucket_size fits uint32_t
-     *   num_sets     = ceil(num_entries / entries_per_set) fits uint16_t
      * Halving preserves the power-of-two alignment with largest_ar. */
     while (num_buckets > UINT32_MAX ||
-           num_buckets * bucket_size > UINT32_MAX ||
-           (num_buckets * bucket_size + entries_per_set - 1) / entries_per_set > UINT16_MAX)
+           num_buckets * bucket_size > UINT32_MAX)
         num_buckets /= 2;
 
     if (num_buckets < 1) return NULL;
@@ -267,6 +271,8 @@ vacuum_filter_t *vacuum_filter_create(size_t capacity, uint8_t bucket_size,
     size_t num_sets = (num_entries + entries_per_set - 1) / entries_per_set;
 
     /* Single allocation: struct + table */
+    if (num_sets > (SIZE_MAX - sizeof(vacuum_filter_t)) / VACUUM_SET_BYTES)
+        return NULL;
     size_t alloc_size = sizeof(vacuum_filter_t) + num_sets * VACUUM_SET_BYTES;
     vacuum_filter_t *vf = (vacuum_filter_t *)calloc(1, alloc_size);
     if (!vf) return NULL;
@@ -274,12 +280,11 @@ vacuum_filter_t *vacuum_filter_create(size_t capacity, uint8_t bucket_size,
     vf->num_entries = (uint32_t)num_entries;
     vf->count = 0;
     vf->num_buckets = (uint32_t)num_buckets;
-    vf->entries_per_set = (uint16_t)entries_per_set;
-    vf->num_sets = (uint16_t)num_sets;
+    vf->entries_per_set = (uint32_t)entries_per_set;
+    vf->num_sets = (uint32_t)num_sets;
     vf->fingerprint_bits = fp_bits;
     vf->bucket_size = bucket_size;
     vf->max_evicts = max_evicts;
-    vf->use_small_table_alt = 0;
 
     for (int i = 0; i < VACUUM_NUM_AR; i++)
         vf->ar[i] = ar[i];
@@ -407,7 +412,7 @@ vacuum_err_t vacuum_filter_insert(vacuum_filter_t *vf, uint64_t hash)
         }
 
         /* Lookahead failed, fall back to standard eviction */
-        size_t evict_slot = (size_t)((uint64_t)mix32(n) * vf->bucket_size >> 32);
+        size_t evict_slot = (size_t)((uint64_t)mix32(n ^ fp) * vf->bucket_size >> 32);
         size_t idx = base + evict_slot;
         uint32_t temp = vf_get(vf, idx);
 

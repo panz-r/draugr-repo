@@ -100,12 +100,14 @@ typedef struct cuckoo_filter {
     uint32_t  num_entries;
     uint32_t  count;
     uint32_t  num_buckets;
-    uint16_t  entries_per_set;
-    uint16_t  num_sets;
+    uint32_t  entries_per_set;
+    uint32_t  num_sets;
     uint8_t   fingerprint_bits;
     uint8_t   bucket_size;
     uint8_t   max_kicks;
+    uint8_t   _pad;           /* explicit padding for 8-byte table alignment */
     uint32_t  bucket_mask;
+    uint32_t  _reserved;      /* pad struct to 32 bytes for 8-byte table alignment */
 
     /* uint64_t table[num_sets][CUCKOO_SET_WORDS] follows in memory */
 } cuckoo_filter_t;
@@ -118,6 +120,10 @@ typedef struct cuckoo_filter {
  * Create a new cuckoo filter.
  *
  * Single allocation: struct + table in one malloc.
+ *
+ * Capacity limit: the internal table uses uint32_t fields for num_buckets
+ * and num_entries, so the maximum capacity is ~4B entries / bucket_size.
+ * Capacities that would overflow are rejected (returns NULL).
  *
  * @param capacity     Expected maximum number of items
  * @param bucket_size  Entries per bucket (1-16), or 0 for default (4)
@@ -203,7 +209,7 @@ size_t cuckoo_filter_memory_bytes(const cuckoo_filter_t *cf);
 /** Get bits per item at current load */
 static inline double cuckoo_filter_bits_per_item(const cuckoo_filter_t *cf) {
     if (cf->count == 0) return 0.0;
-    return (double)(cf->num_entries * cf->fingerprint_bits) / (double)cf->count;
+    return (double)((uint64_t)cf->num_entries * cf->fingerprint_bits) / (double)cf->count;
 }
 
 /** Estimate false positive rate based on current parameters */
