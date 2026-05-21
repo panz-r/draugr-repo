@@ -148,31 +148,33 @@ size_t vacuum_hash_index(uint64_t hash, size_t num_buckets)
  * two candidate buckets close together (good cache locality). Items with
  * large ARs can reach farther across the table (avoid fingerprint gathering).
  *
- * For small tables (< 2^18 items), we use a different alternate function
- * that provides better distribution without the RangeSelection overhead.
+ * The table is divided into chunks of size L (the AR). Within each chunk,
+ * XOR-based indexing is used: alt = chunk_start + (offset ^ delta).
+ * num_buckets is always a multiple of the largest AR so all chunks are full.
  * ============================================================================ */
 
 size_t vacuum_alt_index(const vacuum_filter_t *vf, size_t current_index, uint32_t fingerprint)
 {
-    if (vf->use_small_table_alt) {
-        size_t delta = (size_t)mix32(fingerprint) % vf->num_buckets;
-        size_t bp = (current_index + vf->num_buckets - delta) % vf->num_buckets;
-        bp = (vf->num_buckets - 1 - bp + delta) % vf->num_buckets;
-        return bp;
-    }
-
     size_t l = vf->ar[fingerprint % VACUUM_NUM_AR];
-    size_t delta = (size_t)mix32(fingerprint) % l;
-    return current_index ^ delta;
+    if (l <= 1) return current_index;
+    size_t delta = (size_t)(mix32(fingerprint) % (l - 1)) + 1;
+    size_t chunk_start = (current_index / l) * l;
+    size_t offset = current_index - chunk_start;
+    return chunk_start + (offset ^ delta);
 }
 
 /* ============================================================================
- * AR size selection (RangeSelection algorithm)
+ * AR size selection (RangeSelection algorithm, Wang et al. PVLDB 2019 §4.2)
  * ============================================================================ */
 
-static size_t range_selection(size_t num_items, double target_load, double ratio)
+/* Usable capacity per chunk as a fraction of b*L. The paper uses 0.97
+ * to leave headroom for the Chernoff-bound tail. */
+#define AR_CAPACITY_FACTOR 0.97
+
+static size_t range_selection(size_t num_items, size_t bucket_size, double ratio)
 {
-    size_t b = VACUUM_DEFAULT_BUCKET_SIZE;
+    const double target_load = 0.95;
+    size_t b = bucket_size;
     size_t m = (size_t)ceil((double)num_items / (b * target_load));
     size_t n = (size_t)(ratio * (double)num_items);
 
@@ -183,7 +185,7 @@ static size_t range_selection(size_t num_items, double target_load, double ratio
 
         double avg = (double)n / (double)c;
         double max_load = avg + 1.5 * sqrt(2.0 * avg * log((double)c));
-        double capacity = 0.97 * (double)(b * l);
+        double capacity = AR_CAPACITY_FACTOR * (double)(b * l);
 
         if (max_load < capacity) break;
         l *= 2;
@@ -192,17 +194,14 @@ static size_t range_selection(size_t num_items, double target_load, double ratio
     return l;
 }
 
-static void compute_ar_sizes(vacuum_filter_t *vf, size_t num_items)
+static void compute_ar_sizes(size_t ar[VACUUM_NUM_AR], size_t num_items,
+                             size_t bucket_size)
 {
-    double target_load = 0.95;
-
     for (int i = 0; i < VACUUM_NUM_AR; i++) {
         double ratio = 1.0 - (double)i / (double)VACUUM_NUM_AR;
-        vf->ar[i] = range_selection(num_items, target_load, ratio);
-        if (vf->ar[i] < 1) vf->ar[i] = 1;
+        ar[i] = range_selection(num_items, bucket_size, ratio);
+        if (ar[i] < 2) ar[i] = 2;
     }
-
-    vf->ar[VACUUM_NUM_AR - 1] *= 2;
 }
 
 /* ============================================================================
@@ -226,10 +225,45 @@ vacuum_filter_t *vacuum_filter_create(size_t capacity, uint8_t bucket_size,
     size_t num_buckets = (size_t)ceil((double)capacity / (bucket_size * 0.95));
     if (num_buckets < 1) num_buckets = 1;
 
-    size_t num_entries = num_buckets * bucket_size;
-
     /* Compute entries per set: max entries that fit in 64 bytes (512 bits) */
     size_t entries_per_set = 512 / fp_bits;
+
+    /* Compute AR sizes, then cap to largest power of 2 <= num_buckets.
+     * Round num_buckets up to a multiple of the largest AR so that all
+     * chunks are full and XOR-based alternate indexing stays in bounds. */
+    size_t ar[VACUUM_NUM_AR];
+    compute_ar_sizes(ar, capacity, bucket_size);
+
+    size_t ar_cap = num_buckets;
+    {
+        size_t c = ar_cap;
+        c |= c >> 1; c |= c >> 2; c |= c >> 4;
+        c |= c >> 8; c |= c >> 16; c |= c >> 32;
+        ar_cap = c - (c >> 1);   /* largest power of 2 <= num_buckets */
+    }
+    for (int i = 0; i < VACUUM_NUM_AR; i++) {
+        if (ar[i] > ar_cap) ar[i] = ar_cap;
+        if (ar[i] < 2) ar[i] = 2;
+    }
+
+    size_t largest_ar = 0;
+    for (int i = 0; i < VACUUM_NUM_AR; i++)
+        if (ar[i] > largest_ar) largest_ar = ar[i];
+    num_buckets = ((num_buckets + largest_ar - 1) / largest_ar) * largest_ar;
+
+    /* Cap num_buckets so derived values fit their struct fields:
+     *   num_buckets  fits uint32_t
+     *   num_entries  = num_buckets * bucket_size fits uint32_t
+     *   num_sets     = ceil(num_entries / entries_per_set) fits uint16_t
+     * Halving preserves the power-of-two alignment with largest_ar. */
+    while (num_buckets > UINT32_MAX ||
+           num_buckets * bucket_size > UINT32_MAX ||
+           (num_buckets * bucket_size + entries_per_set - 1) / entries_per_set > UINT16_MAX)
+        num_buckets /= 2;
+
+    if (num_buckets < 1) return NULL;
+
+    size_t num_entries = num_buckets * bucket_size;
     size_t num_sets = (num_entries + entries_per_set - 1) / entries_per_set;
 
     /* Single allocation: struct + table */
@@ -245,9 +279,10 @@ vacuum_filter_t *vacuum_filter_create(size_t capacity, uint8_t bucket_size,
     vf->fingerprint_bits = fp_bits;
     vf->bucket_size = bucket_size;
     vf->max_evicts = max_evicts;
-    vf->use_small_table_alt = (capacity < VACUUM_SMALL_TABLE_THRESHOLD);
+    vf->use_small_table_alt = 0;
 
-    compute_ar_sizes(vf, capacity);
+    for (int i = 0; i < VACUUM_NUM_AR; i++)
+        vf->ar[i] = ar[i];
 
     return vf;
 }
@@ -329,8 +364,31 @@ vacuum_err_t vacuum_filter_insert(vacuum_filter_t *vf, uint64_t hash)
         return VACUUM_OK;
     }
 
-    /* Both buckets full. BFS-lookahead */
+    /* Both buckets full. BFS-lookahead: check both candidates for a 2-step
+     * insertion (move an existing fp to its empty alternate, take its slot). */
+    for (int which = 0; which < 2; which++) {
+        size_t b = which ? b2 : b1;
+        size_t base = b * vf->bucket_size;
+        for (size_t i = 0; i < vf->bucket_size; i++) {
+            uint32_t fp_in_slot = vf_get(vf, base + i);
+            if (fp_in_slot == 0) continue;
+
+            size_t alt = vacuum_alt_index(vf, b, fp_in_slot);
+            int alt_slot = find_empty_slot(vf, alt);
+            if (alt_slot >= 0) {
+                vf_set_entry(vf, alt * vf->bucket_size + (size_t)alt_slot, fp_in_slot);
+                vf_set_entry(vf, base + i, fp);
+                vf->count++;
+                return VACUUM_OK;
+            }
+        }
+    }
+
+    /* Lookahead failed. Eviction with rollback. */
     size_t b = ((b1 + b2) & 1) ? b1 : b2;
+    size_t evict_idx[256];
+    uint32_t evict_orig[256];
+    int evict_n = 0;
 
     for (uint8_t n = 0; n < vf->max_evicts; n++) {
         size_t base = b * vf->bucket_size;
@@ -349,10 +407,15 @@ vacuum_err_t vacuum_filter_insert(vacuum_filter_t *vf, uint64_t hash)
         }
 
         /* Lookahead failed, fall back to standard eviction */
-        size_t evict_slot = mix32(n) % vf->bucket_size;
+        size_t evict_slot = (size_t)((uint64_t)mix32(n) * vf->bucket_size >> 32);
+        size_t idx = base + evict_slot;
+        uint32_t temp = vf_get(vf, idx);
 
-        uint32_t temp = vf_get(vf, base + evict_slot);
-        vf_set_entry(vf, base + evict_slot, fp);
+        evict_idx[evict_n] = idx;
+        evict_orig[evict_n] = temp;
+        evict_n++;
+
+        vf_set_entry(vf, idx, fp);
         fp = temp;
 
         b = vacuum_alt_index(vf, b, fp);
@@ -364,6 +427,10 @@ vacuum_err_t vacuum_filter_insert(vacuum_filter_t *vf, uint64_t hash)
             return VACUUM_OK;
         }
     }
+
+    /* Eviction chain failed — rollback all modifications */
+    for (int i = evict_n - 1; i >= 0; i--)
+        vf_set_entry(vf, evict_idx[i], evict_orig[i]);
 
     return VACUUM_ERR_FULL;
 }

@@ -60,8 +60,8 @@ extern "C" {
 /** Number of alternate ranges in the multi-range design */
 #define VACUUM_NUM_AR 4
 
-/** Minimum fingerprint size (must be >= 1) */
-#define VACUUM_MIN_FINGERPRINT_BITS 1
+/** Minimum fingerprint size. 1-bit would force all fps to 1 (100% FPR). */
+#define VACUUM_MIN_FINGERPRINT_BITS 2
 
 /** Maximum fingerprint size. Capped at 32 to keep bit-packing simple
  *  (each entry fits within a uint64_t, at most 2 words per access). */
